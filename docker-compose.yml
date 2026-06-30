@@ -1,0 +1,19 @@
+services:
+  invest-ingest:
+    build: ./ingest
+    container_name: invest-ingest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://invest:investpass@10.10.10.201:5432/invest
+      INGEST_INTERVAL: "3600"
+
+  invest-api:
+    build: ./api
+    container_name: invest-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://invest:investpass@10.10.10.201:5432/invest
+    ports:
+      - "8100:8100"

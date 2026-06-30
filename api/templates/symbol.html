@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>{{ symbol }} — Invest</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f1117; color: #e0e0e0; padding: 24px; }
+  a { color: #4f8ef7; text-decoration: none; }
+  h1 { font-size: 1.4rem; font-weight: 700; color: #fff; margin-bottom: 4px; }
+  .back { font-size: .85rem; color: #666; margin-bottom: 20px; display: block; }
+  .stats { display: flex; gap: 24px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; padding: 14px 20px; }
+  .stat label { font-size: .75rem; color: #666; display: block; margin-bottom: 4px; }
+  .stat span { font-size: 1.1rem; font-weight: 700; }
+  .chart-box { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 10px; padding: 20px; margin-bottom: 24px; }
+  .chart-box h2 { font-size: .9rem; color: #888; margin-bottom: 12px; }
+  canvas { width: 100% !important; }
+  .news-item { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; padding: 12px 16px; margin-bottom: 8px; }
+  .news-item a { color: #4f8ef7; font-size: .9rem; }
+  .news-item .meta { font-size: .75rem; color: #666; margin-top: 4px; }
+  .up { color: #3ecf6e; } .down { color: #f75f5f; }
+  table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  th { text-align: left; padding: 8px 12px; color: #666; font-weight: 500; border-bottom: 1px solid #2a2d3a; }
+  td { padding: 8px 12px; border-bottom: 1px solid #1e2130; }
+  tr:hover td { background: #1e2130; }
+</style>
+</head>
+<body>
+<a class="back" href="/">← Dashboard</a>
+<h1 id="sym-title">{{ symbol }}</h1>
+
+<div class="stats" id="stats"></div>
+
+<div class="chart-box">
+  <h2>Price (30 days)</h2>
+  <canvas id="price-chart" height="80"></canvas>
+</div>
+
+<div class="chart-box">
+  <h2>Volume</h2>
+  <canvas id="vol-chart" height="40"></canvas>
+</div>
+
+<div class="chart-box">
+  <h2>Recent News</h2>
+  <div id="news"></div>
+</div>
+
+<script>
+const symbol = "{{ symbol }}";
+
+async function load() {
+  const [priceRes, newsRes] = await Promise.all([
+    fetch(`/api/prices/${symbol}?days=30`),
+    fetch(`/api/news/${symbol}?limit=15`)
+  ]);
+  const prices = await priceRes.json();
+  const news = await newsRes.json();
+
+  // Stats
+  if (prices.length) {
+    const last = prices[prices.length - 1];
+    const prev = prices[prices.length - 2] || last;
+    const pct = ((last.close - prev.close) / prev.close * 100).toFixed(2);
+    const dir = pct >= 0 ? 'up' : 'down';
+    document.getElementById('stats').innerHTML = `
+      <div class="stat"><label>Last Close</label><span>$${parseFloat(last.close).toFixed(2)}</span></div>
+      <div class="stat"><label>Day Change</label><span class="${dir}">${pct >= 0 ? '▲' : '▼'} ${Math.abs(pct)}%</span></div>
+      <div class="stat"><label>Open</label><span>$${parseFloat(last.open).toFixed(2)}</span></div>
+      <div class="stat"><label>High</label><span>$${parseFloat(last.high).toFixed(2)}</span></div>
+      <div class="stat"><label>Low</label><span>$${parseFloat(last.low).toFixed(2)}</span></div>
+      <div class="stat"><label>Volume</label><span>${Number(last.volume).toLocaleString()}</span></div>`;
+  }
+
+  // Price chart
+  const labels = prices.map(r => new Date(r.ts).toLocaleDateString());
+  const closes = prices.map(r => r.close);
+  const color = closes[closes.length-1] >= closes[0] ? '#3ecf6e' : '#f75f5f';
+  new Chart(document.getElementById('price-chart'), {
+    type: 'line',
+    data: { labels, datasets: [{ label: 'Close', data: closes, borderColor: color, backgroundColor: color + '18', fill: true, borderWidth: 2, pointRadius: 2, tension: 0.3 }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#555', maxTicksLimit: 8 }, grid: { color: '#1e2130' } }, y: { ticks: { color: '#555' }, grid: { color: '#1e2130' } } } }
+  });
+
+  // Volume chart
+  new Chart(document.getElementById('vol-chart'), {
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Volume', data: prices.map(r => r.volume), backgroundColor: '#4f8ef740' }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#555', maxTicksLimit: 8 }, grid: { color: '#1e2130' } }, y: { ticks: { color: '#555' }, grid: { color: '#1e2130' } } } }
+  });
+
+  // News
+  const newsEl = document.getElementById('news');
+  if (!news.length) {
+    newsEl.innerHTML = '<p style="color:#555;font-size:.85rem">No news yet — add Finnhub API key to enable.</p>';
+    return;
+  }
+  newsEl.innerHTML = news.map(n => `
+    <div class="news-item">
+      <a href="${n.url}" target="_blank">${n.headline}</a>
+      <div class="meta">${n.source} · ${new Date(n.published_at).toLocaleString()}</div>
+    </div>`).join('');
+}
+
+load();
+</script>
+</body>
+</html>

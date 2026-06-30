@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Invest Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f1117; color: #e0e0e0; padding: 24px; }
+  h1 { font-size: 1.4rem; font-weight: 600; color: #fff; }
+  h2 { font-size: 1rem; font-weight: 600; color: #aaa; margin: 28px 0 12px; }
+  .account-bar { display: flex; gap: 14px; margin: 16px 0 28px; flex-wrap: wrap; }
+  .acct-stat { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; padding: 12px 20px; flex: 1; min-width: 130px; }
+  .acct-stat label { font-size: .72rem; color: #555; display: block; margin-bottom: 3px; text-transform: uppercase; letter-spacing: .05em; }
+  .acct-stat span { font-size: 1.05rem; font-weight: 700; }
+  /* Positions table */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .87rem; }
+  thead th { text-align: left; padding: 9px 14px; color: #555; font-weight: 500; border-bottom: 1px solid #2a2d3a; white-space: nowrap; }
+  tbody td { padding: 9px 14px; border-bottom: 1px solid #181b25; white-space: nowrap; }
+  tbody tr:hover td { background: #1e2130; }
+  .no-data { color: #555; font-size: .85rem; padding: 16px 0; }
+  /* Watchlist cards */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(255px, 1fr)); gap: 14px; }
+  .card { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 10px; padding: 18px; cursor: pointer; transition: border-color .15s; }
+  .card:hover { border-color: #4f8ef7; }
+  .card h3 { font-size: 1rem; font-weight: 700; color: #fff; }
+  .card .date { font-size: .73rem; color: #555; margin-bottom: 8px; }
+  .card .price { font-size: 1.35rem; font-weight: 700; }
+  .card .change { font-size: .82rem; margin-top: 3px; }
+  .mini-chart { margin-top: 12px; height: 52px; }
+  /* Buttons */
+  .btn { display: inline-block; padding: 5px 14px; border-radius: 5px; font-size: .8rem; font-weight: 600; cursor: pointer; border: none; transition: opacity .15s; }
+  .btn:hover { opacity: .85; }
+  .btn-buy { background: #1a3a28; color: #3ecf6e; }
+  .btn-sell { background: #3a1a1a; color: #f75f5f; }
+  .btn-primary { background: #4f8ef7; color: #fff; padding: 8px 20px; font-size: .9rem; }
+  .btn-ghost { background: transparent; color: #666; border: 1px solid #2a2d3a; padding: 7px 18px; font-size: .9rem; }
+  /* Trade modal */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 12px; padding: 28px; width: 360px; max-width: 95vw; }
+  .modal h3 { font-size: 1.1rem; font-weight: 700; margin-bottom: 6px; }
+  .modal .subtitle { font-size: .82rem; color: #666; margin-bottom: 20px; }
+  .form-row { margin-bottom: 16px; }
+  .form-row label { display: block; font-size: .78rem; color: #666; margin-bottom: 5px; text-transform: uppercase; letter-spacing: .05em; }
+  .form-row input, .form-row select { width: 100%; background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; padding: 9px 12px; color: #e0e0e0; font-size: .9rem; }
+  .form-row input:focus, .form-row select:focus { outline: none; border-color: #4f8ef7; }
+  .modal-actions { display: flex; gap: 10px; margin-top: 22px; }
+  .modal-actions .btn { flex: 1; text-align: center; padding: 10px; font-size: .9rem; }
+  .toast { position: fixed; bottom: 24px; right: 24px; background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; padding: 14px 20px; font-size: .88rem; z-index: 200; display: none; }
+  .toast.show { display: block; }
+  .toast.success { border-color: #3ecf6e; color: #3ecf6e; }
+  .toast.error { border-color: #f75f5f; color: #f75f5f; }
+  /* Proposals */
+  .proposal-card { background: #1a1d27; border: 1px solid #4f8ef755; border-radius: 8px; padding: 14px 18px; margin-bottom: 10px; display: flex; align-items: center; gap: 16px; }
+  .proposal-card .prop-info { flex: 1; }
+  .proposal-card .prop-info strong { font-size: .95rem; }
+  .proposal-card .prop-meta { font-size: .78rem; color: #666; margin-top: 3px; }
+  .proposal-card .prop-actions { display: flex; gap: 8px; }
+  /* News */
+  .news-item { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; padding: 11px 15px; margin-bottom: 7px; }
+  .news-item a { color: #4f8ef7; text-decoration: none; font-size: .87rem; }
+  .news-item .meta { font-size: .72rem; color: #555; margin-top: 3px; }
+  .up { color: #3ecf6e; } .down { color: #f75f5f; }
+  .badge { display: inline-block; font-size: .7rem; padding: 2px 7px; border-radius: 4px; font-weight: 600; }
+  .badge.up { background: #1a3a28; color: #3ecf6e; }
+  .badge.down { background: #3a1a1a; color: #f75f5f; }
+</style>
+</head>
+<body>
+
+<!-- Trade modal -->
+<div class="modal-overlay" id="trade-modal">
+  <div class="modal">
+    <h3 id="modal-title">Buy / Sell</h3>
+    <div class="subtitle" id="modal-subtitle"></div>
+    <div class="form-row">
+      <label>Symbol</label>
+      <input id="modal-symbol" type="text" placeholder="AAPL" style="text-transform:uppercase">
+    </div>
+    <div class="form-row">
+      <label>Side</label>
+      <select id="modal-side">
+        <option value="buy">Buy</option>
+        <option value="sell">Sell</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Shares</label>
+      <input id="modal-qty" type="number" min="0.001" step="any" placeholder="10">
+    </div>
+    <div class="form-row">
+      <label>Notes (optional)</label>
+      <input id="modal-notes" type="text" placeholder="Manual override — reason">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitTrade()">Submit Order</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<h1>Invest Dashboard</h1>
+
+<!-- Account bar -->
+<div class="account-bar">
+  <div class="acct-stat"><label>Portfolio Value</label><span id="acct-equity">—</span></div>
+  <div class="acct-stat"><label>Cash</label><span id="acct-cash">—</span></div>
+  <div class="acct-stat"><label>Buying Power</label><span id="acct-bp">—</span></div>
+  <div class="acct-stat"><label>Unrealized P&L</label><span id="acct-upl">—</span></div>
+  <div style="display:flex;align-items:center;margin-left:auto">
+    <button class="btn btn-primary" onclick="openModal()">+ New Trade</button>
+  </div>
+</div>
+
+<!-- Model proposals -->
+<div id="proposals-section" style="display:none">
+  <h2>Proposed Trades <span style="font-size:.75rem;color:#4f8ef7;font-weight:400">(model suggestions awaiting your decision)</span></h2>
+  <div id="proposals-list"></div>
+</div>
+
+<!-- Positions -->
+<h2>Positions</h2>
+<div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th>Symbol</th><th>Shares</th><th>Avg Cost</th><th>Current</th>
+      <th>Market Value</th><th>Cost Basis</th><th>Unrealized P&L</th><th>Return</th><th></th>
+    </tr></thead>
+    <tbody id="positions-body"><tr><td colspan="9" class="no-data">Loading…</td></tr></tbody>
+  </table>
+</div>
+
+<!-- Watchlist -->
+<h2>Watchlist</h2>
+<div class="grid" id="cards"></div>
+
+<!-- Recent trades -->
+<h2>Trade History</h2>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Status</th><th>Shares</th><th>Price</th><th>Value</th><th>Source</th><th>Notes</th></tr></thead>
+    <tbody id="trades-body"><tr><td colspan="9" class="no-data">Loading…</td></tr></tbody>
+  </table>
+</div>
+
+<!-- News -->
+<h2>Recent News</h2>
+<div id="news-feed"></div>
+
+<script>
+const fmt = (n, dec=2) => n == null ? '—' : Number(n).toLocaleString('en-US', {minimumFractionDigits:dec, maximumFractionDigits:dec});
+const fmtUSD = n => n == null ? '—' : '$' + fmt(n);
+
+// ── Modal ─────────────────────────────────────────────────────────
+function openModal(symbol='', side='buy') {
+  document.getElementById('modal-symbol').value = symbol;
+  document.getElementById('modal-side').value = side;
+  document.getElementById('modal-qty').value = '';
+  document.getElementById('modal-notes').value = '';
+  document.getElementById('modal-title').textContent = symbol ? `${side === 'buy' ? 'Buy' : 'Sell'} ${symbol}` : 'New Trade';
+  document.getElementById('modal-subtitle').textContent = 'Manual trade — logged with source: manual';
+  document.getElementById('trade-modal').classList.add('open');
+  document.getElementById('modal-qty').focus();
+}
+function closeModal() { document.getElementById('trade-modal').classList.remove('open'); }
+document.getElementById('trade-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
+
+async function submitTrade() {
+  const symbol = document.getElementById('modal-symbol').value.trim().toUpperCase();
+  const side = document.getElementById('modal-side').value;
+  const qty = parseFloat(document.getElementById('modal-qty').value);
+  const notes = document.getElementById('modal-notes').value.trim();
+  if (!symbol || !qty || qty <= 0) { showToast('Fill in symbol and shares.', 'error'); return; }
+
+  try {
+    const r = await fetch('/api/trade', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({symbol, side, qty, notes, source:'manual'})
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || 'Order failed');
+    closeModal();
+    showToast(`${side.toUpperCase()} ${qty} ${symbol} — order submitted (${data.status})`, 'success');
+    setTimeout(() => { loadAccount(); loadPositions(); loadTrades(); }, 1500);
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+function showToast(msg, type='success') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast show ${type}`;
+  setTimeout(() => t.className = 'toast', 4000);
+}
+
+// ── Proposals ─────────────────────────────────────────────────────
+async function loadProposals() {
+  const proposals = await fetch('/api/proposals').then(r => r.json());
+  const section = document.getElementById('proposals-section');
+  const list = document.getElementById('proposals-list');
+  if (!proposals.length) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+  list.innerHTML = proposals.map(p => `
+    <div class="proposal-card">
+      <div class="prop-info">
+        <strong>${p.side.toUpperCase()} ${p.qty} ${p.symbol}</strong>
+        <div class="prop-meta">${p.rationale || 'No rationale provided'} · Score: ${p.signal_score ?? '—'}</div>
+      </div>
+      <div class="prop-actions">
+        <button class="btn btn-buy" onclick="decideProposal(${p.id},'approved')">Approve</button>
+        <button class="btn btn-sell" onclick="decideProposal(${p.id},'rejected')">Reject</button>
+      </div>
+    </div>`).join('');
+}
+
+async function decideProposal(id, decision) {
+  const reason = decision === 'rejected' ? prompt('Reason for rejection (optional):') : null;
+  await fetch(`/api/proposals/${id}`, {
+    method: 'PATCH',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({decision, rejection_reason: reason})
+  });
+  showToast(`Proposal ${decision}`, decision === 'approved' ? 'success' : 'error');
+  loadProposals(); loadPositions(); loadTrades();
+}
+
+// ── Account ───────────────────────────────────────────────────────
+async function loadAccount() {
+  try {
+    const a = await fetch('/api/account').then(r => r.json());
+    document.getElementById('acct-equity').textContent = fmtUSD(a.equity);
+    document.getElementById('acct-cash').textContent = fmtUSD(a.cash);
+    document.getElementById('acct-bp').textContent = fmtUSD(a.buying_power);
+  } catch(e) {}
+}
+
+// ── Positions ─────────────────────────────────────────────────────
+async function loadPositions() {
+  const tbody = document.getElementById('positions-body');
+  try {
+    const positions = await fetch('/api/positions').then(r => r.json());
+    let totalUPL = 0;
+    if (!positions.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="no-data">No open positions — all cash.</td></tr>';
+      document.getElementById('acct-upl').textContent = '$0.00';
+      document.getElementById('acct-upl').className = '';
+      return;
+    }
+    tbody.innerHTML = positions.map(p => {
+      totalUPL += p.unrealized_pl;
+      const dir = p.unrealized_pl >= 0 ? 'up' : 'down';
+      const arrow = p.unrealized_pl >= 0 ? '▲' : '▼';
+      return `<tr>
+        <td><a href="/symbol/${p.symbol}" style="color:#4f8ef7;font-weight:600;text-decoration:none">${p.symbol}</a></td>
+        <td>${fmt(p.qty, p.qty % 1 === 0 ? 0 : 4)}</td>
+        <td>${fmtUSD(p.avg_entry_price)}</td>
+        <td>${fmtUSD(p.current_price)}</td>
+        <td>${fmtUSD(p.market_value)}</td>
+        <td>${fmtUSD(p.cost_basis)}</td>
+        <td class="${dir}">${arrow} ${fmtUSD(Math.abs(p.unrealized_pl))}</td>
+        <td><span class="badge ${dir}">${arrow} ${Math.abs(p.unrealized_plpc)}%</span></td>
+        <td style="display:flex;gap:6px">
+          <button class="btn btn-buy" onclick="openModal('${p.symbol}','buy')">Buy</button>
+          <button class="btn btn-sell" onclick="openModal('${p.symbol}','sell')">Sell</button>
+        </td>
+      </tr>`;
+    }).join('');
+    const uplEl = document.getElementById('acct-upl');
+    uplEl.className = totalUPL >= 0 ? 'up' : 'down';
+    uplEl.textContent = (totalUPL >= 0 ? '+' : '-') + fmtUSD(Math.abs(totalUPL));
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="9" class="no-data" style="color:#f75f5f">${e.message}</td></tr>`;
+  }
+}
+
+// ── Trade history ─────────────────────────────────────────────────
+async function loadTrades() {
+  const tbody = document.getElementById('trades-body');
+  try {
+    const trades = await fetch('/api/trades?limit=20').then(r => r.json());
+    if (!trades.length) { tbody.innerHTML = '<tr><td colspan="8" class="no-data">No trades yet.</td></tr>'; return; }
+    const sourceLabel = { manual: '👤 Manual', model_approved: '🤖 Model', auto: '⚡ Auto' };
+    const statusBadge = s => {
+      const map = {
+        filled:           '<span style="color:#3ecf6e">✓ Filled</span>',
+        accepted:         '<span style="color:#888">⏳ Pending</span>',
+        new:              '<span style="color:#888">⏳ Pending</span>',
+        pending_new:      '<span style="color:#888">⏳ Pending</span>',
+        partially_filled: '<span style="color:#f0a500">◑ Partial</span>',
+        canceled:         '<span style="color:#f75f5f">✕ Cancelled</span>',
+        expired:          '<span style="color:#f75f5f">✕ Expired</span>',
+        replaced:         '<span style="color:#888">↺ Replaced</span>',
+      };
+      return map[s] || ('<span style="color:#555">' + s + '</span>');
+    };
+    tbody.innerHTML = trades.map(t => {
+      const dir = t.side === 'buy' ? 'up' : 'down';
+      return `<tr>
+        <td style="color:#555">${new Date(t.traded_at).toLocaleString()}</td>
+        <td><a href="/symbol/${t.symbol}" style="color:#4f8ef7;text-decoration:none">${t.symbol}</a></td>
+        <td class="${dir}" style="font-weight:600">${t.side.toUpperCase()}</td>
+        <td>${fmt(t.qty, t.qty % 1 === 0 ? 0 : 4)}</td>
+        <td>${t.price ? fmtUSD(t.price) : '—'}</td>
+        <td>${t.notional ? fmtUSD(t.notional) : '—'}</td>
+        <td style="color:#666;font-size:.8rem">${sourceLabel[t.source] || t.source}</td>
+        <td style="color:#555;font-size:.8rem">${t.notes || ''}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) { tbody.innerHTML = `<tr><td colspan="8" class="no-data">${e.message}</td></tr>`; }
+}
+
+// ── Watchlist cards ───────────────────────────────────────────────
+async function loadSummary() {
+  const data = await fetch('/api/summary').then(r => r.json());
+  const grid = document.getElementById('cards');
+  grid.innerHTML = '';
+  for (const row of data) {
+    const pct = row.day_pct ?? 0;
+    const dir = pct >= 0 ? 'up' : 'down';
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <h3>${row.symbol}</h3>
+      <div class="date">${new Date(row.as_of).toLocaleDateString()}</div>
+      <div class="price">$${fmt(row.price)}</div>
+      <div class="change ${dir}">${pct >= 0 ? '▲' : '▼'} ${Math.abs(pct)}%</div>
+      <div class="mini-chart"><canvas id="chart-${row.symbol}"></canvas></div>`;
+    card.onclick = () => window.location = `/symbol/${row.symbol}`;
+    grid.appendChild(card);
+    loadMiniChart(row.symbol);
+  }
+}
+
+async function loadMiniChart(symbol) {
+  const data = await fetch(`/api/prices/${symbol}?days=14`).then(r => r.json());
+  const prices = data.map(r => r.close);
+  const color = prices[prices.length-1] >= prices[0] ? '#3ecf6e' : '#f75f5f';
+  new Chart(document.getElementById(`chart-${symbol}`), {
+    type: 'line',
+    data: { labels: data.map(r => ''), datasets: [{ data: prices, borderColor: color, borderWidth: 1.5, pointRadius: 0, tension: 0.3 }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { display: false } }, animation: false }
+  });
+}
+
+// ── News ──────────────────────────────────────────────────────────
+async function loadNews() {
+  const watchlist = await fetch('/api/watchlist').then(r => r.json());
+  const allNews = [];
+  for (const w of watchlist) {
+    const items = await fetch(`/api/news/${w.symbol}?limit=5`).then(r => r.json());
+    items.forEach(n => { n._symbol = w.symbol; allNews.push(n); });
+  }
+  allNews.sort((a,b) => new Date(b.published_at) - new Date(a.published_at));
+  const feed = document.getElementById('news-feed');
+  if (!allNews.length) { feed.innerHTML = '<p style="color:#555;font-size:.85rem">No news yet — add Finnhub API key to enable.</p>'; return; }
+  feed.innerHTML = allNews.slice(0,20).map(n => `
+    <div class="news-item">
+      <a href="${n.url}" target="_blank">${n.headline}</a>
+      <div class="meta">${n._symbol} · ${n.source} · ${new Date(n.published_at).toLocaleString()}</div>
+    </div>`).join('');
+}
+
+// ── Init ──────────────────────────────────────────────────────────
+loadAccount(); loadPositions(); loadProposals(); loadSummary(); loadTrades(); loadNews();
+setInterval(() => { loadAccount(); loadPositions(); loadProposals(); }, 60000);
+</script>
+</body>
+</html>
