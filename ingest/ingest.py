@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scheduled ingest: price history, news, and order reconciliation."""
+"""Scheduled ingest: price history, news, order reconciliation, and universe scan."""
 
 import os, time, logging
 import psycopg2
@@ -7,6 +7,7 @@ import requests
 from datetime import datetime, timezone
 
 from signals import compute_signals
+from scanner import seed_universe, scan_universe, promote_demote
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ ALPACA_SECRET = os.environ.get("ALPACA_API_SECRET", "")
 ALPACA_BASE = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
 INTERVAL_SECONDS = int(os.environ.get("INGEST_INTERVAL", "3600"))
+UNIVERSE_SCAN_INTERVAL = int(os.environ.get("UNIVERSE_SCAN_INTERVAL", "14400"))  # 4 hours
 YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; invest-agent/1.0)"}
 
 TERMINAL_STATUSES = {"filled", "canceled", "expired", "replaced"}
@@ -108,7 +110,6 @@ def ingest_news(conn, symbols):
 
 
 def reconcile_orders(conn):
-    """Check pending/accepted trades against Alpaca and update fill data."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT id, order_id FROM trades
@@ -143,17 +144,33 @@ def reconcile_orders(conn):
     conn.commit()
 
 
-def run_once():
-    conn = get_db()
+def get_positions():
     try:
-        symbols = get_watchlist(conn)
-        log.info(f"Watchlist: {symbols}")
-        ingest_prices(conn, symbols)
-        ingest_news(conn, symbols)
-        compute_signals(conn, symbols)
-        reconcile_orders(conn)
-    finally:
-        conn.close()
+        r = requests.get(f"{ALPACA_BASE}/v2/positions", headers=ALPACA_HEADERS, timeout=10)
+        r.raise_for_status()
+        return {p["symbol"]: p for p in r.json()}
+    except Exception as e:
+        log.warning(f"Could not fetch positions: {e}")
+        return {}
+
+
+def run_once(conn, last_universe_scan):
+    symbols = get_watchlist(conn)
+    log.info(f"Watchlist ({len(symbols)} symbols): {symbols}")
+    ingest_prices(conn, symbols)
+    ingest_news(conn, symbols)
+    compute_signals(conn, symbols)
+    reconcile_orders(conn)
+
+    # Universe scan runs on its own slower interval
+    now = time.time()
+    if now - last_universe_scan >= UNIVERSE_SCAN_INTERVAL:
+        log.info("Starting universe scan...")
+        positions = get_positions()
+        candidates = scan_universe(conn)
+        promote_demote(conn, positions, candidates)
+        return now  # updated timestamp
+    return last_universe_scan
 
 
 if __name__ == "__main__":
@@ -166,18 +183,26 @@ if __name__ == "__main__":
     conn.close()
     log.info("Schema ready")
 
-    # Reconcile immediately on startup to catch anything that filled while we were down
+    # Startup tasks
+    conn = get_db()
     try:
-        conn = get_db()
+        seed_universe(conn)
         reconcile_orders(conn)
-        conn.close()
     except Exception as e:
-        log.warning(f"Startup reconcile failed: {e}")
+        log.warning(f"Startup tasks failed: {e}")
+    finally:
+        conn.close()
+
+    # Trigger universe scan immediately on first run
+    last_universe_scan = 0
 
     while True:
+        conn = get_db()
         try:
-            run_once()
+            last_universe_scan = run_once(conn, last_universe_scan)
         except Exception as e:
             log.error(f"Ingest cycle failed: {e}")
+        finally:
+            conn.close()
         log.info(f"Sleeping {INTERVAL_SECONDS}s")
         time.sleep(INTERVAL_SECONDS)

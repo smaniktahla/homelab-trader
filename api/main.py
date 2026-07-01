@@ -249,6 +249,41 @@ def decide_proposal(proposal_id: int, body: ProposalDecision):
     return {"status": "ok", "decision": body.decision}
 
 
+# ── Universe / Leaderboard ───────────────────────────────────────────────────
+
+@app.get("/api/leaderboard")
+def get_leaderboard(limit: int = 30, side: str = "both"):
+    with db() as conn, conn.cursor() as cur:
+        if side == "buy":
+            order_col = "buy_score"
+        elif side == "sell":
+            order_col = "sell_score"
+        else:
+            order_col = "GREATEST(buy_score, sell_score)"
+        cur.execute(f"""
+            SELECT u.symbol, u.price, u.rsi, u.buy_score, u.sell_score, u.regime, u.scanned_at,
+                   w.symbol IS NOT NULL AS on_watchlist,
+                   w.pinned
+            FROM universe_scan u
+            LEFT JOIN watchlist w ON w.symbol = u.symbol
+            WHERE GREATEST(u.buy_score, u.sell_score) > 0
+            ORDER BY {order_col} DESC
+            LIMIT %s
+        """, (limit,))
+        return cur.fetchall()
+
+@app.get("/api/universe/stats")
+def get_universe_stats():
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS total FROM universe")
+        total = cur.fetchone()["total"]
+        cur.execute("SELECT COUNT(*) AS scanned FROM universe_scan WHERE scanned_at > NOW() - INTERVAL '6 hours'")
+        scanned = cur.fetchone()["scanned"]
+        cur.execute("SELECT MAX(scanned_at) AS last_scan FROM universe_scan")
+        last_scan = cur.fetchone()["last_scan"]
+        return {"total": total, "scanned_recently": scanned, "last_scan": last_scan}
+
+
 # ── Signal parameters ────────────────────────────────────────────────────────
 
 @app.get("/api/signal-params")
