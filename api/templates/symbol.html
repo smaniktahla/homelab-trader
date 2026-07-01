@@ -111,12 +111,14 @@
     </div>
 
     <!-- Signal history -->
-    <div class="card">
-      <h2 style="margin-top:0">Recent Signals</h2>
-      <table>
-        <thead><tr><th>Time</th><th>Type</th><th>Score</th></tr></thead>
-        <tbody id="signals-body"><tr><td colspan="3" class="no-data">Loading…</td></tr></tbody>
-      </table>
+    <div class="card" style="display:flex;flex-direction:column">
+      <h2 style="margin-top:0;margin-bottom:8px">Recent Signals</h2>
+      <div style="overflow-y:auto;max-height:200px">
+        <table>
+          <thead><tr><th>Time</th><th>Type</th><th>Score</th></tr></thead>
+          <tbody id="signals-body"><tr><td colspan="3" class="no-data">Loading…</td></tr></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -126,12 +128,25 @@
     <div class="no-data">Loading…</div>
   </div>
 
-  <!-- Trade History for this symbol -->
-  <h2>Trade History</h2>
-  <table>
-    <thead><tr><th>Time</th><th>Side</th><th>Status</th><th>Shares</th><th>Price/Share</th><th>Total</th><th>Source</th></tr></thead>
-    <tbody id="sym-trades-body"><tr><td colspan="7" class="no-data">Loading…</td></tr></tbody>
-  </table>
+  <!-- Trading Actions -->
+  <h2>Trading Actions</h2>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table id="sym-trades-table" style="display:none">
+      <thead>
+        <tr>
+          <th>Date &amp; Time</th>
+          <th>Side</th>
+          <th>Shares</th>
+          <th>Price / Share</th>
+          <th>Total Value</th>
+          <th>Status</th>
+          <th>Source</th>
+        </tr>
+      </thead>
+      <tbody id="sym-trades-body"></tbody>
+    </table>
+    <div id="sym-trades-empty" class="no-data">No trades for this symbol</div>
+  </div>
 </div>
 
 <!-- Trade Modal -->
@@ -246,8 +261,9 @@ async function loadChart(days, btn) {
       const label = new Date(t.traded_at).toLocaleDateString('en-US', {month:'short', day:'numeric'});
       const y = t.price || priceByLabel[label];
       if (!y) return;
-      if (t.side === 'buy') { buyPoints.push({x: label, y}); buyLabels.push(`Bought ${t.qty} @ $${parseFloat(y).toFixed(2)}`); }
-      else                  { sellPoints.push({x: label, y}); sellLabels.push(`Sold ${t.qty} @ $${parseFloat(y).toFixed(2)}`); }
+      const dt = new Date(t.traded_at).toLocaleString('en-US', {month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit'});
+      if (t.side === 'buy') { buyPoints.push({x: label, y}); buyLabels.push(`▲ Bought ${t.qty} @ $${parseFloat(y).toFixed(2)}  ·  ${dt}`); }
+      else                  { sellPoints.push({x: label, y}); sellLabels.push(`▼ Sold ${t.qty} @ $${parseFloat(y).toFixed(2)}  ·  ${dt}`); }
     });
 
     if (priceChart) priceChart.destroy();
@@ -337,20 +353,34 @@ async function loadNews() {
 
 async function loadTrades() {
   const tbody = document.getElementById('sym-trades-body');
+  const table = document.getElementById('sym-trades-table');
+  const empty = document.getElementById('sym-trades-empty');
   try {
     const trades = await fetch('/api/trades?limit=200').then(r => r.json());
     const sym_trades = trades.filter(t => t.symbol === SYMBOL);
-    if (!sym_trades.length) { tbody.innerHTML = '<tr><td colspan="7" class="no-data">No trades for this symbol</td></tr>'; return; }
-    const sourceLabel = { manual: '👤', model_approved: '🤖', auto: '⚡' };
-    tbody.innerHTML = sym_trades.map(t => `<tr>
-      <td style="color:#555">${new Date(t.traded_at).toLocaleString()}</td>
-      <td class="${t.side === 'buy' ? 'up' : 'down'}" style="font-weight:600">${t.side.toUpperCase()}</td>
-      <td style="font-size:.8rem">${t.status}</td>
-      <td>${fmt(t.qty, t.qty % 1 === 0 ? 0 : 4)}</td>
-      <td>${t.price ? fmtUSD(t.price) : '—'}</td>
-      <td>${t.notional ? fmtUSD(t.notional) : '—'}</td>
-      <td>${sourceLabel[t.source] || t.source}</td>
-    </tr>`).join('');
+    if (!sym_trades.length) { empty.style.display = 'block'; table.style.display = 'none'; return; }
+    const sourceLabel = { manual: '👤 Manual', model_approved: '🤖 Model', auto: '⚡ Auto' };
+    const statusColor = { filled: '#3ecf6e', accepted: '#4f8ef7', pending_new: '#f7c94f', new: '#888', canceled: '#555', rejected: '#f75f5f' };
+    tbody.innerHTML = sym_trades.map(t => {
+      const dt = new Date(t.traded_at).toLocaleString('en-US', {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: 'numeric', minute: '2-digit', second: '2-digit'
+      });
+      const sideClass = t.side === 'buy' ? 'up' : 'down';
+      const sideLabel = t.side === 'buy' ? '▲ BUY' : '▼ SELL';
+      const sc = statusColor[t.status] || '#888';
+      return `<tr>
+        <td style="color:#aaa;font-size:.82rem;white-space:nowrap">${dt}</td>
+        <td class="${sideClass}" style="font-weight:700;letter-spacing:.03em">${sideLabel}</td>
+        <td style="text-align:right">${fmt(t.qty, t.qty % 1 === 0 ? 0 : 4)}</td>
+        <td style="text-align:right">${t.price ? fmtUSD(t.price) : '—'}</td>
+        <td style="text-align:right;font-weight:600">${t.notional ? fmtUSD(t.notional) : '—'}</td>
+        <td><span style="font-size:.74rem;padding:2px 7px;border-radius:4px;background:${sc}22;color:${sc};font-weight:600">${t.status}</span></td>
+        <td style="color:#555;font-size:.8rem">${sourceLabel[t.source] || t.source}</td>
+      </tr>`;
+    }).join('');
+    empty.style.display = 'none';
+    table.style.display = 'table';
   } catch(e) {}
 }
 
