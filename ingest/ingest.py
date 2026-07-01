@@ -293,14 +293,12 @@ def send_digest(conn):
         if proposals:
             whatsapp_msg += f"\n⚡ {len(proposals)} pending proposal(s) — check dashboard"
         try:
-            requests.post(f"{ATQ_URL}/tasks", json={
-                "type": "escalate_user",
-                "instructions": whatsapp_msg,
-                "assigned_to": "hermes-ai2",
-            }, timeout=5)
-            log.info("WhatsApp digest queued via ATQ")
+            requests.post(f"{ATQ_URL}/whatsapp/send", json={
+                "message": whatsapp_msg,
+            }, timeout=10)
+            log.info("WhatsApp digest sent via ATQ proxy")
         except Exception as e:
-            log.warning(f"ATQ WhatsApp ping failed: {e}")
+            log.warning(f"WhatsApp send failed: {e}")
 
     except Exception as e:
         log.error(f"Digest failed: {e}")
