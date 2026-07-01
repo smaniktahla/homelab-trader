@@ -10,8 +10,38 @@ import requests
 log = logging.getLogger(__name__)
 
 YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; invest-agent/1.0)"}
-PROPOSAL_THRESHOLD = 65   # score >= this creates a trade proposal
-LOG_THRESHOLD = 30        # score >= this gets logged to signals table
+
+# Defaults — overridden at runtime by signal_params table
+DEFAULTS = {
+    "rsi_period": 14,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "rsi_strong_oversold": 25,
+    "rsi_strong_overbought": 75,
+    "bb_period": 20,
+    "bb_std": 2.0,
+    "score_log_min": 30,
+    "score_proposal_min": 65,
+    "regime_sma_fast": 50,
+    "regime_sma_slow": 200,
+    "regime_band": 0.02,
+}
+
+
+def load_params(conn):
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT key, value FROM signal_params")
+            rows = cur.fetchall()
+        params = dict(DEFAULTS)
+        for row in rows:
+            k = row[0] if isinstance(row, (list, tuple)) else row["key"]
+            v = float(row[1] if isinstance(row, (list, tuple)) else row["value"])
+            params[k] = v
+        return params
+    except Exception as e:
+        log.warning(f"Could not load signal_params, using defaults: {e}")
+        return dict(DEFAULTS)
 
 
 def fetch_closes(symbol, yf_range="1y"):
@@ -27,7 +57,8 @@ def fetch_closes(symbol, yf_range="1y"):
     return closes
 
 
-def compute_rsi(closes, period=14):
+def compute_rsi(closes, period):
+    period = int(period)
     if len(closes) < period + 2:
         return None
     gains, losses = [], []
@@ -46,7 +77,8 @@ def compute_rsi(closes, period=14):
     return 100.0 - (100.0 / (1.0 + rs))
 
 
-def compute_bollinger(closes, period=20, num_std=2.0):
+def compute_bollinger(closes, period, num_std):
+    period = int(period)
     if len(closes) < period:
         return None, None, None
     window = closes[-period:]
@@ -56,42 +88,49 @@ def compute_bollinger(closes, period=20, num_std=2.0):
     return sma + num_std * std, sma, sma - num_std * std
 
 
-def detect_regime(closes):
-    """trending_up / trending_down / ranging / unknown based on 50/200 SMA cross."""
-    if len(closes) < 200:
-        if len(closes) < 50:
+def detect_regime(closes, fast, slow, band):
+    fast, slow = int(fast), int(slow)
+    if len(closes) < slow:
+        if len(closes) < fast:
             return "unknown"
-        sma50 = sum(closes[-50:]) / 50
+        sma_fast = sum(closes[-fast:]) / fast
         current = closes[-1]
-        return "trending_up" if current > sma50 * 1.01 else "trending_down" if current < sma50 * 0.99 else "ranging"
-    sma50 = sum(closes[-50:]) / 50
-    sma200 = sum(closes[-200:]) / 200
-    if sma50 > sma200 * 1.02:
+        if current > sma_fast * (1 + band):
+            return "trending_up"
+        elif current < sma_fast * (1 - band):
+            return "trending_down"
+        return "ranging"
+    sma_fast = sum(closes[-fast:]) / fast
+    sma_slow = sum(closes[-slow:]) / slow
+    if sma_fast > sma_slow * (1 + band):
         return "trending_up"
-    elif sma50 < sma200 * 0.98:
+    elif sma_fast < sma_slow * (1 - band):
         return "trending_down"
     return "ranging"
 
 
-def score_signal(rsi, price, bb_upper, bb_lower, regime, side):
+def score_signal(rsi, price, bb_upper, bb_lower, regime, side, p):
     """Return (score 0-100, rationale string) for a given side."""
     score = 0.0
     parts = []
+    oversold = p["rsi_oversold"]
+    overbought = p["rsi_overbought"]
+    strong_oversold = p["rsi_strong_oversold"]
+    strong_overbought = p["rsi_strong_overbought"]
 
     if side == "buy":
         if rsi is not None:
-            if rsi < 25:
-                score += 45; parts.append(f"RSI {rsi:.1f} deeply oversold")
-            elif rsi < 30:
-                score += 35; parts.append(f"RSI {rsi:.1f} oversold")
-            elif rsi < 35:
+            if rsi < strong_oversold:
+                score += 45; parts.append(f"RSI {rsi:.1f} deeply oversold (<{strong_oversold})")
+            elif rsi < oversold:
+                score += 35; parts.append(f"RSI {rsi:.1f} oversold (<{oversold})")
+            elif rsi < oversold + 5:
                 score += 20; parts.append(f"RSI {rsi:.1f} near oversold")
 
         if bb_lower is not None:
-            pct_below = (bb_lower - price) / bb_lower
             if price <= bb_lower:
                 score += 35; parts.append(f"Price ${price:.2f} below lower BB ${bb_lower:.2f}")
-            elif pct_below > -0.01:
+            elif (bb_lower - price) / bb_lower > -0.01:
                 score += 20; parts.append(f"Price ${price:.2f} near lower BB ${bb_lower:.2f}")
 
         if regime == "ranging":
@@ -103,18 +142,17 @@ def score_signal(rsi, price, bb_upper, bb_lower, regime, side):
 
     else:  # sell
         if rsi is not None:
-            if rsi > 75:
-                score += 45; parts.append(f"RSI {rsi:.1f} deeply overbought")
-            elif rsi > 70:
-                score += 35; parts.append(f"RSI {rsi:.1f} overbought")
-            elif rsi > 65:
+            if rsi > strong_overbought:
+                score += 45; parts.append(f"RSI {rsi:.1f} deeply overbought (>{strong_overbought})")
+            elif rsi > overbought:
+                score += 35; parts.append(f"RSI {rsi:.1f} overbought (>{overbought})")
+            elif rsi > overbought - 5:
                 score += 20; parts.append(f"RSI {rsi:.1f} near overbought")
 
         if bb_upper is not None:
-            pct_above = (price - bb_upper) / bb_upper
             if price >= bb_upper:
                 score += 35; parts.append(f"Price ${price:.2f} above upper BB ${bb_upper:.2f}")
-            elif pct_above > -0.01:
+            elif (price - bb_upper) / bb_upper > -0.01:
                 score += 20; parts.append(f"Price ${price:.2f} near upper BB ${bb_upper:.2f}")
 
         if regime == "ranging":
@@ -129,25 +167,29 @@ def score_signal(rsi, price, bb_upper, bb_lower, regime, side):
 
 def compute_signals(conn, symbols):
     """Main entry point: compute signals for all symbols, write to DB, create proposals."""
+    p = load_params(conn)
+    log.info(f"Signal params: RSI({int(p['rsi_period'])}) oversold={p['rsi_oversold']} overbought={p['rsi_overbought']} "
+             f"BB({int(p['bb_period'])},{p['bb_std']}) proposal_min={p['score_proposal_min']}")
+
     for sym in symbols:
         try:
             closes = fetch_closes(sym, "1y")
-            if len(closes) < 21:
+            if len(closes) < int(p["bb_period"]) + 2:
                 log.warning(f"Signals: not enough data for {sym} ({len(closes)} days)")
                 continue
 
             price = closes[-1]
-            rsi = compute_rsi(closes)
-            bb_upper, bb_middle, bb_lower = compute_bollinger(closes)
-            regime = detect_regime(closes)
+            rsi = compute_rsi(closes, p["rsi_period"])
+            bb_upper, bb_middle, bb_lower = compute_bollinger(closes, p["bb_period"], p["bb_std"])
+            regime = detect_regime(closes, p["regime_sma_fast"], p["regime_sma_slow"], p["regime_band"])
 
             rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
             bb_str = f"[{bb_lower:.2f},{bb_upper:.2f}]" if bb_lower is not None else "[?]"
             log.info(f"Signals {sym}: price={price:.2f} RSI={rsi_str} BB={bb_str} regime={regime}")
 
             for side in ("buy", "sell"):
-                score, rationale = score_signal(rsi, price, bb_upper, bb_lower, regime, side)
-                if score < LOG_THRESHOLD:
+                score, rationale = score_signal(rsi, price, bb_upper, bb_lower, regime, side, p)
+                if score < p["score_log_min"]:
                     continue
 
                 with conn.cursor() as cur:
@@ -158,7 +200,7 @@ def compute_signals(conn, symbols):
                 conn.commit()
                 log.info(f"Signal {sym} {side}: score={score} — {rationale}")
 
-                if score >= PROPOSAL_THRESHOLD:
+                if score >= p["score_proposal_min"]:
                     with conn.cursor() as cur:
                         cur.execute("""
                             SELECT id FROM trade_proposals
