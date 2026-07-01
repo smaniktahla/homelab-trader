@@ -257,8 +257,9 @@ async function loadProposals() {
           &nbsp;<span style="color:#888;font-size:.8rem">score ${p.signal_score ?? '—'}</span>
           <div class="prop-meta">${p.rationale || 'No rationale'}</div>
         </div>
-        <div class="prop-actions">
-          <button class="btn-sm btn-buy" onclick="approveProposal(${p.id}, '${p.symbol}', '${p.side}', ${p.qty})">Approve</button>
+        <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
+          ${p.qty == null ? `<input id="prop-qty-${p.id}" type="number" min="0.001" step="0.001" placeholder="qty" style="width:70px;padding:4px 6px;background:#12151f;border:1px solid #4f8ef7;border-radius:4px;color:#e8eaf6;font-size:.85rem">` : ''}
+          <button class="btn-sm btn-buy" onclick="approveProposal(${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty})">Approve</button>
           <button class="btn-sm btn-sell" onclick="rejectProposal(${p.id})">Reject</button>
         </div>
       </div>`).join('');
@@ -269,9 +270,10 @@ async function loadProposals() {
 
 async function approveProposal(id, symbol, side, qty) {
   let finalQty = qty;
-  if (!finalQty) {
-    finalQty = parseFloat(prompt(`Qty to ${side} for ${symbol}?`));
-    if (!finalQty || isNaN(finalQty)) return;
+  if (finalQty == null) {
+    const inp = document.getElementById(`prop-qty-${id}`);
+    finalQty = inp ? parseFloat(inp.value) : NaN;
+    if (!finalQty || isNaN(finalQty)) { showToast('Enter a quantity first', 'error'); return; }
   }
   const r = await fetch(`/api/proposals/${id}`, {
     method: 'PATCH',
@@ -284,7 +286,7 @@ async function approveProposal(id, symbol, side, qty) {
 }
 
 async function rejectProposal(id) {
-  const reason = prompt('Rejection reason (optional):') || '';
+  const reason = '';
   const r = await fetch(`/api/proposals/${id}`, {
     method: 'PATCH',
     headers: {'Content-Type':'application/json'},

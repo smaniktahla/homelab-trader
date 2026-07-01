@@ -345,11 +345,11 @@ def compute_signals(conn, symbols):
                         continue
                     rationale = f"{rationale}; sized {qty} shares (~${qty*price:.0f}) — {sizing_note}"
                 else:
-                    # For sell signals, propose selling the full position if we hold it
-                    if sym in positions:
-                        qty = positions[sym]["qty"]
-                        rationale = f"{rationale}; sell full position ({qty} shares)"
-                    # If we don't hold it, still create the proposal (could be a short or future use)
+                    # Only propose sells for positions we actually hold
+                    if sym not in positions:
+                        continue
+                    qty = positions[sym]["qty"]
+                    rationale = f"{rationale}; sell full position ({qty} shares)"
 
                 with conn.cursor() as cur:
                     cur.execute("""

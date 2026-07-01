@@ -167,9 +167,14 @@ def run_once(conn, last_universe_scan):
     if now - last_universe_scan >= UNIVERSE_SCAN_INTERVAL:
         log.info("Starting universe scan...")
         positions = get_positions()
+        watchlist_before = set(get_watchlist(conn))
         candidates = scan_universe(conn)
         promote_demote(conn, positions, candidates)
-        return now  # updated timestamp
+        newly_promoted = set(get_watchlist(conn)) - watchlist_before
+        if newly_promoted:
+            log.info(f"Running signals on {len(newly_promoted)} newly promoted: {sorted(newly_promoted)}")
+            compute_signals(conn, list(newly_promoted))
+        return now
     return last_universe_scan
 
 
