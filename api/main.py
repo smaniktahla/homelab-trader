@@ -249,6 +249,27 @@ def decide_proposal(proposal_id: int, body: ProposalDecision):
     return {"status": "ok", "decision": body.decision}
 
 
+# ── Signal parameters ────────────────────────────────────────────────────────
+
+@app.get("/api/signal-params")
+def get_signal_params():
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT key, value, description FROM signal_params ORDER BY key")
+        return cur.fetchall()
+
+class ParamUpdate(BaseModel):
+    value: float
+
+@app.patch("/api/signal-params/{key}")
+def update_signal_param(key: str, body: ParamUpdate):
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE signal_params SET value=%s WHERE key=%s RETURNING key", (body.value, key))
+        if not cur.fetchone():
+            raise HTTPException(404, f"param '{key}' not found")
+        conn.commit()
+    return {"key": key, "value": body.value}
+
+
 # ── Dashboard UI ──────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)

@@ -149,7 +149,7 @@
 <h2>Trade History</h2>
 <div class="table-wrap">
   <table>
-    <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Status</th><th>Shares</th><th>Price</th><th>Value</th><th>Source</th><th>Notes</th></tr></thead>
+    <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Status</th><th>Shares</th><th>Price/Share</th><th>Total</th><th>Source</th><th>Notes</th></tr></thead>
     <tbody id="trades-body"><tr><td colspan="9" class="no-data">Loading…</td></tr></tbody>
   </table>
 </div>
@@ -310,6 +310,7 @@ async function loadTrades() {
         <td style="color:#555">${new Date(t.traded_at).toLocaleString()}</td>
         <td><a href="/symbol/${t.symbol}" style="color:#4f8ef7;text-decoration:none">${t.symbol}</a></td>
         <td class="${dir}" style="font-weight:600">${t.side.toUpperCase()}</td>
+        <td style="font-size:.8rem">${statusBadge(t.status)}</td>
         <td>${fmt(t.qty, t.qty % 1 === 0 ? 0 : 4)}</td>
         <td>${t.price ? fmtUSD(t.price) : '—'}</td>
         <td>${t.notional ? fmtUSD(t.notional) : '—'}</td>
