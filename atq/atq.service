@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent Task Queue API
+After=network.target
+
+[Service]
+Type=simple
+User=salil
+WorkingDirectory=/home/salil/atq
+ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8700
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/home/salil
+
+[Install]
+WantedBy=multi-user.target
