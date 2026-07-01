@@ -5,11 +5,19 @@ rigorous walk-forward validation across all asset classes and market conditions.
 """
 
 import logging
+import math
+import os
 import requests
 
 log = logging.getLogger(__name__)
 
 YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; invest-agent/1.0)"}
+
+ALPACA_BASE = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+ALPACA_HEADERS = {
+    "APCA-API-KEY-ID": os.environ.get("ALPACA_API_KEY", ""),
+    "APCA-API-SECRET-KEY": os.environ.get("ALPACA_API_SECRET", ""),
+}
 
 # Defaults — overridden at runtime by signal_params table
 DEFAULTS = {
@@ -25,6 +33,11 @@ DEFAULTS = {
     "regime_sma_fast": 50,
     "regime_sma_slow": 200,
     "regime_band": 0.02,
+    # Position sizing + risk
+    "trade_allocation_pct": 0.05,
+    "max_position_pct": 0.20,
+    "max_open_positions": 5,
+    "stop_loss_pct": 0.08,
 }
 
 
@@ -55,6 +68,32 @@ def fetch_closes(symbol, yf_range="1y"):
     raw_closes = result["indicators"]["quote"][0]["close"]
     closes = [float(c) for c, ts in zip(raw_closes, timestamps) if c is not None]
     return closes
+
+
+def fetch_alpaca_portfolio():
+    """Return (cash, portfolio_value, positions_dict) from Alpaca."""
+    try:
+        acct = requests.get(f"{ALPACA_BASE}/v2/account", headers=ALPACA_HEADERS, timeout=10)
+        acct.raise_for_status()
+        a = acct.json()
+        cash = float(a["cash"])
+        portfolio_value = float(a["portfolio_value"])
+
+        pos_r = requests.get(f"{ALPACA_BASE}/v2/positions", headers=ALPACA_HEADERS, timeout=10)
+        pos_r.raise_for_status()
+        positions = {
+            p["symbol"]: {
+                "qty": float(p["qty"]),
+                "avg_entry": float(p["avg_entry_price"]),
+                "current_price": float(p["current_price"]),
+                "market_value": float(p["market_value"]),
+            }
+            for p in pos_r.json()
+        }
+        return cash, portfolio_value, positions
+    except Exception as e:
+        log.warning(f"Could not fetch Alpaca portfolio: {e}")
+        return None, None, {}
 
 
 def compute_rsi(closes, period):
@@ -165,11 +204,87 @@ def score_signal(rsi, price, bb_upper, bb_lower, regime, side, p):
     return int(score), "; ".join(parts)
 
 
+def calc_buy_qty(price, cash, portfolio_value, existing_market_value, p):
+    """
+    Calculate how many shares to propose buying.
+    Respects trade_allocation_pct and max_position_pct.
+    Returns (qty, reason) — qty=None if constraints prevent the trade.
+    """
+    if not cash or not portfolio_value or cash <= 0:
+        return None, "no cash data"
+
+    # How much cash to deploy for this trade
+    trade_dollars = cash * p["trade_allocation_pct"]
+
+    # Cap so we don't exceed max_position_pct of portfolio in this symbol
+    max_dollars_in_symbol = portfolio_value * p["max_position_pct"]
+    already_in_symbol = existing_market_value or 0.0
+    room = max_dollars_in_symbol - already_in_symbol
+    if room <= 0:
+        return None, f"already at max position ({p['max_position_pct']*100:.0f}% of portfolio)"
+
+    trade_dollars = min(trade_dollars, room)
+
+    # Can't spend more than we have
+    trade_dollars = min(trade_dollars, cash)
+
+    qty = math.floor(trade_dollars / price)
+    if qty < 1:
+        return None, f"trade allocation ${trade_dollars:.0f} too small to buy 1 share at ${price:.2f}"
+
+    return qty, f"${trade_dollars:.0f} allocation ({p['trade_allocation_pct']*100:.0f}% of ${cash:.0f} cash)"
+
+
+def check_stop_losses(conn, positions, p):
+    """Create sell proposals for positions that have breached the stop-loss threshold."""
+    if not positions:
+        return
+    stop_pct = p["stop_loss_pct"]
+    for sym, pos in positions.items():
+        loss_pct = (pos["avg_entry"] - pos["current_price"]) / pos["avg_entry"]
+        if loss_pct >= stop_pct:
+            rationale = (
+                f"STOP-LOSS: {sym} down {loss_pct*100:.1f}% from avg entry "
+                f"${pos['avg_entry']:.2f} → current ${pos['current_price']:.2f} "
+                f"(threshold {stop_pct*100:.0f}%)"
+            )
+            log.warning(f"Stop-loss triggered: {rationale}")
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id FROM trade_proposals
+                    WHERE symbol=%s AND side='sell' AND decision IS NULL
+                """, (sym,))
+                if cur.fetchone():
+                    log.info(f"Stop-loss proposal for {sym} already open, skipping")
+                    continue
+                cur.execute("""
+                    INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score)
+                    VALUES (%s, 'sell', %s, %s, 99)
+                """, (sym, pos["qty"], rationale))
+            conn.commit()
+            log.info(f"Stop-loss PROPOSAL created: sell {pos['qty']} {sym}")
+
+
 def compute_signals(conn, symbols):
     """Main entry point: compute signals for all symbols, write to DB, create proposals."""
     p = load_params(conn)
-    log.info(f"Signal params: RSI({int(p['rsi_period'])}) oversold={p['rsi_oversold']} overbought={p['rsi_overbought']} "
-             f"BB({int(p['bb_period'])},{p['bb_std']}) proposal_min={p['score_proposal_min']}")
+    log.info(
+        f"Signal params: RSI({int(p['rsi_period'])}) oversold={p['rsi_oversold']} overbought={p['rsi_overbought']} "
+        f"BB({int(p['bb_period'])},{p['bb_std']}) proposal_min={p['score_proposal_min']} "
+        f"alloc={p['trade_allocation_pct']*100:.0f}% max_pos={p['max_position_pct']*100:.0f}% "
+        f"max_open={int(p['max_open_positions'])} stop_loss={p['stop_loss_pct']*100:.0f}%"
+    )
+
+    # Fetch live portfolio state from Alpaca
+    cash, portfolio_value, positions = fetch_alpaca_portfolio()
+    if cash is not None:
+        log.info(f"Portfolio: cash=${cash:.2f} total=${portfolio_value:.2f} positions={list(positions.keys())}")
+
+    # Stop-loss check on existing positions
+    check_stop_losses(conn, positions, p)
+
+    # Count open positions for the max_open_positions gate
+    open_position_count = len(positions)
 
     for sym in symbols:
         try:
@@ -200,22 +315,49 @@ def compute_signals(conn, symbols):
                 conn.commit()
                 log.info(f"Signal {sym} {side}: score={score} — {rationale}")
 
-                if score >= p["score_proposal_min"]:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            SELECT id FROM trade_proposals
-                            WHERE symbol=%s AND side=%s AND decision IS NULL
-                        """, (sym, side))
-                        existing = cur.fetchone()
-                        if existing:
-                            log.info(f"Proposal for {sym} {side} already open (#{existing[0]}), skipping")
-                            continue
-                        cur.execute("""
-                            INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score)
-                            VALUES (%s, %s, NULL, %s, %s)
-                        """, (sym, side, rationale, score))
-                    conn.commit()
-                    log.info(f"PROPOSAL created: {sym} {side} score={score}")
+                if score < p["score_proposal_min"]:
+                    continue
+
+                # Check for existing open proposal
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT id FROM trade_proposals
+                        WHERE symbol=%s AND side=%s AND decision IS NULL
+                    """, (sym, side))
+                    if cur.fetchone():
+                        log.info(f"Proposal for {sym} {side} already open, skipping")
+                        continue
+
+                # Position sizing for buy signals
+                qty = None
+                sizing_note = ""
+                if side == "buy":
+                    if open_position_count >= int(p["max_open_positions"]):
+                        log.info(
+                            f"Skipping buy proposal for {sym}: at max_open_positions "
+                            f"({open_position_count}/{int(p['max_open_positions'])})"
+                        )
+                        continue
+                    existing_mv = positions.get(sym, {}).get("market_value", 0.0)
+                    qty, sizing_note = calc_buy_qty(price, cash, portfolio_value, existing_mv, p)
+                    if qty is None:
+                        log.info(f"Skipping buy proposal for {sym}: {sizing_note}")
+                        continue
+                    rationale = f"{rationale}; sized {qty} shares (~${qty*price:.0f}) — {sizing_note}"
+                else:
+                    # For sell signals, propose selling the full position if we hold it
+                    if sym in positions:
+                        qty = positions[sym]["qty"]
+                        rationale = f"{rationale}; sell full position ({qty} shares)"
+                    # If we don't hold it, still create the proposal (could be a short or future use)
+
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (sym, side, qty, rationale, score))
+                conn.commit()
+                log.info(f"PROPOSAL created: {sym} {side} qty={qty} score={score}")
 
         except Exception as e:
             log.warning(f"Signals failed for {sym}: {e}")
