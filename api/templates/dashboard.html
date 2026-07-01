@@ -29,6 +29,11 @@
   .card .date { font-size: .73rem; color: #555; margin-bottom: 8px; }
   .card .price { font-size: 1.35rem; font-weight: 700; }
   .card .change { font-size: .82rem; margin-top: 3px; }
+  .card .signals { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .sig-badge { font-size: .7rem; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+  .sig-buy { background: #1a3a2a; color: #3ecf6e; border: 1px solid #2a5a3a; }
+  .sig-sell { background: #3a1a1a; color: #f75f5f; border: 1px solid #5a2a2a; }
+  .sig-neutral { background: #222; color: #666; border: 1px solid #333; }
   .mini-chart { margin-top: 12px; height: 52px; }
   /* Buttons */
   .btn { display: inline-block; padding: 5px 14px; border-radius: 5px; font-size: .8rem; font-weight: 600; cursor: pointer; border: none; transition: opacity .15s; }
@@ -317,24 +322,46 @@ async function loadTrades() {
 
 // ── Watchlist cards ───────────────────────────────────────────────
 async function loadSummary() {
-  const data = await fetch('/api/summary').then(r => r.json());
+  const [data, signals] = await Promise.all([
+    fetch('/api/summary').then(r => r.json()),
+    fetch('/api/signals/latest').then(r => r.json()).catch(() => ({})),
+  ]);
   const grid = document.getElementById('cards');
   grid.innerHTML = '';
   for (const row of data) {
     const pct = row.day_pct ?? 0;
     const dir = pct >= 0 ? 'up' : 'down';
+    const sig = signals[row.symbol] || {};
+    const sigHtml = sigBadges(sig);
     const card = document.createElement('div');
     card.className = 'card';
-    card.innerHTML = `
-      <h3>${row.symbol}</h3>
-      <div class="date">${new Date(row.as_of).toLocaleDateString()}</div>
-      <div class="price">$${fmt(row.price)}</div>
-      <div class="change ${dir}">${pct >= 0 ? '▲' : '▼'} ${Math.abs(pct)}%</div>
-      <div class="mini-chart"><canvas id="chart-${row.symbol}"></canvas></div>`;
-    card.onclick = () => window.location = `/symbol/${row.symbol}`;
+    card.innerHTML = [
+      '<h3>' + row.symbol + '</h3>',
+      '<div class="date">' + new Date(row.as_of).toLocaleDateString() + '</div>',
+      '<div class="price">$' + fmt(row.price) + '</div>',
+      '<div class="change ' + dir + '">' + (pct >= 0 ? '▲' : '▼') + ' ' + Math.abs(pct) + '%</div>',
+      '<div class="signals">' + sigHtml + '</div>',
+      '<div class="mini-chart"><canvas id="chart-' + row.symbol + '"></canvas></div>',
+    ].join('');
+    card.onclick = () => window.location = '/symbol/' + row.symbol;
     grid.appendChild(card);
     loadMiniChart(row.symbol);
   }
+}
+
+function sigBadges(sig) {
+  const parts = [];
+  const b = sig.buy, s = sig.sell;
+  if (b && b.score >= 30) {
+    const cls = b.score >= 65 ? 'sig-buy' : 'sig-neutral';
+    parts.push('<span class="sig-badge ' + cls + '" title="' + (b.rationale || '') + '">▲ Buy ' + b.score + '</span>');
+  }
+  if (s && s.score >= 30) {
+    const cls = s.score >= 65 ? 'sig-sell' : 'sig-neutral';
+    parts.push('<span class="sig-badge ' + cls + '" title="' + (s.rationale || '') + '">▼ Sell ' + s.score + '</span>');
+  }
+  if (!parts.length) parts.push('<span class="sig-badge sig-neutral">— No signal</span>');
+  return parts.join('');
 }
 
 async function loadMiniChart(symbol) {

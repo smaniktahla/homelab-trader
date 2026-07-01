@@ -61,6 +61,30 @@ def get_signals(limit: int = 50):
         """, (limit,))
         return cur.fetchall()
 
+@app.get("/api/signals/latest")
+def get_signals_latest():
+    """Latest buy and sell signal per symbol for dashboard display."""
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT ON (symbol, signal_type) symbol, signal_type, score, rationale, generated_at
+            FROM signals
+            ORDER BY symbol, signal_type, generated_at DESC
+        """)
+        rows = cur.fetchall()
+        # pivot to {symbol: {buy: {...}, sell: {...}}}
+        result = {}
+        for row in rows:
+            sym = row["symbol"]
+            side = "buy" if "buy" in row["signal_type"] else "sell"
+            if sym not in result:
+                result[sym] = {}
+            result[sym][side] = {
+                "score": float(row["score"]) if row["score"] is not None else 0,
+                "rationale": row["rationale"],
+                "generated_at": row["generated_at"].isoformat() if row["generated_at"] else None,
+            }
+        return result
+
 @app.get("/api/trades")
 def get_trades(limit: int = 200):
     with db() as conn, conn.cursor() as cur:
@@ -182,6 +206,7 @@ def execute_trade(req: TradeRequest):
 
 class ProposalDecision(BaseModel):
     decision: str          # approved | rejected
+    qty: Optional[float] = None
     rejection_reason: Optional[str] = None
 
 @app.patch("/api/proposals/{proposal_id}")
@@ -196,8 +221,11 @@ def decide_proposal(proposal_id: int, body: ProposalDecision):
 
         if body.decision == "approved":
             # Execute the trade
+            trade_qty = body.qty or p["qty"]
+            if not trade_qty:
+                raise HTTPException(400, "qty required for approval (proposal has no default qty)")
             order = alpaca("POST", "/v2/orders", json={
-                "symbol": p["symbol"], "qty": str(p["qty"]),
+                "symbol": p["symbol"], "qty": str(trade_qty),
                 "side": p["side"], "type": "market", "time_in_force": "gtc",
             })
             filled_price = float(order.get("filled_avg_price") or 0)
@@ -208,6 +236,8 @@ def decide_proposal(proposal_id: int, body: ProposalDecision):
             """, (p["symbol"], p["side"], filled_qty, filled_price,
                   filled_qty * filled_price, order["id"],
                   datetime.now(timezone.utc), "model_approved", order["status"], proposal_id))
+            # update proposal qty if it was null
+            cur.execute("UPDATE trade_proposals SET qty=%s WHERE id=%s AND qty IS NULL", (trade_qty, proposal_id))
 
         cur.execute("""
             UPDATE trade_proposals

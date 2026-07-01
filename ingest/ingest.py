@@ -6,6 +6,8 @@ import psycopg2
 import requests
 from datetime import datetime, timezone
 
+from signals import compute_signals
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -148,6 +150,7 @@ def run_once():
         log.info(f"Watchlist: {symbols}")
         ingest_prices(conn, symbols)
         ingest_news(conn, symbols)
+        compute_signals(conn, symbols)
         reconcile_orders(conn)
     finally:
         conn.close()
