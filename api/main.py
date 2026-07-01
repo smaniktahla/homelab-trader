@@ -66,9 +66,12 @@ def get_signals_latest():
     """Latest buy and sell signal per symbol for dashboard display."""
     with db() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT DISTINCT ON (symbol, signal_type) symbol, signal_type, score, rationale, generated_at
-            FROM signals
-            ORDER BY symbol, signal_type, generated_at DESC
+            SELECT DISTINCT ON (s.symbol, s.signal_type)
+                s.symbol, s.signal_type, s.score, s.rationale, s.generated_at,
+                u.rsi
+            FROM signals s
+            LEFT JOIN universe_scan u ON u.symbol = s.symbol
+            ORDER BY s.symbol, s.signal_type, s.generated_at DESC
         """)
         rows = cur.fetchall()
         # pivot to {symbol: {buy: {...}, sell: {...}}}
@@ -82,6 +85,7 @@ def get_signals_latest():
                 "score": float(row["score"]) if row["score"] is not None else 0,
                 "rationale": row["rationale"],
                 "generated_at": row["generated_at"].isoformat() if row["generated_at"] else None,
+                "rsi": float(row["rsi"]) if row["rsi"] is not None else None,
             }
         return result
 

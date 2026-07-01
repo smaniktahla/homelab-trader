@@ -99,7 +99,7 @@
   <table>
     <thead><tr>
       <th>Symbol</th><th>Shares</th><th>Avg Cost</th><th>Current</th>
-      <th>Market Value</th><th>Cost Basis</th><th>Unrealized P&amp;L</th><th>Return</th><th></th>
+      <th>Market Value</th><th>Cost Basis</th><th>Unrealized P&amp;L</th><th>Return</th><th>RSI</th><th>Sell Signal</th><th></th>
     </tr></thead>
     <tbody id="positions-body"><tr><td colspan="9" class="no-data">Loading…</td></tr></tbody>
   </table>
@@ -215,13 +215,24 @@ async function loadAccount() {
 async function loadPositions() {
   const tbody = document.getElementById('positions-body');
   try {
-    const positions = await fetch('/api/positions').then(r => r.json());
+    const [positions, signals] = await Promise.all([
+      fetch('/api/positions').then(r => r.json()),
+      fetch('/api/signals/latest').then(r => r.json()).catch(() => ({})),
+    ]);
     if (!positions.length) {
-      tbody.innerHTML = '<tr><td colspan="9" class="no-data">No open positions — all cash.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="11" class="no-data">No open positions — all cash.</td></tr>';
       return;
     }
     tbody.innerHTML = positions.map(p => {
       const plClass = p.unrealized_pl >= 0 ? 'up' : 'down';
+      const sig = signals[p.symbol] || {};
+      const sell = sig.sell || {};
+      const rsi = sig.sell?.rsi ?? sig.buy?.rsi ?? null;
+      const rsiColor = rsi == null ? '#888' : rsi > 70 ? '#f75f5f' : rsi < 30 ? '#3ecf6e' : '#e8eaf6';
+      const sellScore = sell.score ?? 0;
+      const scoreBar = sellScore > 0
+        ? `<div style="display:inline-block;width:${Math.round(sellScore * 0.6)}px;height:6px;background:#f75f5f;border-radius:3px;vertical-align:middle;margin-left:4px"></div>`
+        : '—';
       return `<tr>
         <td><a href="/symbol/${p.symbol}">${p.symbol}</a></td>
         <td>${fmt(p.qty, p.qty % 1 === 0 ? 0 : 4)}</td>
@@ -231,6 +242,8 @@ async function loadPositions() {
         <td>${fmtUSD(p.cost_basis)}</td>
         <td class="${plClass}">${p.unrealized_pl >= 0 ? '+' : ''}${fmtUSD(p.unrealized_pl)}</td>
         <td class="${plClass}">${p.unrealized_pl >= 0 ? '▲' : '▼'} ${Math.abs(p.unrealized_plpc)}%</td>
+        <td style="color:${rsiColor};font-variant-numeric:tabular-nums">${rsi != null ? rsi.toFixed(1) : '—'}</td>
+        <td style="white-space:nowrap">${sellScore > 0 ? `<span style="color:#f75f5f;font-size:.8rem">${sellScore}</span>` : ''}${scoreBar}</td>
         <td style="white-space:nowrap">
           <button class="btn-sm btn-buy" onclick="openModal('${p.symbol}','buy')">Buy</button>
           <button class="btn-sm btn-sell" onclick="openModal('${p.symbol}','sell')">Sell</button>
@@ -238,7 +251,7 @@ async function loadPositions() {
       </tr>`;
     }).join('');
   } catch(e) {
-    tbody.innerHTML = `<tr><td colspan="9" class="no-data" style="color:#f75f5f">${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11" class="no-data" style="color:#f75f5f">${e.message}</td></tr>`;
   }
 }
 
