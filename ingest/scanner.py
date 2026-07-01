@@ -1,6 +1,7 @@
 """
-Universe scanner: fast RSI scan across all tradeable US equities using Alpaca
-batch bars. Runs every 4 hours. Promotes top candidates to watchlist.
+Universe scanner: RSI scan across S&P 500 + major ETFs via Yahoo Finance.
+Runs every 4 hours. Promotes top candidates to watchlist.
+S&P 500 constituent list fetched from Wikipedia on startup; updated when stale.
 """
 
 import logging
@@ -9,19 +10,77 @@ import time
 from datetime import datetime, timezone, timedelta
 
 import requests
+from html.parser import HTMLParser
 
 log = logging.getLogger(__name__)
 
 ALPACA_BASE = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-ALPACA_DATA = "https://data.alpaca.markets"
 ALPACA_HEADERS = {
     "APCA-API-KEY-ID": os.environ.get("ALPACA_API_KEY", ""),
     "APCA-API-SECRET-KEY": os.environ.get("ALPACA_API_SECRET", ""),
 }
+YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; invest-scanner/1.0)"}
 
-BATCH_SIZE = 100        # symbols per Alpaca bars request
-PROMOTE_THRESHOLD = 45  # RSI score (buy or sell) to auto-promote to watchlist
+PROMOTE_THRESHOLD = 45  # score to auto-promote to watchlist
 DEMOTE_WEAK_HOURS = 12  # hours a watchlist entry can stay weak before demotion
+SCAN_DELAY = 0.25       # seconds between Yahoo Finance requests
+
+# Major ETFs always included in the scan universe
+CORE_ETFS = [
+    "SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLV", "XLI", "XLY",
+    "XLP", "XLU", "XLB", "XLRE", "GLD", "SLV", "TLT", "HYG", "EEM", "VIX",
+]
+
+
+class _SP500Parser(HTMLParser):
+    """Parse S&P 500 table from Wikipedia."""
+    def __init__(self):
+        super().__init__()
+        self._in_table = False
+        self._in_cell = False
+        self._col = 0
+        self.symbols = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "table" and "constituents" in attrs.get("id", ""):
+            self._in_table = True
+        if self._in_table and tag == "tr":
+            self._col = 0
+        if self._in_table and tag == "td":
+            self._in_cell = True
+
+    def handle_endtag(self, tag):
+        if tag == "table":
+            self._in_table = False
+        if tag == "td":
+            self._in_cell = False
+            self._col += 1
+
+    def handle_data(self, data):
+        if self._in_cell and self._col == 0:
+            sym = data.strip().replace(".", "-")  # BRK.B → BRK-B for Yahoo
+            if sym and 1 <= len(sym) <= 5:
+                self.symbols.append(sym)
+
+
+def _fetch_sp500_symbols():
+    """Fetch current S&P 500 constituents from Wikipedia."""
+    try:
+        r = requests.get(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers={"User-Agent": "Mozilla/5.0 invest-scanner/1.0"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        parser = _SP500Parser()
+        parser.feed(r.text)
+        symbols = list(dict.fromkeys(parser.symbols))  # dedupe, preserve order
+        log.info(f"Fetched {len(symbols)} S&P 500 symbols from Wikipedia")
+        return symbols
+    except Exception as e:
+        log.warning(f"Could not fetch S&P 500 from Wikipedia: {e}")
+        return []
 
 
 def _rsi(closes, period=14):
@@ -72,138 +131,123 @@ def _sell_score(rsi, price, closes):
 
 
 def seed_universe(conn):
-    """Populate universe table from Alpaca assets if nearly empty."""
+    """
+    Populate universe table.
+    - All Alpaca US equities (full metadata, tradable flag)
+    - Mark S&P 500 + core ETFs as scannable=True (these get RSI scanned)
+    """
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM universe")
+        cur.execute("SELECT COUNT(*) FROM universe WHERE scannable = TRUE")
         row = cur.fetchone()
-        count = row[0] if isinstance(row, (list, tuple)) else row["count"]
-    if count > 100:
-        log.info(f"Universe already seeded ({count} symbols)")
+        scannable = row[0] if isinstance(row, (list, tuple)) else row["count"]
+
+    if scannable > 400:
+        log.info(f"Universe already seeded ({scannable} scannable symbols)")
         return
 
+    # Fetch all Alpaca assets for metadata
     log.info("Seeding universe from Alpaca assets API...")
-    r = requests.get(
-        f"{ALPACA_BASE}/v2/assets",
-        params={"status": "active", "asset_class": "us_equity"},
-        headers=ALPACA_HEADERS,
-        timeout=30,
-    )
-    r.raise_for_status()
-    assets = r.json()
-
-    valid_exchanges = {"NYSE", "NASDAQ", "ARCA", "BATS", "NYSE ARCA", "NYSE MKT"}
-    filtered = [
-        a for a in assets
-        if a.get("tradable")
-        and a.get("fractionable")
-        and a.get("easy_to_borrow")
-        and a.get("exchange") in valid_exchanges
-        and "." not in a["symbol"]
-        and "/" not in a["symbol"]
-        and len(a["symbol"]) <= 5
-    ]
-
-    log.info(f"Alpaca assets: {len(assets)} total → {len(filtered)} universe symbols after filtering")
-
-    with conn.cursor() as cur:
-        for a in filtered:
-            cur.execute("""
-                INSERT INTO universe (symbol, name, exchange)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (symbol) DO NOTHING
-            """, (a["symbol"], a.get("name", ""), a.get("exchange", "")))
-    conn.commit()
-    log.info(f"Universe seeded: {len(filtered)} symbols")
-
-
-def _fetch_bars_batch(symbols):
-    """
-    Fetch last 45 days of daily closes for a batch of symbols via Alpaca.
-    Returns dict: symbol -> list of closes (oldest first).
-    """
-    start = (datetime.now(timezone.utc) - timedelta(days=65)).strftime("%Y-%m-%d")
     try:
         r = requests.get(
-            f"{ALPACA_DATA}/v2/stocks/bars",
-            params={
-                "symbols": ",".join(symbols),
-                "timeframe": "1Day",
-                "start": start,
-                "limit": 50,
-                "feed": "iex",
-                "adjustment": "raw",
-            },
+            f"{ALPACA_BASE}/v2/assets",
+            params={"status": "active", "asset_class": "us_equity"},
             headers=ALPACA_HEADERS,
             timeout=30,
         )
         r.raise_for_status()
-        data = r.json().get("bars", {})
-        result = {}
-        for sym, bars in data.items():
-            if bars:
-                result[sym] = [float(b["c"]) for b in bars]
-        return result
+        assets = r.json()
+        valid_exchanges = {"NYSE", "NASDAQ", "ARCA", "BATS", "NYSE ARCA", "NYSE MKT"}
+        with conn.cursor() as cur:
+            for a in assets:
+                if (a.get("tradable") and a.get("exchange") in valid_exchanges
+                        and "." not in a["symbol"] and "/" not in a["symbol"]
+                        and len(a["symbol"]) <= 5):
+                    cur.execute("""
+                        INSERT INTO universe (symbol, name, exchange)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (symbol) DO NOTHING
+                    """, (a["symbol"], a.get("name", ""), a.get("exchange", "")))
+        conn.commit()
+        log.info(f"Universe: {len(assets)} Alpaca assets loaded")
     except Exception as e:
-        log.warning(f"Bars batch failed for {symbols[:3]}...: {e}")
-        return {}
+        log.warning(f"Alpaca asset seed failed: {e}")
+
+    # Mark S&P 500 + core ETFs as scannable
+    sp500 = _fetch_sp500_symbols()
+    scannable_syms = list(dict.fromkeys(sp500 + CORE_ETFS))
+    with conn.cursor() as cur:
+        for sym in scannable_syms:
+            cur.execute("""
+                INSERT INTO universe (symbol, name, exchange, scannable)
+                VALUES (%s, '', '', TRUE)
+                ON CONFLICT (symbol) DO UPDATE SET scannable = TRUE
+            """, (sym,))
+    conn.commit()
+    log.info(f"Marked {len(scannable_syms)} symbols as scannable (S&P 500 + ETFs)")
+
+
+def _fetch_closes_yf(symbol, range_="1mo"):
+    """Fetch daily closes from Yahoo Finance. Returns list oldest→newest, or []."""
+    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"
+    try:
+        r = requests.get(url, params={"interval": "1d", "range": range_},
+                         headers=YF_HEADERS, timeout=10)
+        r.raise_for_status()
+        result = r.json().get("chart", {}).get("result", [])
+        if not result:
+            return []
+        closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        return [float(c) for c in closes if c is not None]
+    except Exception:
+        return []
 
 
 def scan_universe(conn):
     """
-    Fast RSI scan across entire universe using Alpaca batch bars.
-    Upserts results into universe_scan. Returns list of top candidates.
+    Fast RSI scan across scannable symbols (S&P 500 + ETFs) via Yahoo Finance.
+    Per-symbol with SCAN_DELAY between requests. Upserts into universe_scan.
+    Returns list of top candidates.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT symbol FROM universe ORDER BY symbol")
+        cur.execute("SELECT symbol FROM universe WHERE scannable = TRUE ORDER BY symbol")
         rows = cur.fetchall()
     symbols = [r[0] if isinstance(r, (list, tuple)) else r["symbol"] for r in rows]
 
     if not symbols:
-        log.warning("Universe is empty — run seed_universe first")
+        log.warning("No scannable symbols — run seed_universe first")
         return []
 
-    log.info(f"Scanning universe: {len(symbols)} symbols in batches of {BATCH_SIZE}")
+    log.info(f"Scanning {len(symbols)} scannable symbols via Yahoo Finance...")
     total_scanned = 0
     candidates = []
 
-    for i in range(0, len(symbols), BATCH_SIZE):
-        batch = symbols[i:i + BATCH_SIZE]
-        bars = _fetch_bars_batch(batch)
+    for sym in symbols:
+        closes = _fetch_closes_yf(sym, range_="1mo")
+        if len(closes) < 16:
+            time.sleep(SCAN_DELAY)
+            continue
+
+        price = closes[-1]
+        rsi = _rsi(closes)
+        buy_sc = _buy_score(rsi, price, closes)
+        sell_sc = _sell_score(rsi, price, closes)
 
         with conn.cursor() as cur:
-            for sym in batch:
-                closes = bars.get(sym, [])
-                if len(closes) < 16:
-                    continue
-                price = closes[-1]
-                rsi = _rsi(closes)
-                buy_sc = _buy_score(rsi, price, closes)
-                sell_sc = _sell_score(rsi, price, closes)
-                regime = "unknown"  # regime needs 200 days; skip for speed
-
-                cur.execute("""
-                    INSERT INTO universe_scan (symbol, price, rsi, buy_score, sell_score, regime, scanned_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (symbol) DO UPDATE SET
-                        price=EXCLUDED.price, rsi=EXCLUDED.rsi,
-                        buy_score=EXCLUDED.buy_score, sell_score=EXCLUDED.sell_score,
-                        regime=EXCLUDED.regime, scanned_at=EXCLUDED.scanned_at
-                """, (sym, price, rsi, buy_sc, sell_sc, regime))
-
-                if buy_sc >= PROMOTE_THRESHOLD or sell_sc >= PROMOTE_THRESHOLD:
-                    candidates.append({
-                        "symbol": sym,
-                        "price": price,
-                        "rsi": rsi,
-                        "buy_score": buy_sc,
-                        "sell_score": sell_sc,
-                    })
-                total_scanned += 1
+            cur.execute("""
+                INSERT INTO universe_scan (symbol, price, rsi, buy_score, sell_score, regime, scanned_at)
+                VALUES (%s, %s, %s, %s, %s, 'unknown', NOW())
+                ON CONFLICT (symbol) DO UPDATE SET
+                    price=EXCLUDED.price, rsi=EXCLUDED.rsi,
+                    buy_score=EXCLUDED.buy_score, sell_score=EXCLUDED.sell_score,
+                    regime=EXCLUDED.regime, scanned_at=EXCLUDED.scanned_at
+            """, (sym, price, rsi, buy_sc, sell_sc))
         conn.commit()
 
-        # Small pause between batches to be polite to Alpaca
-        if i + BATCH_SIZE < len(symbols):
-            time.sleep(0.3)
+        if buy_sc >= PROMOTE_THRESHOLD or sell_sc >= PROMOTE_THRESHOLD:
+            candidates.append({"symbol": sym, "price": price, "rsi": rsi,
+                                "buy_score": buy_sc, "sell_score": sell_sc})
+        total_scanned += 1
+        time.sleep(SCAN_DELAY)
 
     candidates.sort(key=lambda x: max(x["buy_score"], x["sell_score"]), reverse=True)
     log.info(f"Universe scan complete: {total_scanned} symbols scanned, {len(candidates)} candidates")
