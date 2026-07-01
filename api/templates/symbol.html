@@ -173,9 +173,10 @@ function showToast(msg, type='success') {
 
 async function loadHeader() {
   try {
-    const [summary, scan] = await Promise.all([
+    const [summary, scan, allSigs] = await Promise.all([
       fetch('/api/summary').then(r => r.json()),
       fetch('/api/leaderboard?limit=500').then(r => r.json()).catch(() => []),
+      fetch('/api/signals/latest').then(r => r.json()).catch(() => ({})),
     ]);
     const row = summary.find(s => s.symbol === SYMBOL);
     if (row) {
@@ -195,7 +196,12 @@ async function loadHeader() {
         ? `<span class="signal-score score-buy">${scanRow.buy_score}</span>` : '—';
       document.getElementById('stat-sell').innerHTML = scanRow.sell_score > 0
         ? `<span class="signal-score score-sell">${scanRow.sell_score}</span>` : '—';
-      document.getElementById('stat-regime').textContent = scanRow.regime || '—';
+      const sigData = allSigs[SYMBOL] || {};
+      const sigRegime = (sigData.buy || sigData.sell || {}).regime;
+      const regime = (sigRegime) || (scanRow.regime !== 'unknown' ? scanRow.regime : null) || '—';
+      const regimeEl = document.getElementById('stat-regime');
+      regimeEl.textContent = regime.replace('_', ' ');
+      regimeEl.style.color = regime === 'trending_up' ? '#3ecf6e' : regime === 'trending_down' ? '#f75f5f' : '#e8eaf6';
     }
   } catch(e) {}
 }
@@ -219,24 +225,75 @@ async function loadChart(days, btn) {
   document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
   try {
-    const data = await fetch(`/api/prices/${SYMBOL}?days=${days}`).then(r => r.json());
+    const [data, allTrades] = await Promise.all([
+      fetch(`/api/prices/${SYMBOL}?days=${days}`).then(r => r.json()),
+      fetch(`/api/trades`).then(r => r.json()).catch(() => []),
+    ]);
     const labels = data.map(r => new Date(r.ts).toLocaleDateString('en-US', {month:'short', day:'numeric'}));
     const prices = data.map(r => r.close);
     const color = prices.length > 1 && prices[prices.length-1] >= prices[0] ? '#3ecf6e' : '#f75f5f';
+
+    // Map label → close price for trade marker positioning
+    const priceByLabel = {};
+    data.forEach(r => {
+      priceByLabel[new Date(r.ts).toLocaleDateString('en-US', {month:'short', day:'numeric'})] = r.close;
+    });
+
+    // Build trade marker datasets
+    const trades = allTrades.filter(t => t.symbol === SYMBOL && t.status === 'filled');
+    const buyPoints = [], sellPoints = [], buyLabels = [], sellLabels = [];
+    trades.forEach(t => {
+      const label = new Date(t.traded_at).toLocaleDateString('en-US', {month:'short', day:'numeric'});
+      const y = t.price || priceByLabel[label];
+      if (!y) return;
+      if (t.side === 'buy') { buyPoints.push({x: label, y}); buyLabels.push(`Bought ${t.qty} @ $${parseFloat(y).toFixed(2)}`); }
+      else                  { sellPoints.push({x: label, y}); sellLabels.push(`Sold ${t.qty} @ $${parseFloat(y).toFixed(2)}`); }
+    });
+
     if (priceChart) priceChart.destroy();
     priceChart = new Chart(document.getElementById('price-chart'), {
       type: 'line',
       data: {
         labels,
-        datasets: [{
-          data: prices, borderColor: color, borderWidth: 2,
-          pointRadius: 0, tension: 0.3,
-          fill: true,
-          backgroundColor: color + '15',
-        }]
+        datasets: [
+          {
+            data: prices, borderColor: color, borderWidth: 2,
+            pointRadius: 0, pointHoverRadius: 4, pointHoverBackgroundColor: color, tension: 0.3,
+            fill: true, backgroundColor: color + '15',
+          },
+          {
+            type: 'scatter', label: 'Buy', data: buyPoints,
+            backgroundColor: '#3ecf6e', borderColor: '#fff', borderWidth: 1.5,
+            pointRadius: 8, pointStyle: 'triangle', pointHoverRadius: 10,
+            tooltipLabels: buyLabels,
+          },
+          {
+            type: 'scatter', label: 'Sell', data: sellPoints,
+            backgroundColor: '#f75f5f', borderColor: '#fff', borderWidth: 1.5,
+            pointRadius: 8, pointStyle: 'triangle', rotation: 180, pointHoverRadius: 10,
+            tooltipLabels: sellLabels,
+          },
+        ]
       },
       options: {
-        plugins: { legend: { display: false } },
+        interaction: { mode: 'nearest', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#1a1d27',
+            borderColor: '#2a2d3a',
+            borderWidth: 1,
+            titleColor: '#888',
+            bodyColor: '#e8eaf6',
+            callbacks: {
+              label: ctx => {
+                if (ctx.datasetIndex === 0) return ' $' + ctx.parsed.y.toFixed(2);
+                const labels = ctx.dataset.tooltipLabels || [];
+                return ' ' + (labels[ctx.dataIndex] || (ctx.datasetIndex === 1 ? '▲ Buy' : '▼ Sell'));
+              }
+            }
+          }
+        },
         scales: {
           x: { grid: { color: '#1a1d27' }, ticks: { color: '#555', maxTicksLimit: 8 } },
           y: { grid: { color: '#1a1d27' }, ticks: { color: '#555', callback: v => '$' + v.toFixed(0) } }
@@ -244,7 +301,7 @@ async function loadChart(days, btn) {
         animation: false,
       }
     });
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 async function loadSignals() {

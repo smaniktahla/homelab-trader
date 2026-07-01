@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Scheduled ingest: price history, news, order reconciliation, and universe scan."""
 
-import os, time, logging
+import os, time, logging, smtplib
 import psycopg2
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 from signals import compute_signals
 from scanner import seed_universe, scan_universe, promote_demote
@@ -23,6 +25,11 @@ UNIVERSE_SCAN_INTERVAL = int(os.environ.get("UNIVERSE_SCAN_INTERVAL", "14400")) 
 YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; invest-agent/1.0)"}
 
 TERMINAL_STATUSES = {"filled", "canceled", "expired", "replaced"}
+
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+DIGEST_TO  = os.environ.get("DIGEST_TO", SMTP_USER)
+ATQ_URL    = os.environ.get("ATQ_URL", "http://10.10.10.226:8700")
 
 
 def get_db():
@@ -64,7 +71,7 @@ def ingest_prices(conn, symbols):
                 # Fetch 3 months on first ingest for a symbol, 5 days for updates
                 cur.execute("SELECT COUNT(*) FROM price_history WHERE symbol=%s", (sym,))
                 count = cur.fetchone()[0]
-                yf_range = "3mo" if count == 0 else "5d"
+                yf_range = "1y" if count == 0 else "5d"
                 rows = fetch_prices_yf(sym, yf_range)
                 for row in rows:
                     if None in (row["open"], row["close"]):
@@ -159,6 +166,146 @@ def get_positions():
         return {}
 
 
+def send_digest(conn):
+    """Send daily portfolio digest email + WhatsApp ping after market close."""
+    try:
+        # Fetch account + positions from Alpaca
+        acct = requests.get(f"{ALPACA_BASE}/v2/account", headers=ALPACA_HEADERS, timeout=10).json()
+        pos_list = requests.get(f"{ALPACA_BASE}/v2/positions", headers=ALPACA_HEADERS, timeout=10).json()
+
+        portfolio_value = float(acct.get("portfolio_value", 0))
+        cash = float(acct.get("cash", 0))
+        last_equity = float(acct.get("last_equity", portfolio_value))
+        day_pl = portfolio_value - last_equity
+        day_pct = (day_pl / last_equity * 100) if last_equity else 0
+
+        # SPY benchmark
+        spy_pct = None
+        try:
+            r = requests.get("https://query2.finance.yahoo.com/v8/finance/chart/SPY",
+                             params={"interval": "1d", "range": "2d"},
+                             headers=YF_HEADERS, timeout=10)
+            result = r.json()["chart"]["result"][0]
+            closes = result["indicators"]["quote"][0]["close"]
+            closes = [c for c in closes if c is not None]
+            if len(closes) >= 2:
+                spy_pct = (closes[-1] - closes[-2]) / closes[-2] * 100
+        except Exception:
+            pass
+
+        # Pending proposals
+        with conn.cursor() as cur:
+            cur.execute("SELECT symbol, side, qty, signal_score FROM trade_proposals WHERE decision IS NULL ORDER BY signal_score DESC")
+            proposals = cur.fetchall()
+
+        # Build HTML email
+        sign = lambda v: ("+" if v >= 0 else "") + f"{v:.2f}"
+        color = lambda v: "#2ecc71" if v >= 0 else "#e74c3c"
+
+        pos_rows = ""
+        total_pl = 0
+        for p in pos_list:
+            upl = float(p.get("unrealized_pl", 0))
+            total_pl += upl
+            plpct = float(p.get("unrealized_plpc", 0)) * 100
+            pos_rows += f"""
+            <tr>
+              <td style="padding:6px 12px;font-weight:600">{p['symbol']}</td>
+              <td style="padding:6px 12px">{float(p['qty']):.0f} shares</td>
+              <td style="padding:6px 12px">${float(p['current_price']):.2f}</td>
+              <td style="padding:6px 12px;color:{color(upl)}">{sign(upl)}</td>
+              <td style="padding:6px 12px;color:{color(plpct)}">{sign(plpct)}%</td>
+            </tr>"""
+
+        prop_rows = ""
+        for p in proposals:
+            prop_rows += f"<tr><td style='padding:4px 12px'>{p[0] if isinstance(p, tuple) else p['symbol']}</td><td style='padding:4px 12px'>{p[1] if isinstance(p, tuple) else p['side']}</td><td style='padding:4px 12px'>{p[3] if isinstance(p, tuple) else p['signal_score']}</td></tr>"
+
+        spy_line = f" &nbsp;·&nbsp; SPY {sign(spy_pct)}%" if spy_pct is not None else ""
+        proposals_section = ""
+        if proposals:
+            proposals_section = f"""
+            <h3 style="color:#aaa;font-size:13px;margin:24px 0 8px">PENDING PROPOSALS ({len(proposals)})</h3>
+            <table style="border-collapse:collapse;width:100%">
+              <tr style="color:#888;font-size:11px"><td style="padding:4px 12px">SYMBOL</td><td style="padding:4px 12px">SIDE</td><td style="padding:4px 12px">SCORE</td></tr>
+              {prop_rows}
+            </table>"""
+
+        today = date.today().strftime("%B %d, %Y")
+        html = f"""
+        <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:600px">
+          <h2 style="margin:0 0 4px">Portfolio Digest &mdash; {today}</h2>
+          <p style="color:#888;margin:0 0 20px;font-size:13px">Paper trading · Alpaca</p>
+
+          <div style="display:flex;gap:16px;margin-bottom:24px">
+            <div style="background:#1a1d27;border-radius:8px;padding:14px 20px;flex:1">
+              <div style="color:#888;font-size:11px;margin-bottom:4px">PORTFOLIO VALUE</div>
+              <div style="font-size:22px;font-weight:700">${portfolio_value:,.2f}</div>
+            </div>
+            <div style="background:#1a1d27;border-radius:8px;padding:14px 20px;flex:1">
+              <div style="color:#888;font-size:11px;margin-bottom:4px">TODAY{spy_line}</div>
+              <div style="font-size:22px;font-weight:700;color:{color(day_pl)}">{sign(day_pl)} ({sign(day_pct)}%)</div>
+            </div>
+            <div style="background:#1a1d27;border-radius:8px;padding:14px 20px;flex:1">
+              <div style="color:#888;font-size:11px;margin-bottom:4px">UNREALIZED P&L</div>
+              <div style="font-size:22px;font-weight:700;color:{color(total_pl)}">{sign(total_pl)}</div>
+            </div>
+          </div>
+
+          <h3 style="color:#aaa;font-size:13px;margin:0 0 8px">POSITIONS</h3>
+          <table style="border-collapse:collapse;width:100%;background:#1a1d27;border-radius:8px">
+            <tr style="color:#888;font-size:11px">
+              <td style="padding:6px 12px">SYMBOL</td><td style="padding:6px 12px">SHARES</td>
+              <td style="padding:6px 12px">PRICE</td><td style="padding:6px 12px">P&L</td>
+              <td style="padding:6px 12px">RETURN</td>
+            </tr>
+            {pos_rows}
+          </table>
+
+          {proposals_section}
+
+          <p style="color:#555;font-size:11px;margin-top:24px">
+            <a href="http://10.10.10.13:8100" style="color:#4f8ef7">Open Dashboard</a>
+          </p>
+        </div>"""
+
+        # Send email
+        if SMTP_USER and SMTP_PASS:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"📈 Portfolio Digest {today} | {sign(day_pl)} ({sign(day_pct)}%)"
+            msg["From"] = SMTP_USER
+            msg["To"] = DIGEST_TO
+            msg.attach(MIMEText(html, "html"))
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+                s.login(SMTP_USER, SMTP_PASS)
+                s.sendmail(SMTP_USER, DIGEST_TO, msg.as_string())
+            log.info(f"Digest email sent to {DIGEST_TO}")
+
+        # WhatsApp ping via ATQ
+        spy_note = f" (SPY {sign(spy_pct)}%)" if spy_pct is not None else ""
+        whatsapp_msg = (
+            f"📈 *Portfolio Digest {today}*\n"
+            f"Value: ${portfolio_value:,.0f} | Today: {sign(day_pl)} ({sign(day_pct)}%){spy_note}\n"
+        )
+        for p in pos_list:
+            upl = float(p.get("unrealized_pl", 0))
+            whatsapp_msg += f"  {p['symbol']}: {sign(upl)}\n"
+        if proposals:
+            whatsapp_msg += f"\n⚡ {len(proposals)} pending proposal(s) — check dashboard"
+        try:
+            requests.post(f"{ATQ_URL}/tasks", json={
+                "type": "escalate_user",
+                "instructions": whatsapp_msg,
+                "assigned_to": "hermes-ai2",
+            }, timeout=5)
+            log.info("WhatsApp digest queued via ATQ")
+        except Exception as e:
+            log.warning(f"ATQ WhatsApp ping failed: {e}")
+
+    except Exception as e:
+        log.error(f"Digest failed: {e}")
+
+
 def run_once(conn, last_universe_scan):
     symbols = get_watchlist(conn)
     log.info(f"Watchlist ({len(symbols)} symbols): {symbols}")
@@ -205,11 +352,20 @@ if __name__ == "__main__":
 
     # Trigger universe scan immediately on first run
     last_universe_scan = 0
+    last_digest_date = None
 
     while True:
         conn = get_db()
         try:
             last_universe_scan = run_once(conn, last_universe_scan)
+
+            # Daily digest: weekdays at 21:30 UTC (4:30pm ET)
+            now_utc = datetime.now(timezone.utc)
+            is_weekday = now_utc.weekday() < 5
+            is_digest_hour = now_utc.hour == 21 and now_utc.minute >= 30
+            if is_weekday and is_digest_hour and last_digest_date != now_utc.date():
+                send_digest(conn)
+                last_digest_date = now_utc.date()
         except Exception as e:
             log.error(f"Ingest cycle failed: {e}")
         finally:

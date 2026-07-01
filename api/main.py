@@ -97,11 +97,21 @@ def get_signals_latest():
             side = "buy" if "buy" in row["signal_type"] else "sell"
             if sym not in result:
                 result[sym] = {}
+            rat = row["rationale"] or ""
+            if "ranging" in rat:
+                regime = "ranging"
+            elif "uptrend" in rat or "trending_up" in rat:
+                regime = "trending_up"
+            elif "downtrend" in rat or "trending_down" in rat:
+                regime = "trending_down"
+            else:
+                regime = None
             result[sym][side] = {
                 "score": float(row["score"]) if row["score"] is not None else 0,
-                "rationale": row["rationale"],
+                "rationale": rat,
                 "generated_at": row["generated_at"].isoformat() if row["generated_at"] else None,
                 "rsi": float(row["rsi"]) if row["rsi"] is not None else None,
+                "regime": regime,
             }
         return result
 
