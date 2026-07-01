@@ -1,18 +1,34 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import Optional
-import psycopg2, psycopg2.extras, os, requests as http
+import psycopg2, psycopg2.extras, os, requests as http, secrets
 from datetime import datetime, timezone
 
-app = FastAPI(title="invest-api")
-templates = Jinja2Templates(directory="/app/templates")
 DB_DSN = os.environ["DATABASE_URL"]
 ALPACA_KEY = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.environ.get("ALPACA_API_SECRET", "")
 ALPACA_BASE = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+
+_security = HTTPBasic()
+_AUTH_USER = os.environ.get("INVEST_USER", "invest")
+_AUTH_PASS = os.environ.get("INVEST_PASS", "")
+
+def _check_auth(creds: HTTPBasicCredentials = Depends(_security)):
+    ok = (
+        secrets.compare_digest(creds.username.encode(), _AUTH_USER.encode()) and
+        secrets.compare_digest(creds.password.encode(), _AUTH_PASS.encode())
+    )
+    if not ok:
+        raise HTTPException(status_code=401, detail="Unauthorized",
+                            headers={"WWW-Authenticate": "Basic realm=invest"})
+
+_global_deps = [Depends(_check_auth)] if _AUTH_PASS else []
+app = FastAPI(title="invest-api", dependencies=_global_deps)
+templates = Jinja2Templates(directory="/app/templates")
 
 def db():
     return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)

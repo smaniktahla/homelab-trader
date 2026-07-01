@@ -35,9 +35,9 @@ def get_watchlist(conn):
         return [r[0] for r in cur.fetchall()]
 
 
-def fetch_prices_yf(symbol):
+def fetch_prices_yf(symbol, yf_range="5d"):
     url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"
-    r = requests.get(url, params={"interval": "1d", "range": "5d"},
+    r = requests.get(url, params={"interval": "1d", "range": yf_range},
                      headers=YF_HEADERS, timeout=15)
     r.raise_for_status()
     data = r.json()
@@ -61,7 +61,11 @@ def ingest_prices(conn, symbols):
     with conn.cursor() as cur:
         for sym in symbols:
             try:
-                rows = fetch_prices_yf(sym)
+                # Fetch 3 months on first ingest for a symbol, 5 days for updates
+                cur.execute("SELECT COUNT(*) FROM price_history WHERE symbol=%s", (sym,))
+                count = cur.fetchone()[0]
+                yf_range = "3mo" if count == 0 else "5d"
+                rows = fetch_prices_yf(sym, yf_range)
                 for row in rows:
                     if None in (row["open"], row["close"]):
                         continue
@@ -71,7 +75,7 @@ def ingest_prices(conn, symbols):
                         ON CONFLICT (symbol, ts) DO NOTHING
                     """, (sym, row["ts"], row["open"], row["high"],
                           row["low"], row["close"], row["volume"]))
-                log.info(f"Prices for {sym}: {len(rows)} rows")
+                log.info(f"Prices for {sym}: {len(rows)} rows ({yf_range})")
             except Exception as e:
                 log.warning(f"Price ingest failed for {sym}: {e}")
     conn.commit()
@@ -94,6 +98,7 @@ def ingest_news(conn, symbols):
                     timeout=10)
                 r.raise_for_status()
                 items = r.json()
+                time.sleep(1.1)  # Finnhub free tier: 60 req/min
                 for item in items:
                     cur.execute("""
                         INSERT INTO news (symbol, headline, source, url, published_at, summary)
