@@ -403,3 +403,139 @@ def save_profile(body: ProfileCreate):
             cur.execute("UPDATE signal_params SET value=%s WHERE key=%s", (val, key))
         conn.commit()
     return {"status": "ok"}
+
+
+# ── Portfolio Advisor ─────────────────────────────────────────────────────────
+
+@app.get("/api/advisor")
+def get_advisor():
+    # --- gather inputs ---
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT key, value FROM signal_params")
+        params = {r["key"]: float(r["value"]) for r in cur.fetchall()}
+
+        cur.execute("SELECT * FROM user_profile ORDER BY id DESC LIMIT 1")
+        profile = cur.fetchone()
+
+        # market breadth from latest universe scan
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE buy_score >= 50)  AS oversold_n,
+                COUNT(*) FILTER (WHERE sell_score >= 50) AS overbought_n,
+                COUNT(*) AS total
+            FROM universe_scan
+            WHERE scanned_at > NOW() - INTERVAL '8 hours'
+        """)
+        breadth = cur.fetchone()
+
+        cur.execute("""
+            SELECT symbol, price, rsi, buy_score, sell_score
+            FROM universe_scan
+            WHERE buy_score >= 50
+            AND scanned_at > NOW() - INTERVAL '8 hours'
+            ORDER BY buy_score DESC, rsi ASC
+            LIMIT 5
+        """)
+        top_buys = cur.fetchall()
+
+    # live positions + account
+    try:
+        raw_positions = alpaca("GET", "/v2/positions")
+        account = alpaca("GET", "/v2/account")
+        portfolio_value = float(account["portfolio_value"])
+        cash = float(account["cash"])
+    except Exception:
+        raw_positions, portfolio_value, cash = [], 0, 0
+
+    # --- compute state ---
+    max_pos = int(params.get("max_open_positions", 10))
+    stop_loss_pct = params.get("stop_loss_pct", 0.08)
+    cash_reserve = float(profile["cash_reserve"]) if profile else 0
+
+    n_positions = len(raw_positions)
+    open_slots = max(0, max_pos - n_positions)
+    investable_cash = max(0, cash - cash_reserve)
+    cash_pct = round(cash / portfolio_value * 100, 1) if portfolio_value else 0
+
+    total_scanned = breadth["total"] or 1
+    overbought_pct = round(breadth["overbought_n"] / total_scanned * 100)
+    oversold_pct   = round(breadth["oversold_n"]   / total_scanned * 100)
+    neutral_pct    = 100 - overbought_pct - oversold_pct
+
+    market_extended = overbought_pct > 50
+    market_oversold = oversold_pct > 30
+
+    # stop-loss alerts
+    stop_alerts = []
+    for p in raw_positions:
+        plpc = float(p.get("unrealized_plpc", 0))
+        if plpc <= -stop_loss_pct:
+            stop_alerts.append({
+                "symbol": p["symbol"],
+                "plpc": round(plpc * 100, 2),
+            })
+
+    # --- stance ---
+    if stop_alerts:
+        stance = "warning"
+    elif open_slots == 0 and market_extended:
+        stance = "hold"
+    elif open_slots > 0 and not market_extended and top_buys:
+        stance = "bullish"
+    else:
+        stance = "cautious"
+
+    # --- build bullets ---
+    bullets = []
+
+    # slot / capital situation
+    if open_slots == 0:
+        bullets.append({"type": "info", "text": f"At position limit ({n_positions}/{max_pos}). No new buys until a position closes."})
+    else:
+        per_trade = investable_cash * params.get("trade_allocation_pct", 0.05)
+        bullets.append({"type": "info", "text": f"{open_slots} slot{'s' if open_slots != 1 else ''} open — ~${per_trade:,.0f} available per trade (after ${cash_reserve:,.0f} reserve)"})
+
+    # cash utilization
+    if cash_pct > 60 and open_slots == 0:
+        bullets.append({"type": "caution", "text": f"{cash_pct}% cash sitting idle. Position limit ({max_pos}) is the binding constraint — consider raising max_open_positions."})
+    elif cash_pct > 60:
+        bullets.append({"type": "info", "text": f"{cash_pct}% cash available — plenty of dry powder."})
+
+    # market breadth
+    if market_extended:
+        bullets.append({"type": "caution", "text": f"Market extended: {overbought_pct}% of scanned symbols are overbought. Defer new buys or be selective."})
+    elif market_oversold:
+        bullets.append({"type": "opportunity", "text": f"Broad oversold conditions: {oversold_pct}% of symbols showing buy signals. Good time to deploy capital."})
+    else:
+        bullets.append({"type": "info", "text": f"Market breadth neutral — {overbought_pct}% overbought, {oversold_pct}% oversold."})
+
+    # top buy candidates
+    if open_slots > 0 and top_buys and not market_extended:
+        names = ", ".join(f"{r['symbol']} (RSI {float(r['rsi']):.0f})" for r in top_buys[:3])
+        bullets.append({"type": "opportunity", "text": f"Top buy candidates: {names}"})
+    elif open_slots > 0 and top_buys and market_extended:
+        names = ", ".join(f"{r['symbol']} (RSI {float(r['rsi']):.0f})" for r in top_buys[:3])
+        bullets.append({"type": "info", "text": f"Watchlist for when market cools: {names}"})
+
+    # stop-loss alerts
+    for a in stop_alerts:
+        bullets.append({"type": "alert", "text": f"{a['symbol']} is down {a['plpc']}% — at or past stop-loss threshold ({round(stop_loss_pct*100)}%). Consider selling."})
+
+    # headline
+    headlines = {
+        "warning": f"⚠️ Stop-loss alert on {', '.join(a['symbol'] for a in stop_alerts)}",
+        "hold":    f"Hold — position limit reached and market is extended ({overbought_pct}% overbought)",
+        "bullish": f"{open_slots} slot{'s' if open_slots != 1 else ''} open and market conditions favor buying",
+        "cautious": "Capital available but conditions are mixed — proceed selectively",
+    }
+
+    return {
+        "stance": stance,
+        "headline": headlines[stance],
+        "bullets": bullets,
+        "market_breadth": {"overbought_pct": overbought_pct, "oversold_pct": oversold_pct, "neutral_pct": neutral_pct},
+        "open_slots": open_slots,
+        "max_positions": max_pos,
+        "n_positions": n_positions,
+        "cash_pct": cash_pct,
+    }
