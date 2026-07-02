@@ -161,7 +161,7 @@
       </div>
       <div class="field">
         <label>Shares</label>
-        <input id="modal-qty" type="number" min="0.001" step="0.001" placeholder="10">
+        <input id="modal-qty" type="number" min="1" step="1" placeholder="10">
       </div>
       <div class="modal-actions">
         <button class="btn btn-buy" id="modal-submit-btn" onclick="submitTrade()">Submit</button>
@@ -402,7 +402,7 @@ function closeModal() { document.getElementById('modal').classList.remove('open'
 async function submitTrade() {
   const side = document.getElementById('modal-side').value;
   const qty = parseFloat(document.getElementById('modal-qty').value);
-  if (!qty || isNaN(qty)) { showToast('Enter a qty', 'error'); return; }
+  if (!qty || isNaN(qty) || qty <= 0) { showToast('Quantity must be at least 1', 'error'); return; }
   const btn = document.getElementById('modal-submit-btn');
   btn.disabled = true; btn.textContent = 'Submitting…';
   const r = await fetch('/api/trade', {
