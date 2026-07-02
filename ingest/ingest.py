@@ -26,10 +26,53 @@ YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; invest-agent/1.0)"}
 
 TERMINAL_STATUSES = {"filled", "canceled", "expired", "replaced"}
 
-SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASS = os.environ.get("SMTP_PASS", "")
-DIGEST_TO  = os.environ.get("DIGEST_TO", SMTP_USER)
 ATQ_URL    = os.environ.get("ATQ_URL", "http://10.10.10.226:8700")
+
+# SMTP/notification settings are loaded from app_settings table at send time
+_SMTP_ENV_USER = os.environ.get("SMTP_USER", "")
+_SMTP_ENV_PASS = os.environ.get("SMTP_PASS", "")
+
+
+def get_app_settings(conn):
+    """Load settings from app_settings table, fall back to env vars."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT key, value FROM app_settings")
+        rows = cur.fetchall()
+    s = {r[0]: r[1] for r in rows} if rows else {}
+    return {
+        "smtp_user":        s.get("smtp_user") or _SMTP_ENV_USER,
+        "smtp_pass":        s.get("smtp_pass") or _SMTP_ENV_PASS,
+        "digest_to":        s.get("digest_to") or s.get("smtp_user") or _SMTP_ENV_USER,
+        "atq_url":          s.get("atq_url") or ATQ_URL,
+        "notify_email":     s.get("notify_email", "true") == "true",
+        "notify_whatsapp":  s.get("notify_whatsapp", "true") == "true",
+        "digest_hour_utc":  int(s.get("digest_hour_utc", "21")),
+        "digest_minute_utc": int(s.get("digest_minute_utc", "30")),
+    }
+
+
+def get_last_digest_date(conn):
+    """Read persisted last digest date from DB."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM app_settings WHERE key='last_digest_date'")
+        row = cur.fetchone()
+    if row and row[0]:
+        try:
+            return date.fromisoformat(row[0])
+        except ValueError:
+            pass
+    return None
+
+
+def set_last_digest_date(conn, d: date):
+    """Persist last digest date to DB so restarts don't skip digests."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('last_digest_date', %s) "
+            "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+            (d.isoformat(),)
+        )
+    conn.commit()
 
 
 def get_db():
@@ -269,36 +312,39 @@ def send_digest(conn):
           </p>
         </div>"""
 
+        cfg = get_app_settings(conn)
+
         # Send email
-        if SMTP_USER and SMTP_PASS:
+        if cfg["notify_email"] and cfg["smtp_user"] and cfg["smtp_pass"]:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = f"📈 Portfolio Digest {today} | {sign(day_pl)} ({sign(day_pct)}%)"
-            msg["From"] = SMTP_USER
-            msg["To"] = DIGEST_TO
+            msg["From"] = cfg["smtp_user"]
+            msg["To"] = cfg["digest_to"]
             msg.attach(MIMEText(html, "html"))
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-                s.login(SMTP_USER, SMTP_PASS)
-                s.sendmail(SMTP_USER, DIGEST_TO, msg.as_string())
-            log.info(f"Digest email sent to {DIGEST_TO}")
+                s.login(cfg["smtp_user"], cfg["smtp_pass"])
+                s.sendmail(cfg["smtp_user"], cfg["digest_to"], msg.as_string())
+            log.info(f"Digest email sent to {cfg['digest_to']}")
 
         # WhatsApp ping via ATQ
-        spy_note = f" (SPY {sign(spy_pct)}%)" if spy_pct is not None else ""
-        whatsapp_msg = (
-            f"📈 *Portfolio Digest {today}*\n"
-            f"Value: ${portfolio_value:,.0f} | Today: {sign(day_pl)} ({sign(day_pct)}%){spy_note}\n"
-        )
-        for p in pos_list:
-            upl = float(p.get("unrealized_pl", 0))
-            whatsapp_msg += f"  {p['symbol']}: {sign(upl)}\n"
-        if proposals:
-            whatsapp_msg += f"\n⚡ {len(proposals)} pending proposal(s) — check dashboard"
-        try:
-            requests.post(f"{ATQ_URL}/whatsapp/send", json={
-                "message": whatsapp_msg,
-            }, timeout=10)
-            log.info("WhatsApp digest sent via ATQ proxy")
-        except Exception as e:
-            log.warning(f"WhatsApp send failed: {e}")
+        if cfg["notify_whatsapp"]:
+            spy_note = f" (SPY {sign(spy_pct)}%)" if spy_pct is not None else ""
+            whatsapp_msg = (
+                f"📈 *Portfolio Digest {today}*\n"
+                f"Value: ${portfolio_value:,.0f} | Today: {sign(day_pl)} ({sign(day_pct)}%){spy_note}\n"
+            )
+            for p in pos_list:
+                upl = float(p.get("unrealized_pl", 0))
+                whatsapp_msg += f"  {p['symbol']}: {sign(upl)}\n"
+            if proposals:
+                whatsapp_msg += f"\n⚡ {len(proposals)} pending proposal(s) — check dashboard"
+            try:
+                requests.post(f"{cfg['atq_url']}/whatsapp/send", json={
+                    "message": whatsapp_msg,
+                }, timeout=10)
+                log.info("WhatsApp digest sent via ATQ proxy")
+            except Exception as e:
+                log.warning(f"WhatsApp send failed: {e}")
 
     except Exception as e:
         log.error(f"Digest failed: {e}")
@@ -350,20 +396,26 @@ if __name__ == "__main__":
 
     # Trigger universe scan immediately on first run
     last_universe_scan = 0
-    last_digest_date = None
 
     while True:
         conn = get_db()
         try:
             last_universe_scan = run_once(conn, last_universe_scan)
 
-            # Daily digest: weekdays at 21:30 UTC (4:30pm ET)
+            # Daily digest: weekdays at configured UTC hour (default 21:30 = 4:30pm ET)
             now_utc = datetime.now(timezone.utc)
             is_weekday = now_utc.weekday() < 5
-            is_digest_hour = now_utc.hour == 21 and now_utc.minute >= 30
-            if is_weekday and is_digest_hour and last_digest_date != now_utc.date():
+            try:
+                cfg = get_app_settings(conn)
+                digest_hour = cfg["digest_hour_utc"]
+                digest_minute = cfg["digest_minute_utc"]
+            except Exception:
+                digest_hour, digest_minute = 21, 30
+            is_digest_time = now_utc.hour == digest_hour and now_utc.minute >= digest_minute
+            last_digest_date = get_last_digest_date(conn)
+            if is_weekday and is_digest_time and last_digest_date != now_utc.date():
                 send_digest(conn)
-                last_digest_date = now_utc.date()
+                set_last_digest_date(conn, now_utc.date())
         except Exception as e:
             log.error(f"Ingest cycle failed: {e}")
         finally:

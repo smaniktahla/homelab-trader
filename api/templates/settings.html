@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings — Invest</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0d0f1a; color: #e8eaf6; min-height: 100vh; }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 32px 16px; }
+  h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 4px; }
+  .breadcrumb { color: #555; font-size: .82rem; margin-bottom: 28px; }
+  .breadcrumb a { color: #4f8ef7; text-decoration: none; }
+
+  .section { background: #131520; border: 1px solid #1e2030; border-radius: 10px;
+              padding: 22px 24px; margin-bottom: 20px; }
+  .section-title { font-size: .7rem; letter-spacing: .1em; text-transform: uppercase;
+                   color: #555; margin-bottom: 18px; }
+
+  .field { margin-bottom: 16px; }
+  .field:last-child { margin-bottom: 0; }
+  label { display: block; font-size: .8rem; color: #888; margin-bottom: 6px; }
+  input[type=text], input[type=email], input[type=password], input[type=number], select {
+    width: 100%; background: #0d0f1a; border: 1px solid #2a2d3e; border-radius: 6px;
+    color: #e8eaf6; font-size: .9rem; padding: 9px 12px; outline: none;
+    transition: border-color .15s;
+  }
+  input:focus, select:focus { border-color: #4f8ef7; }
+  .hint { font-size: .74rem; color: #555; margin-top: 4px; }
+
+  .toggle-row { display: flex; align-items: center; justify-content: space-between;
+                padding: 10px 0; border-bottom: 1px solid #1a1d2a; }
+  .toggle-row:last-child { border-bottom: none; padding-bottom: 0; }
+  .toggle-label { font-size: .88rem; }
+  .toggle-desc { font-size: .74rem; color: #555; margin-top: 2px; }
+  .toggle { position: relative; width: 40px; height: 22px; cursor: pointer; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; background: #2a2d3e; border-radius: 22px;
+            transition: background .2s; }
+  .slider::before { content: ''; position: absolute; width: 16px; height: 16px;
+                    left: 3px; top: 3px; background: #fff; border-radius: 50%;
+                    transition: transform .2s; }
+  input:checked + .slider { background: #4f8ef7; }
+  input:checked + .slider::before { transform: translateX(18px); }
+
+  .time-row { display: flex; gap: 12px; }
+  .time-row .field { flex: 1; }
+
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+  .btn { padding: 9px 20px; border-radius: 6px; border: none; font-size: .88rem;
+         cursor: pointer; font-weight: 600; transition: opacity .15s; }
+  .btn:hover { opacity: .85; }
+  .btn-primary { background: #4f8ef7; color: #fff; }
+  .btn-secondary { background: #1e2030; color: #aaa; }
+  .btn-sm { padding: 6px 14px; font-size: .78rem; }
+  .status { font-size: .82rem; padding: 8px 14px; border-radius: 6px;
+            display: none; margin-top: 10px; }
+  .status.ok { background: #0f2a1a; color: #2ecc71; display: block; }
+  .status.err { background: #2a0f14; color: #e74c3c; display: block; }
+
+  .signal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 500px) { .signal-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Settings</h1>
+  <p class="breadcrumb"><a href="/">← Dashboard</a></p>
+
+  <!-- Notifications -->
+  <div class="section">
+    <div class="section-title">Notifications</div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Email digest</div>
+        <div class="toggle-desc">Daily portfolio summary after market close</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="notify_email" onchange="markDirty()">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">WhatsApp digest</div>
+        <div class="toggle-desc">Short summary message via WhatsApp</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="notify_whatsapp" onchange="markDirty()">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div style="margin-top:18px">
+      <div class="time-row">
+        <div class="field">
+          <label>Digest hour (UTC)</label>
+          <input type="number" id="digest_hour_utc" min="0" max="23" oninput="markDirty()">
+          <div class="hint">21 = 4:30pm ET in summer / 5:30pm ET in winter</div>
+        </div>
+        <div class="field">
+          <label>Digest minute (UTC)</label>
+          <input type="number" id="digest_minute_utc" min="0" max="59" oninput="markDirty()">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SMTP -->
+  <div class="section">
+    <div class="section-title">Email (SMTP)</div>
+
+    <div class="field">
+      <label>From address (Gmail)</label>
+      <input type="email" id="smtp_user" placeholder="you@gmail.com" oninput="markDirty()">
+    </div>
+    <div class="field">
+      <label>App password</label>
+      <input type="password" id="smtp_pass" placeholder="Leave blank to keep current" oninput="markDirty()">
+      <div class="hint">Use a Gmail App Password (16-char), not your account password.</div>
+    </div>
+    <div class="field">
+      <label>Send digest to</label>
+      <input type="email" id="digest_to" placeholder="recipient@example.com" oninput="markDirty()">
+      <div class="hint">Defaults to the From address if blank.</div>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-secondary btn-sm" onclick="testEmail()">Send test email</button>
+      <span id="email-status" class="status"></span>
+    </div>
+  </div>
+
+  <!-- ATQ / Infrastructure -->
+  <div class="section">
+    <div class="section-title">Infrastructure</div>
+    <div class="field">
+      <label>ATQ URL</label>
+      <input type="text" id="atq_url" oninput="markDirty()">
+      <div class="hint">Agent Task Queue — used for WhatsApp delivery and task routing.</div>
+    </div>
+  </div>
+
+  <!-- Signal params -->
+  <div class="section">
+    <div class="section-title">Trading Parameters</div>
+    <div class="signal-grid" id="signal-grid">
+      <!-- populated by JS -->
+    </div>
+    <div style="margin-top:16px">
+      <div id="params-status" class="status"></div>
+    </div>
+  </div>
+
+  <!-- Save bar -->
+  <div class="actions" style="justify-content:flex-end">
+    <button class="btn btn-secondary" onclick="location.href='/'">Cancel</button>
+    <button class="btn btn-primary" id="save-btn" onclick="saveSettings()" disabled>Save changes</button>
+  </div>
+  <div id="save-status" class="status"></div>
+</div>
+
+<script>
+let dirty = false;
+const EDITABLE_PARAMS = {
+  trade_allocation_pct: { label: 'Allocation per trade (%)', scale: 100, step: 0.5, min: 1, max: 25 },
+  stop_loss_pct:        { label: 'Stop-loss (%)', scale: 100, step: 0.5, min: 1, max: 30 },
+  score_proposal_min:   { label: 'Min signal score', scale: 1, step: 1, min: 0, max: 100 },
+  max_open_positions:   { label: 'Max open positions', scale: 1, step: 1, min: 1, max: 50 },
+};
+
+function markDirty() {
+  dirty = true;
+  document.getElementById('save-btn').disabled = false;
+}
+
+async function loadSettings() {
+  const r = await fetch('/api/settings');
+  const s = await r.json();
+  document.getElementById('notify_email').checked = s.notify_email === 'true';
+  document.getElementById('notify_whatsapp').checked = s.notify_whatsapp === 'true';
+  document.getElementById('digest_hour_utc').value = s.digest_hour_utc || 21;
+  document.getElementById('digest_minute_utc').value = s.digest_minute_utc || 30;
+  document.getElementById('smtp_user').value = s.smtp_user || '';
+  document.getElementById('smtp_pass').value = '';  // never pre-fill password
+  document.getElementById('digest_to').value = s.digest_to || '';
+  document.getElementById('atq_url').value = s.atq_url || '';
+}
+
+async function loadSignalParams() {
+  const r = await fetch('/api/signal-params');
+  const params = await r.json();
+  const grid = document.getElementById('signal-grid');
+  grid.innerHTML = '';
+  for (const [key, meta] of Object.entries(EDITABLE_PARAMS)) {
+    const row = params.find(p => p.key === key);
+    if (!row) continue;
+    const displayVal = (parseFloat(row.value) * meta.scale).toFixed(meta.step < 1 ? 1 : 0);
+    grid.innerHTML += `
+      <div class="field">
+        <label>${meta.label}</label>
+        <input type="number" id="param_${key}" value="${displayVal}"
+               min="${meta.min}" max="${meta.max}" step="${meta.step}"
+               oninput="saveParam('${key}', this.value, ${meta.scale})">
+      </div>`;
+  }
+}
+
+async function saveParam(key, displayVal, scale) {
+  const value = parseFloat(displayVal) / scale;
+  if (isNaN(value)) return;
+  const r = await fetch(`/api/signal-params/${key}`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({value}),
+  });
+  const el = document.getElementById('params-status');
+  if (r.ok) {
+    el.className = 'status ok';
+    el.textContent = `${key} updated`;
+    el.style.display = 'block';
+    setTimeout(() => el.style.display = 'none', 2000);
+  } else {
+    el.className = 'status err';
+    el.textContent = `Failed to update ${key}`;
+    el.style.display = 'block';
+  }
+}
+
+async function saveSettings() {
+  const body = {
+    smtp_user:         document.getElementById('smtp_user').value,
+    smtp_pass:         document.getElementById('smtp_pass').value,
+    digest_to:         document.getElementById('digest_to').value,
+    atq_url:           document.getElementById('atq_url').value,
+    notify_email:      document.getElementById('notify_email').checked ? 'true' : 'false',
+    notify_whatsapp:   document.getElementById('notify_whatsapp').checked ? 'true' : 'false',
+    digest_hour_utc:   document.getElementById('digest_hour_utc').value,
+    digest_minute_utc: document.getElementById('digest_minute_utc').value,
+  };
+  const r = await fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const el = document.getElementById('save-status');
+  if (r.ok) {
+    el.className = 'status ok';
+    el.textContent = 'Settings saved.';
+    document.getElementById('save-btn').disabled = true;
+    dirty = false;
+    // re-load to normalize
+    setTimeout(loadSettings, 500);
+  } else {
+    const err = await r.json().catch(() => ({}));
+    el.className = 'status err';
+    el.textContent = `Save failed: ${err.detail || r.status}`;
+  }
+  el.style.display = 'block';
+}
+
+async function testEmail() {
+  const el = document.getElementById('email-status');
+  el.style.display = 'none';
+  const r = await fetch('/api/settings/test-email', {method: 'POST'});
+  const data = await r.json().catch(() => ({}));
+  if (r.ok) {
+    el.className = 'status ok';
+    el.textContent = `Test email sent to ${data.sent_to}`;
+  } else {
+    el.className = 'status err';
+    el.textContent = data.detail || 'Test failed';
+  }
+  el.style.display = 'block';
+}
+
+window.addEventListener('beforeunload', e => {
+  if (dirty) e.preventDefault();
+});
+
+loadSettings();
+loadSignalParams();
+</script>
+</body>
+</html>

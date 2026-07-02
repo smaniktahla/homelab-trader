@@ -335,6 +335,100 @@ def update_signal_param(key: str, body: ParamUpdate):
     return {"key": key, "value": body.value}
 
 
+# ── App Settings ─────────────────────────────────────────────────────────────
+
+_SETTINGS_DEFAULTS = {
+    "smtp_user":        os.environ.get("SMTP_USER", ""),
+    "smtp_pass":        os.environ.get("SMTP_PASS", ""),
+    "digest_to":        os.environ.get("DIGEST_TO", os.environ.get("SMTP_USER", "")),
+    "atq_url":          os.environ.get("ATQ_URL", "http://10.10.10.226:8700"),
+    "notify_email":     "true",
+    "notify_whatsapp":  "true",
+    "digest_hour_utc":  "21",
+    "digest_minute_utc": "30",
+}
+
+def _ensure_settings_table(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        for k, v in _SETTINGS_DEFAULTS.items():
+            cur.execute(
+                "INSERT INTO app_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
+                (k, v)
+            )
+        conn.commit()
+
+def get_all_settings():
+    with db() as conn:
+        _ensure_settings_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT key, value FROM app_settings")
+            return {r["key"]: r["value"] for r in cur.fetchall()}
+
+@app.get("/api/settings")
+def api_get_settings():
+    s = get_all_settings()
+    # Never expose password in plaintext — return masked version
+    result = dict(s)
+    if result.get("smtp_pass"):
+        result["smtp_pass_set"] = True
+        result["smtp_pass"] = ""  # don't send to browser
+    else:
+        result["smtp_pass_set"] = False
+    return result
+
+class SettingsUpdate(BaseModel):
+    smtp_user: Optional[str] = None
+    smtp_pass: Optional[str] = None
+    digest_to: Optional[str] = None
+    atq_url: Optional[str] = None
+    notify_email: Optional[str] = None
+    notify_whatsapp: Optional[str] = None
+    digest_hour_utc: Optional[str] = None
+    digest_minute_utc: Optional[str] = None
+
+@app.post("/api/settings")
+def api_save_settings(body: SettingsUpdate):
+    updates = {k: v for k, v in body.dict().items() if v is not None}
+    # Don't overwrite password if blank string was sent (masked field)
+    if "smtp_pass" in updates and updates["smtp_pass"] == "":
+        del updates["smtp_pass"]
+    with db() as conn:
+        _ensure_settings_table(conn)
+        with conn.cursor() as cur:
+            for k, v in updates.items():
+                cur.execute("UPDATE app_settings SET value=%s WHERE key=%s", (v, k))
+        conn.commit()
+    return {"status": "ok", "updated": list(updates.keys())}
+
+@app.post("/api/settings/test-email")
+def test_email():
+    import smtplib
+    from email.mime.text import MIMEText
+    s = get_all_settings()
+    smtp_user = s.get("smtp_user", "")
+    smtp_pass = s.get("smtp_pass", "")
+    digest_to = s.get("digest_to", smtp_user)
+    if not smtp_user or not smtp_pass:
+        raise HTTPException(400, "SMTP credentials not configured")
+    try:
+        msg = MIMEText("This is a test email from homelab-trader.")
+        msg["Subject"] = "homelab-trader — test email"
+        msg["From"] = smtp_user
+        msg["To"] = digest_to
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+            s.login(smtp_user, smtp_pass)
+            s.sendmail(smtp_user, digest_to, msg.as_string())
+        return {"status": "ok", "sent_to": digest_to}
+    except Exception as e:
+        raise HTTPException(502, f"Email failed: {e}")
+
+
 # ── Dashboard UI ──────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -347,6 +441,10 @@ def dashboard(request: Request):
 @app.get("/symbol/{symbol}", response_class=HTMLResponse)
 def symbol_page(request: Request, symbol: str):
     return templates.TemplateResponse("symbol.html", {"request": request, "symbol": symbol.upper()})
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request):
+    return templates.TemplateResponse("settings.html", {"request": request})
 
 
 # ── User Profile / Wizard ─────────────────────────────────────────────────────
