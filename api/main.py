@@ -207,7 +207,7 @@ def execute_trade(req: TradeRequest):
     })
 
     filled_price = float(order.get("filled_avg_price") or order.get("limit_price") or 0)
-    filled_qty = float(order.get("filled_qty") or req.qty)
+    filled_qty = float(order.get("filled_qty") or 0) or req.qty
 
     # Log to DB
     with db() as conn, conn.cursor() as cur:
@@ -259,7 +259,7 @@ def decide_proposal(proposal_id: int, body: ProposalDecision):
                 "side": p["side"], "type": "market", "time_in_force": "gtc",
             })
             filled_price = float(order.get("filled_avg_price") or 0)
-            filled_qty = float(order.get("filled_qty") or p["qty"])
+            filled_qty = float(order.get("filled_qty") or 0) or float(p["qty"])
             cur.execute("""
                 INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
