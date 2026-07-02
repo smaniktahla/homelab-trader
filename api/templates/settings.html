@@ -61,6 +61,20 @@
 
   .signal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 500px) { .signal-grid { grid-template-columns: 1fr; } }
+  /* Tooltips */
+  .tip { position: relative; display: inline-flex; align-items: center; cursor: help; }
+  .tip-icon { width: 14px; height: 14px; border-radius: 50%; background: #2a2d3a; color: #666;
+              font-size: 9px; font-weight: 700; display: inline-flex; align-items: center;
+              justify-content: center; line-height: 1; flex-shrink: 0; margin-left: 4px; }
+  .tip-icon:hover { background: #3a3d4a; color: #aaa; }
+  .tip .tip-text { position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+                   background: #1e2030; border: 1px solid #2a2d3e; border-radius: 7px;
+                   padding: 9px 12px; width: 220px; font-size: .74rem; color: #ccc; line-height: 1.45;
+                   pointer-events: none; opacity: 0; transition: opacity .15s; z-index: 9999;
+                   white-space: normal; text-align: left; }
+  .tip .tip-text::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+                          border: 5px solid transparent; border-top-color: #2a2d3e; }
+  .tip:hover .tip-text, .tip:focus-within .tip-text { opacity: 1; }
 </style>
 </head>
 <body>
@@ -97,7 +111,11 @@
     <div style="margin-top:18px">
       <div class="time-row">
         <div class="field">
-          <label>Digest hour (UTC)</label>
+          <label>Digest hour (UTC)
+            <span class="tip"><span class="tip-icon" tabindex="0">?</span>
+              <span class="tip-text">Hour of day in UTC when the daily digest is sent. 21 UTC = 4:30pm ET (summer) or 5:30pm ET (winter) — just after market close.</span>
+            </span>
+          </label>
           <input type="number" id="digest_hour_utc" min="0" max="23" oninput="markDirty()">
           <div class="hint">21 = 4:30pm ET in summer / 5:30pm ET in winter</div>
         </div>
@@ -118,7 +136,11 @@
       <input type="email" id="smtp_user" placeholder="you@gmail.com" oninput="markDirty()">
     </div>
     <div class="field">
-      <label>App password</label>
+      <label>App password
+        <span class="tip"><span class="tip-icon" tabindex="0">?</span>
+          <span class="tip-text">A Gmail App Password is a 16-character code that lets this app send email on your behalf without using your real password. Create one at myaccount.google.com → Security → App passwords.</span>
+        </span>
+      </label>
       <input type="password" id="smtp_pass" placeholder="Leave blank to keep current" oninput="markDirty()">
       <div class="hint">Use a Gmail App Password (16-char), not your account password.</div>
     </div>
@@ -138,7 +160,11 @@
   <div class="section">
     <div class="section-title">Infrastructure</div>
     <div class="field">
-      <label>ATQ URL</label>
+      <label>ATQ URL
+        <span class="tip"><span class="tip-icon" tabindex="0">?</span>
+          <span class="tip-text">Agent Task Queue — the internal homelab service that routes tasks to Hermes and proxies WhatsApp messages. Only change this if you've moved the ATQ server.</span>
+        </span>
+      </label>
       <input type="text" id="atq_url" oninput="markDirty()">
       <div class="hint">Agent Task Queue — used for WhatsApp delivery and task routing.</div>
     </div>
@@ -166,10 +192,14 @@
 <script>
 let dirty = false;
 const EDITABLE_PARAMS = {
-  trade_allocation_pct: { label: 'Allocation per trade (%)', scale: 100, step: 0.5, min: 1, max: 25 },
-  stop_loss_pct:        { label: 'Stop-loss (%)', scale: 100, step: 0.5, min: 1, max: 30 },
-  score_proposal_min:   { label: 'Min signal score', scale: 1, step: 1, min: 0, max: 100 },
-  max_open_positions:   { label: 'Max open positions', scale: 1, step: 1, min: 1, max: 50 },
+  trade_allocation_pct: { label: 'Allocation per trade (%)', scale: 100, step: 0.5, min: 1, max: 25,
+    tip: 'Percentage of investable capital to put into each new position. 5% on a $10K portfolio = ~$500 per trade.' },
+  stop_loss_pct:        { label: 'Stop-loss (%)', scale: 100, step: 0.5, min: 1, max: 30,
+    tip: 'If a position loses more than this, you\'ll get an alert to sell. Limits your worst-case loss on any single trade.' },
+  score_proposal_min:   { label: 'Min signal score', scale: 1, step: 1, min: 0, max: 100,
+    tip: 'Signals below this score are ignored. Higher = fewer but more confident proposals. Lower = more signals, more noise.' },
+  max_open_positions:   { label: 'Max open positions', scale: 1, step: 1, min: 1, max: 50,
+    tip: 'Maximum stocks held at once. No new buys are proposed once this limit is reached.' },
 };
 
 function markDirty() {
@@ -199,9 +229,12 @@ async function loadSignalParams() {
     const row = params.find(p => p.key === key);
     if (!row) continue;
     const displayVal = (parseFloat(row.value) * meta.scale).toFixed(meta.step < 1 ? 1 : 0);
+    const tipHtml = meta.tip
+      ? `<span class="tip"><span class="tip-icon" tabindex="0">?</span><span class="tip-text">${meta.tip}</span></span>`
+      : '';
     grid.innerHTML += `
       <div class="field">
-        <label>${meta.label}</label>
+        <label style="display:flex;align-items:center;gap:0">${meta.label}${tipHtml}</label>
         <input type="number" id="param_${key}" value="${displayVal}"
                min="${meta.min}" max="${meta.max}" step="${meta.step}"
                oninput="saveParam('${key}', this.value, ${meta.scale})">

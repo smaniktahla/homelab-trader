@@ -111,8 +111,22 @@
   .wiz-derived-row { display:flex; justify-content:space-between; padding:5px 0;
     border-bottom:1px solid #1a1d27; font-size:.84rem; }
   .wiz-derived-row:last-child { border-bottom:none; }
-  .wiz-derived-row .k { color:#666; }
+  .wiz-derived-row .k { color:#666; display:flex; align-items:center; gap:5px; }
   .wiz-derived-row .v { color:#fff; font-weight:600; }
+  /* Tooltips */
+  .tip { position:relative; display:inline-flex; align-items:center; cursor:help; }
+  .tip-icon { width:14px; height:14px; border-radius:50%; background:#2a2d3a; color:#666;
+              font-size:9px; font-weight:700; display:inline-flex; align-items:center;
+              justify-content:center; line-height:1; flex-shrink:0; }
+  .tip-icon:hover { background:#3a3d4a; color:#aaa; }
+  .tip .tip-text { position:absolute; bottom:calc(100% + 6px); left:50%; transform:translateX(-50%);
+                   background:#1e2030; border:1px solid #2a2d3e; border-radius:7px;
+                   padding:9px 12px; width:220px; font-size:.75rem; color:#ccc; line-height:1.45;
+                   pointer-events:none; opacity:0; transition:opacity .15s; z-index:9999;
+                   white-space:normal; text-align:left; }
+  .tip .tip-text::after { content:''; position:absolute; top:100%; left:50%; transform:translateX(-50%);
+                          border:5px solid transparent; border-top-color:#2a2d3e; }
+  .tip:hover .tip-text, .tip:focus-within .tip-text { opacity:1; }
   .wiz-footer { display:flex; justify-content:space-between; align-items:center; margin-top:24px; }
   .wiz-btn { padding:10px 24px; border:none; border-radius:7px; font-size:.88rem;
     font-weight:600; cursor:pointer; }
@@ -630,6 +644,21 @@ function wizCalc() {
   updateWizSummary(investable, allocPct, perTrade, slots);
 }
 
+const TERM_TIPS = {
+  'Allocation per Trade': 'What percentage of your investable capital to put into each new position. 5% means a $10,000 portfolio would put ~$500 into each trade.',
+  'Max Positions': 'The maximum number of stocks you can hold at once. Once this limit is reached, no new buys are suggested until a position is sold.',
+  'Stop-Loss': 'If a position loses more than this percentage of its value, you\'ll get an alert to sell it — limiting your downside on any single trade.',
+  'Min Signal Score': 'How strong a buy or sell signal needs to be before it shows up as a proposal. Higher = fewer but more confident signals. Lower = more signals, noisier.',
+  'Cash Reserve': 'Amount kept out of trading at all times. Think of it as an emergency buffer — the system will never touch this money.',
+  'Investable Capital': 'Your account value minus the cash reserve. This is the pool the system draws from when sizing trades.',
+};
+
+function tip(label) {
+  const text = TERM_TIPS[label];
+  if (!text) return label;
+  return `${label} <span class="tip"><span class="tip-icon" tabindex="0">?</span><span class="tip-text">${text}</span></span>`;
+}
+
 function updateWizSummary(investable, allocPct, perTrade, slots) {
   if (!wizProfile) return;
   const d = WIZ_DEFAULTS[wizProfile];
@@ -644,7 +673,7 @@ function updateWizSummary(investable, allocPct, perTrade, slots) {
     ['Min Signal Score', d.min_score],
   ];
   document.getElementById('wiz-summary').innerHTML = rows.map(([k,v]) =>
-    `<div class="wiz-derived-row"><span class="k">${k}</span><span class="v">${v}</span></div>`
+    `<div class="wiz-derived-row"><span class="k">${tip(k)}</span><span class="v">${v}</span></div>`
   ).join('');
 }
 
