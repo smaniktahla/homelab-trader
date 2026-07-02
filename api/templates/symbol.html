@@ -153,18 +153,25 @@
 <!-- Trade Modal -->
 <div class="modal-bg" id="modal">
   <div class="modal">
-    <h3 id="modal-title">Trade {{ symbol }}</h3>
-    <div class="field">
-      <label>Side</label>
-      <select id="modal-side"><option value="buy">Buy</option><option value="sell">Sell</option></select>
+    <div id="modal-form">
+      <h3 id="modal-title">Trade {{ symbol }}</h3>
+      <div class="field">
+        <label>Side</label>
+        <select id="modal-side"><option value="buy">Buy</option><option value="sell">Sell</option></select>
+      </div>
+      <div class="field">
+        <label>Shares</label>
+        <input id="modal-qty" type="number" min="0.001" step="0.001" placeholder="10">
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-buy" id="modal-submit-btn" onclick="submitTrade()">Submit</button>
+        <button class="btn btn-cancel" onclick="closeModal()">Cancel</button>
+      </div>
     </div>
-    <div class="field">
-      <label>Shares</label>
-      <input id="modal-qty" type="number" min="0.001" step="0.001" placeholder="10">
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-buy" onclick="submitTrade()">Submit</button>
-      <button class="btn btn-cancel" onclick="closeModal()">Cancel</button>
+    <div id="modal-confirm" style="display:none;text-align:center;padding:16px 0">
+      <div style="font-size:2rem;margin-bottom:10px">✅</div>
+      <div id="modal-confirm-msg" style="color:#3ecf6e;font-weight:600;font-size:1rem;margin-bottom:6px"></div>
+      <div style="color:#555;font-size:.8rem">Order submitted to Alpaca</div>
     </div>
   </div>
 </div>
@@ -396,17 +403,30 @@ async function submitTrade() {
   const side = document.getElementById('modal-side').value;
   const qty = parseFloat(document.getElementById('modal-qty').value);
   if (!qty || isNaN(qty)) { showToast('Enter a qty', 'error'); return; }
+  const btn = document.getElementById('modal-submit-btn');
+  btn.disabled = true; btn.textContent = 'Submitting…';
   const r = await fetch('/api/trade', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({symbol: SYMBOL, side, qty, source: 'manual'})
   });
   const data = await r.json();
+  btn.disabled = false; btn.textContent = 'Submit';
   if (r.ok) {
-    showToast(`${side.toUpperCase()} ${qty} ${SYMBOL} submitted`);
-    closeModal();
+    document.getElementById('modal-form').style.display = 'none';
+    const confirmEl = document.getElementById('modal-confirm');
+    confirmEl.style.display = 'block';
+    document.getElementById('modal-confirm-msg').textContent =
+      `${side.toUpperCase()} ${qty} ${SYMBOL} — order received`;
+    setTimeout(() => {
+      closeModal();
+      document.getElementById('modal-form').style.display = 'block';
+      confirmEl.style.display = 'none';
+    }, 2500);
     loadPosition(); loadTrades();
-  } else showToast(data.detail || 'Error', 'error');
+  } else {
+    showToast(data.detail || 'Error', 'error');
+  }
 }
 
 loadHeader();
