@@ -347,3 +347,59 @@ def dashboard(request: Request):
 @app.get("/symbol/{symbol}", response_class=HTMLResponse)
 def symbol_page(request: Request, symbol: str):
     return templates.TemplateResponse("symbol.html", {"request": request, "symbol": symbol.upper()})
+
+
+# ── User Profile / Wizard ─────────────────────────────────────────────────────
+
+PROFILE_PRESETS = {
+    "conservative": {"trade_allocation_pct": 0.03, "stop_loss_pct": 0.05, "score_proposal_min": 55.0},
+    "balanced":     {"trade_allocation_pct": 0.05, "stop_loss_pct": 0.08, "score_proposal_min": 40.0},
+    "aggressive":   {"trade_allocation_pct": 0.08, "stop_loss_pct": 0.12, "score_proposal_min": 30.0},
+}
+
+
+@app.get("/api/profile")
+def get_profile():
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM user_profile ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+class ProfileCreate(BaseModel):
+    risk_profile: str
+    time_horizon: str
+    account_value: float
+    cash_reserve: float
+    investable: float
+    trade_allocation_pct: float
+    max_open_positions: int
+    stop_loss_pct: float
+    score_proposal_min: float
+    notes: Optional[str] = None
+
+
+@app.post("/api/profile")
+def save_profile(body: ProfileCreate):
+    if body.risk_profile not in PROFILE_PRESETS:
+        raise HTTPException(400, "risk_profile must be conservative | balanced | aggressive")
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM user_profile")
+        cur.execute(
+            "INSERT INTO user_profile "
+            "(risk_profile, time_horizon, account_value, cash_reserve, investable, "
+            "trade_allocation_pct, max_open_positions, stop_loss_pct, score_proposal_min, notes) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (body.risk_profile, body.time_horizon, body.account_value, body.cash_reserve,
+             body.investable, body.trade_allocation_pct, body.max_open_positions,
+             body.stop_loss_pct, body.score_proposal_min, body.notes)
+        )
+        for key, val in {
+            "trade_allocation_pct": body.trade_allocation_pct,
+            "max_open_positions": float(body.max_open_positions),
+            "stop_loss_pct": body.stop_loss_pct,
+            "score_proposal_min": body.score_proposal_min,
+        }.items():
+            cur.execute("UPDATE signal_params SET value=%s WHERE key=%s", (val, key))
+        conn.commit()
+    return {"status": "ok"}

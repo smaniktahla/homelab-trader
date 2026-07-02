@@ -77,6 +77,50 @@
 
   /* Universe scan status */
   .scan-status { font-size: .72rem; color: #555; padding: 4px 10px; }
+
+  /* ── Wizard ───────────────────────────────────────────────────── */
+  .wiz-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.85); z-index:500;
+    align-items:center; justify-content:center; }
+  .wiz-overlay.open { display:flex; }
+  .wiz-box { background:#1a1d27; border:1px solid #2a2d3a; border-radius:14px;
+    padding:36px 40px; width:560px; max-width:95vw; }
+  .wiz-step { display:none; }
+  .wiz-step.active { display:block; }
+  .wiz-title { font-size:1.4rem; font-weight:700; color:#fff; margin-bottom:6px; }
+  .wiz-sub { color:#666; font-size:.88rem; margin-bottom:28px; line-height:1.5; }
+  .wiz-progress { display:flex; gap:6px; margin-bottom:28px; }
+  .wiz-dot { height:4px; flex:1; border-radius:2px; background:#2a2d3a; transition:background .3s; }
+  .wiz-dot.done { background:#4f8ef7; }
+  .wiz-cards { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:28px; }
+  .wiz-card { border:2px solid #2a2d3a; border-radius:10px; padding:18px 14px; cursor:pointer;
+    transition:border-color .2s, background .2s; text-align:center; }
+  .wiz-card:hover { border-color:#4f8ef7; background:#1e2235; }
+  .wiz-card.selected { border-color:#4f8ef7; background:#1a2a4a; }
+  .wiz-card .icon { font-size:1.8rem; margin-bottom:8px; }
+  .wiz-card .label { font-weight:700; color:#fff; font-size:.9rem; margin-bottom:4px; }
+  .wiz-card .desc { font-size:.74rem; color:#666; line-height:1.4; }
+  .wiz-row { display:flex; gap:16px; margin-bottom:16px; }
+  .wiz-field { flex:1; }
+  .wiz-field label { display:block; font-size:.75rem; color:#888; margin-bottom:5px;
+    text-transform:uppercase; letter-spacing:.04em; }
+  .wiz-field input { width:100%; background:#0d0f1a; border:1px solid #2a2d3a; border-radius:6px;
+    color:#ccc; padding:10px 12px; font-size:.9rem; }
+  .wiz-field .hint { font-size:.72rem; color:#555; margin-top:4px; }
+  .wiz-derived { background:#0d0f1a; border:1px solid #2a2d3a; border-radius:8px;
+    padding:16px 18px; margin-bottom:20px; }
+  .wiz-derived-row { display:flex; justify-content:space-between; padding:5px 0;
+    border-bottom:1px solid #1a1d27; font-size:.84rem; }
+  .wiz-derived-row:last-child { border-bottom:none; }
+  .wiz-derived-row .k { color:#666; }
+  .wiz-derived-row .v { color:#fff; font-weight:600; }
+  .wiz-footer { display:flex; justify-content:space-between; align-items:center; margin-top:24px; }
+  .wiz-btn { padding:10px 24px; border:none; border-radius:7px; font-size:.88rem;
+    font-weight:600; cursor:pointer; }
+  .wiz-btn-primary { background:#4f8ef7; color:#fff; }
+  .wiz-btn-primary:hover { background:#3a7de8; }
+  .wiz-btn-ghost { background:transparent; color:#555; font-size:.82rem; border:none;
+    cursor:pointer; padding:10px 0; }
+  .wiz-horizon-cards { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:28px; }
 </style>
 </head>
 <body>
@@ -418,6 +462,200 @@ loadLeaderboard();
 loadTrades();
 setInterval(() => { loadAccount(); loadPositions(); loadProposals(); }, 60000);
 setInterval(loadLeaderboard, 300000); // leaderboard refreshes every 5 min
+
+
+// ── Wizard ─────────────────────────────────────────────────────────
+const WIZ_DEFAULTS = {
+  conservative: { alloc: 3, stop: 5, min_score: 55 },
+  balanced:     { alloc: 5, stop: 8, min_score: 40 },
+  aggressive:   { alloc: 8, stop: 12, min_score: 30 },
+};
+let wizProfile = null, wizAccountValue = 0;
+
+async function checkWizard() {
+  const profile = await fetch('/api/profile').then(r => r.json()).catch(() => null);
+  if (!profile) {
+    document.getElementById('wizard').classList.add('open');
+    const acct = await fetch('/api/account').then(r => r.json()).catch(() => null);
+    if (acct) {
+      wizAccountValue = acct.portfolio_value;
+      document.getElementById('w-acct').value = acct.portfolio_value.toFixed(2);
+    }
+  }
+}
+
+function selectProfile(p) {
+  wizProfile = p;
+  document.querySelectorAll('.wiz-card').forEach(c => c.classList.remove('selected'));
+  document.getElementById('wc-' + p).classList.add('selected');
+  document.getElementById('wbtn-1').disabled = false;
+  const d = WIZ_DEFAULTS[p];
+  document.getElementById('w-alloc-pct').value = d.alloc;
+  wizCalc();
+}
+
+function wizCalc() {
+  const reserve = parseFloat(document.getElementById('w-reserve').value) || 0;
+  const investable = Math.max(0, wizAccountValue - reserve);
+  document.getElementById('w-investable').value = investable.toFixed(2);
+  const allocPct = parseFloat(document.getElementById('w-alloc-pct').value) || 5;
+  const perTrade = investable * (allocPct / 100);
+  const slots = perTrade > 0 ? Math.floor(investable / perTrade) : 0;
+  updateWizSummary(investable, allocPct, perTrade, slots);
+}
+
+function updateWizSummary(investable, allocPct, perTrade, slots) {
+  if (!wizProfile) return;
+  const d = WIZ_DEFAULTS[wizProfile];
+  const rows = [
+    ['Risk Profile', wizProfile.charAt(0).toUpperCase() + wizProfile.slice(1)],
+    ['Account Value', '$' + wizAccountValue.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})],
+    ['Cash Reserve', '$' + (wizAccountValue - investable).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})],
+    ['Investable Capital', '$' + investable.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})],
+    ['Allocation per Trade', allocPct + '% = ~$' + perTrade.toLocaleString('en-US', {minimumFractionDigits:0, maximumFractionDigits:0}) + ' / position'],
+    ['Max Positions', slots],
+    ['Stop-Loss', d.stop + '%'],
+    ['Min Signal Score', d.min_score],
+  ];
+  document.getElementById('wiz-summary').innerHTML = rows.map(([k,v]) =>
+    `<div class="wiz-derived-row"><span class="k">${k}</span><span class="v">${v}</span></div>`
+  ).join('');
+}
+
+function wizNext(step) {
+  if (step === 2 && !wizProfile) return;
+  if (step === 3) {
+    const reserve = parseFloat(document.getElementById('w-reserve').value) || 0;
+    const allocPct = parseFloat(document.getElementById('w-alloc-pct').value) || 5;
+    const investable = Math.max(0, wizAccountValue - reserve);
+    const perTrade = investable * (allocPct / 100);
+    const slots = perTrade > 0 ? Math.floor(investable / perTrade) : 20;
+    updateWizSummary(investable, allocPct, perTrade, slots);
+  }
+  document.querySelectorAll('.wiz-step').forEach(s => s.classList.remove('active'));
+  document.getElementById('wstep-' + step).classList.add('active');
+  for (let i = 1; i <= 3; i++) {
+    document.getElementById('wdot-' + i).classList.toggle('done', i <= step);
+  }
+}
+
+async function wizSave() {
+  const reserve = parseFloat(document.getElementById('w-reserve').value) || 0;
+  const allocPct = parseFloat(document.getElementById('w-alloc-pct').value) || 5;
+  const investable = Math.max(0, wizAccountValue - reserve);
+  const perTrade = investable * (allocPct / 100);
+  const slots = perTrade > 0 ? Math.floor(investable / perTrade) : 20;
+  const d = WIZ_DEFAULTS[wizProfile];
+  const r = await fetch('/api/profile', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      risk_profile: wizProfile,
+      time_horizon: 'medium',
+      account_value: wizAccountValue,
+      cash_reserve: reserve,
+      investable: investable,
+      trade_allocation_pct: allocPct / 100,
+      max_open_positions: slots,
+      stop_loss_pct: d.stop / 100,
+      score_proposal_min: d.min_score,
+    })
+  });
+  if (r.ok) {
+    document.getElementById('wizard').classList.remove('open');
+    showToast('Profile saved — strategy active!');
+    loadAccount(); loadPositions();
+  } else {
+    showToast('Error saving profile', 'error');
+  }
+}
+
+checkWizard();
+
 </script>
+
+<!-- Getting Started Wizard -->
+<div class="wiz-overlay" id="wizard">
+  <div class="wiz-box">
+    <div class="wiz-progress">
+      <div class="wiz-dot done" id="wdot-1"></div>
+      <div class="wiz-dot" id="wdot-2"></div>
+      <div class="wiz-dot" id="wdot-3"></div>
+    </div>
+
+    <!-- Step 1: Risk Profile -->
+    <div class="wiz-step active" id="wstep-1">
+      <div class="wiz-title">Welcome to Homelab Trader</div>
+      <div class="wiz-sub">Let's configure your trading strategy. What's your goal with this account?</div>
+      <div class="wiz-cards">
+        <div class="wiz-card" onclick="selectProfile('conservative')" id="wc-conservative">
+          <div class="icon">🛡️</div>
+          <div class="label">Conservative</div>
+          <div class="desc">Retirement & slow growth. Tight stop-losses, selective signals.</div>
+        </div>
+        <div class="wiz-card" onclick="selectProfile('balanced')" id="wc-balanced">
+          <div class="icon">⚖️</div>
+          <div class="label">Balanced</div>
+          <div class="desc">Steady growth, moderate risk. Standard allocation.</div>
+        </div>
+        <div class="wiz-card" onclick="selectProfile('aggressive')" id="wc-aggressive">
+          <div class="icon">🚀</div>
+          <div class="label">Aggressive</div>
+          <div class="desc">Play money. Higher allocation per trade, wider stop-losses.</div>
+        </div>
+      </div>
+      <div class="wiz-footer">
+        <span></span>
+        <button class="wiz-btn wiz-btn-primary" onclick="wizNext(2)" id="wbtn-1" disabled>Next →</button>
+      </div>
+    </div>
+
+    <!-- Step 2: Capital -->
+    <div class="wiz-step" id="wstep-2">
+      <div class="wiz-title">Capital Setup</div>
+      <div class="wiz-sub">Your account balance is auto-detected. Set how much to keep in reserve.</div>
+      <div class="wiz-row">
+        <div class="wiz-field">
+          <label>Account Value</label>
+          <input id="w-acct" type="number" readonly style="opacity:.6">
+          <div class="hint">Fetched from Alpaca</div>
+        </div>
+        <div class="wiz-field">
+          <label>Cash Reserve (keep uninvested)</label>
+          <input id="w-reserve" type="number" placeholder="10000" oninput="wizCalc()">
+          <div class="hint">Always kept as cash buffer</div>
+        </div>
+      </div>
+      <div class="wiz-row">
+        <div class="wiz-field">
+          <label>Investable Capital</label>
+          <input id="w-investable" type="number" readonly style="opacity:.6">
+          <div class="hint">Account value minus reserve</div>
+        </div>
+        <div class="wiz-field">
+          <label>Allocation per Trade</label>
+          <input id="w-alloc-pct" type="number" step="0.5" min="1" max="20" oninput="wizCalc()">
+          <div class="hint">% of investable capital per position</div>
+        </div>
+      </div>
+      <div class="wiz-footer">
+        <button class="wiz-btn-ghost" onclick="wizNext(1)">← Back</button>
+        <button class="wiz-btn wiz-btn-primary" onclick="wizNext(3)">Next →</button>
+      </div>
+    </div>
+
+    <!-- Step 3: Review -->
+    <div class="wiz-step" id="wstep-3">
+      <div class="wiz-title">Review Your Setup</div>
+      <div class="wiz-sub">These settings will be applied immediately. You can adjust them anytime from the Signal Parameters panel.</div>
+      <div class="wiz-derived" id="wiz-summary"></div>
+      <div class="wiz-footer">
+        <button class="wiz-btn-ghost" onclick="wizNext(2)">← Back</button>
+        <button class="wiz-btn wiz-btn-primary" onclick="wizSave()">Save & Start Trading</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
