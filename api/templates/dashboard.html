@@ -167,13 +167,14 @@
   .advisor-meta b { color:#aaa; }
 
   .cand-badges { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
-  .cand-badge { display:inline-flex; align-items:center; gap:5px; padding:4px 10px;
+  .cand-badge { display:inline-flex; flex-direction:column; align-items:flex-start; gap:2px; padding:6px 10px;
     border-radius:20px; font-size:.76rem; font-weight:600; text-decoration:none;
     border:1px solid #2a2d3a; cursor:pointer; transition:opacity .15s; }
   .cand-badge:hover { opacity:.8; }
   .cand-badge.new  { background:#1a2a4a; color:#4f8ef7; border-color:#2a4a7a; }
   .cand-badge.add  { background:#1a3a2a; color:#3ecf6e; border-color:#2a5a3a; }
-  .cand-badge .tag { font-size:.65rem; opacity:.7; text-transform:uppercase; letter-spacing:.04em; }
+  .cand-badge .tag { font-size:.65rem; opacity:.7; text-transform:uppercase; letter-spacing:.04em; margin-bottom:1px; }
+  .cand-badge .cand-main { display:flex; align-items:center; gap:6px; }
 </style>
 </head>
 <body>
@@ -566,12 +567,19 @@ async function loadAdvisor() {
     const candWrap = document.getElementById('adv-candidates');
     if (adv.candidates && adv.candidates.length) {
       candWrap.style.display = 'flex';
-      candWrap.innerHTML = adv.candidates.map(c =>
-        `<a href="/symbol/${c.symbol}" class="cand-badge ${c.is_held ? 'add' : 'new'}">
-          <span class="tag">${c.is_held ? 'ADD' : 'NEW'}</span>
-          ${c.symbol} <span style="opacity:.6">RSI ${c.rsi}</span>
-        </a>`
-      ).join('');
+      candWrap.innerHTML = adv.candidates.map(c => {
+        const sharesLine = c.suggested_shares
+          ? `<span style="opacity:.55;font-size:.68rem">${c.suggested_shares} sh · $${c.suggested_notional?.toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0})}</span>`
+          : '';
+        return `<a href="/symbol/${c.symbol}" class="cand-badge ${c.is_held ? 'add' : 'new'}">
+          <span class="tag">${c.is_held ? 'ADD TO POSITION' : 'NEW POSITION'}</span>
+          <span class="cand-main">
+            <span style="font-weight:700">${c.symbol}</span>
+            <span style="opacity:.6;font-size:.78rem">RSI ${c.rsi}</span>
+          </span>
+          ${sharesLine}
+        </a>`;
+      }).join('');
     } else {
       candWrap.style.display = 'none';
     }

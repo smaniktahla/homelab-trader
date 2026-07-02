@@ -639,15 +639,21 @@ def get_advisor():
     }
 
     # structured candidates for linked display
-    candidates = [
-        {
+    per_trade_notional = investable_cash * params.get("trade_allocation_pct", 0.05)
+    candidates = []
+    for r in top_buys[:6]:
+        price = float(r["price"]) if r.get("price") else 0
+        suggested_shares = int(per_trade_notional / price) if price > 0 else None
+        suggested_notional = round(suggested_shares * price, 2) if suggested_shares else None
+        candidates.append({
             "symbol": r["symbol"],
             "rsi": round(float(r["rsi"]), 1),
             "buy_score": int(r["buy_score"]),
+            "price": round(price, 2),
             "is_held": r["symbol"] in held_symbols,
-        }
-        for r in top_buys[:6]
-    ]
+            "suggested_shares": suggested_shares,
+            "suggested_notional": suggested_notional,
+        })
 
     return {
         "stance": stance,
