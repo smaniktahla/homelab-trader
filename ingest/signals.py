@@ -87,6 +87,7 @@ def fetch_alpaca_portfolio():
                 "avg_entry": float(p["avg_entry_price"]),
                 "current_price": float(p["current_price"]),
                 "market_value": float(p["market_value"]),
+                "unrealized_plpc": float(p["unrealized_plpc"]),
             }
             for p in pos_r.json()
         }

@@ -151,11 +151,23 @@
   .advisor-meta { display:flex; gap:20px; margin-top:4px; flex-wrap:wrap; }
   .advisor-meta span { font-size:.75rem; color:#555; }
   .advisor-meta b { color:#aaa; }
+
+  .cand-badges { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  .cand-badge { display:inline-flex; align-items:center; gap:5px; padding:4px 10px;
+    border-radius:20px; font-size:.76rem; font-weight:600; text-decoration:none;
+    border:1px solid #2a2d3a; cursor:pointer; transition:opacity .15s; }
+  .cand-badge:hover { opacity:.8; }
+  .cand-badge.new  { background:#1a2a4a; color:#4f8ef7; border-color:#2a4a7a; }
+  .cand-badge.add  { background:#1a3a2a; color:#3ecf6e; border-color:#2a5a3a; }
+  .cand-badge .tag { font-size:.65rem; opacity:.7; text-transform:uppercase; letter-spacing:.04em; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Invest Dashboard</h1>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+    <h1>Invest Dashboard</h1>
+    <button onclick="resetProfile()" style="background:none;border:none;color:#444;font-size:.78rem;cursor:pointer;padding:4px 8px;border-radius:4px;" onmouseover="this.style.color='#888'" onmouseout="this.style.color='#444'">⚙ Reconfigure</button>
+  </div>
 
   <!-- Account bar -->
   <div class="account-bar">
@@ -183,6 +195,7 @@
       <span>🔴 <b id="adv-overbought">—</b>% overbought</span>
       <span style="margin-left:auto" id="adv-slots-meta"></span>
     </div>
+    <div class="cand-badges" id="adv-candidates" style="display:none"></div>
   </div>
 
   <!-- Positions -->
@@ -531,6 +544,20 @@ async function loadAdvisor() {
     document.getElementById('adv-overbought').textContent = mb.overbought_pct;
     document.getElementById('adv-slots-meta').textContent =
       `${adv.n_positions}/${adv.max_positions} positions · ${adv.cash_pct}% cash`;
+
+    // Candidate badges
+    const candWrap = document.getElementById('adv-candidates');
+    if (adv.candidates && adv.candidates.length) {
+      candWrap.style.display = 'flex';
+      candWrap.innerHTML = adv.candidates.map(c =>
+        `<a href="/symbol/${c.symbol}" class="cand-badge ${c.is_held ? 'add' : 'new'}">
+          <span class="tag">${c.is_held ? 'ADD' : 'NEW'}</span>
+          ${c.symbol} <span style="opacity:.6">RSI ${c.rsi}</span>
+        </a>`
+      ).join('');
+    } else {
+      candWrap.style.display = 'none';
+    }
   } catch(e) { console.error('advisor:', e); }
 }
 
@@ -553,6 +580,20 @@ const WIZ_DEFAULTS = {
   aggressive:   { alloc: 8, stop: 12, min_score: 30 },
 };
 let wizProfile = null, wizAccountValue = 0;
+
+function resetProfile() {
+  document.getElementById('wizard').classList.add('open');
+  // Reset step to 1
+  wizNext(1); wizProfile = null;
+  document.querySelectorAll('.wiz-card').forEach(c => c.classList.remove('selected'));
+  document.getElementById('wbtn-1').disabled = true;
+  fetch('/api/account').then(r => r.json()).then(acct => {
+    if (acct) {
+      wizAccountValue = acct.portfolio_value;
+      document.getElementById('w-acct').value = acct.portfolio_value.toFixed(2);
+    }
+  }).catch(() => {});
+}
 
 async function checkWizard() {
   const profile = await fetch('/api/profile').then(r => r.json()).catch(() => null);

@@ -434,7 +434,7 @@ def get_advisor():
             WHERE buy_score >= 50
             AND scanned_at > NOW() - INTERVAL '8 hours'
             ORDER BY buy_score DESC, rsi ASC
-            LIMIT 5
+            LIMIT 8
         """)
         top_buys = cur.fetchall()
 
@@ -446,6 +446,8 @@ def get_advisor():
         cash = float(account["cash"])
     except Exception:
         raw_positions, portfolio_value, cash = [], 0, 0
+
+    held_symbols = {p["symbol"] for p in raw_positions}
 
     # --- compute state ---
     max_pos = int(params.get("max_open_positions", 10))
@@ -509,13 +511,22 @@ def get_advisor():
     else:
         bullets.append({"type": "info", "text": f"Market breadth neutral — {overbought_pct}% overbought, {oversold_pct}% oversold."})
 
-    # top buy candidates
-    if open_slots > 0 and top_buys and not market_extended:
-        names = ", ".join(f"{r['symbol']} (RSI {float(r['rsi']):.0f})" for r in top_buys[:3])
-        bullets.append({"type": "opportunity", "text": f"Top buy candidates: {names}"})
-    elif open_slots > 0 and top_buys and market_extended:
-        names = ", ".join(f"{r['symbol']} (RSI {float(r['rsi']):.0f})" for r in top_buys[:3])
-        bullets.append({"type": "info", "text": f"Watchlist for when market cools: {names}"})
+    # top buy candidates — split into new positions vs adding to existing
+    new_buys  = [r for r in top_buys if r["symbol"] not in held_symbols]
+    add_buys  = [r for r in top_buys if r["symbol"] in held_symbols]
+
+    if open_slots > 0 and (new_buys or add_buys) and not market_extended:
+        if new_buys:
+            bullets.append({"type": "opportunity",
+                "text": f"New position candidates: " + ", ".join(f"{r['symbol']} (RSI {float(r['rsi']):.0f})" for r in new_buys[:3])})
+        if add_buys:
+            bullets.append({"type": "opportunity",
+                "text": f"Consider adding to existing: " + ", ".join(f"{r['symbol']} (RSI {float(r['rsi']):.0f})" for r in add_buys[:3])})
+    elif top_buys and market_extended:
+        all_cands = new_buys[:2] + add_buys[:1]
+        if all_cands:
+            bullets.append({"type": "info",
+                "text": "Watchlist for when market cools: " + ", ".join(f"{r['symbol']} (RSI {float(r['rsi']):.0f})" for r in all_cands)})
 
     # stop-loss alerts
     for a in stop_alerts:
@@ -529,10 +540,22 @@ def get_advisor():
         "cautious": "Capital available but conditions are mixed — proceed selectively",
     }
 
+    # structured candidates for linked display
+    candidates = [
+        {
+            "symbol": r["symbol"],
+            "rsi": round(float(r["rsi"]), 1),
+            "buy_score": int(r["buy_score"]),
+            "is_held": r["symbol"] in held_symbols,
+        }
+        for r in top_buys[:6]
+    ]
+
     return {
         "stance": stance,
         "headline": headlines[stance],
         "bullets": bullets,
+        "candidates": candidates,
         "market_breadth": {"overbought_pct": overbought_pct, "oversold_pct": oversold_pct, "neutral_pct": neutral_pct},
         "open_slots": open_slots,
         "max_positions": max_pos,
