@@ -109,18 +109,34 @@
     </div>
 
     <div style="margin-top:18px">
+      <div style="color:#666;font-size:.74rem;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Morning briefing time (UTC)</div>
       <div class="time-row">
         <div class="field">
-          <label>Digest hour (UTC)
+          <label>Hour
             <span class="tip"><span class="tip-icon" tabindex="0">?</span>
-              <span class="tip-text">Hour of day in UTC when the daily digest is sent. 21 UTC = 4:30pm ET (summer) or 5:30pm ET (winter) — just after market close.</span>
+              <span class="tip-text">13 UTC = 9:30am ET — sent at market open with your positions and top candidates for the day.</span>
+            </span>
+          </label>
+          <input type="number" id="morning_hour_utc" min="0" max="23" oninput="markDirty()">
+        </div>
+        <div class="field">
+          <label>Minute</label>
+          <input type="number" id="morning_minute_utc" min="0" max="59" oninput="markDirty()">
+        </div>
+      </div>
+
+      <div style="color:#666;font-size:.74rem;text-transform:uppercase;letter-spacing:.06em;margin:16px 0 8px">Evening digest time (UTC)</div>
+      <div class="time-row">
+        <div class="field">
+          <label>Hour
+            <span class="tip"><span class="tip-icon" tabindex="0">?</span>
+              <span class="tip-text">21 UTC = 4:30pm ET — sent after market close with daily P&amp;L and portfolio summary.</span>
             </span>
           </label>
           <input type="number" id="digest_hour_utc" min="0" max="23" oninput="markDirty()">
-          <div class="hint">21 = 4:30pm ET in summer / 5:30pm ET in winter</div>
         </div>
         <div class="field">
-          <label>Digest minute (UTC)</label>
+          <label>Minute</label>
           <input type="number" id="digest_minute_utc" min="0" max="59" oninput="markDirty()">
         </div>
       </div>
@@ -170,6 +186,60 @@
     </div>
   </div>
 
+  <!-- Alerts -->
+  <div class="section">
+    <div class="section-title">Alerts</div>
+    <div class="hint" style="margin-bottom:14px">Sent immediately via email + WhatsApp when triggered. Throttled to once per 4 hours per condition.</div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Stop-loss alert
+          <span class="tip"><span class="tip-icon" tabindex="0">?</span>
+            <span class="tip-text">Fires immediately if any position drops past your stop-loss % threshold. Won't re-alert for the same symbol for 4 hours.</span>
+          </span>
+        </div>
+        <div class="toggle-desc">Notify when a position hits the stop-loss threshold</div>
+      </div>
+      <label class="toggle"><input type="checkbox" id="alert_stop_loss" onchange="markDirty()"><span class="slider"></span></label>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Portfolio drop alert
+          <span class="tip"><span class="tip-icon" tabindex="0">?</span>
+            <span class="tip-text">Fires if your entire portfolio falls more than the threshold % in a single day.</span>
+          </span>
+        </div>
+        <div class="toggle-desc">Notify when overall portfolio drops significantly in one day</div>
+      </div>
+      <label class="toggle"><input type="checkbox" id="alert_portfolio_drop" onchange="markDirty()"><span class="slider"></span></label>
+    </div>
+    <div class="field" style="margin-top:10px;padding-left:4px">
+      <label>Portfolio drop threshold (%)
+        <span class="tip"><span class="tip-icon" tabindex="0">?</span>
+          <span class="tip-text">Alert fires if your portfolio loses more than this percentage in a single trading day. Default: 3%.</span>
+        </span>
+      </label>
+      <input type="number" id="alert_portfolio_drop_pct" min="0.5" max="20" step="0.5" oninput="markDirty()" style="max-width:120px">
+    </div>
+
+    <div class="toggle-row" style="margin-top:8px">
+      <div>
+        <div class="toggle-label">High-confidence signal alert
+          <span class="tip"><span class="tip-icon" tabindex="0">?</span>
+            <span class="tip-text">Fires when a signal score exceeds your threshold — a strong buy or sell opportunity you may want to act on quickly.</span>
+          </span>
+        </div>
+        <div class="toggle-desc">Notify when a signal scores above the threshold</div>
+      </div>
+      <label class="toggle"><input type="checkbox" id="alert_high_score" onchange="markDirty()"><span class="slider"></span></label>
+    </div>
+    <div class="field" style="margin-top:10px;padding-left:4px">
+      <label>Min alert score</label>
+      <input type="number" id="alert_high_score_min" min="50" max="100" step="1" oninput="markDirty()" style="max-width:120px">
+    </div>
+  </div>
+
   <!-- Signal params -->
   <div class="section">
     <div class="section-title">Trading Parameters</div>
@@ -214,10 +284,17 @@ async function loadSettings() {
   document.getElementById('notify_whatsapp').checked = s.notify_whatsapp === 'true';
   document.getElementById('digest_hour_utc').value = s.digest_hour_utc || 21;
   document.getElementById('digest_minute_utc').value = s.digest_minute_utc || 30;
+  document.getElementById('morning_hour_utc').value = s.morning_hour_utc || 13;
+  document.getElementById('morning_minute_utc').value = s.morning_minute_utc || 30;
   document.getElementById('smtp_user').value = s.smtp_user || '';
   document.getElementById('smtp_pass').value = '';  // never pre-fill password
   document.getElementById('digest_to').value = s.digest_to || '';
   document.getElementById('atq_url').value = s.atq_url || '';
+  document.getElementById('alert_stop_loss').checked = s.alert_stop_loss !== 'false';
+  document.getElementById('alert_portfolio_drop').checked = s.alert_portfolio_drop !== 'false';
+  document.getElementById('alert_portfolio_drop_pct').value = s.alert_portfolio_drop_pct || 3.0;
+  document.getElementById('alert_high_score').checked = s.alert_high_score !== 'false';
+  document.getElementById('alert_high_score_min').value = s.alert_high_score_min || 80;
 }
 
 async function loadSignalParams() {
@@ -265,14 +342,21 @@ async function saveParam(key, displayVal, scale) {
 
 async function saveSettings() {
   const body = {
-    smtp_user:         document.getElementById('smtp_user').value,
-    smtp_pass:         document.getElementById('smtp_pass').value,
-    digest_to:         document.getElementById('digest_to').value,
-    atq_url:           document.getElementById('atq_url').value,
-    notify_email:      document.getElementById('notify_email').checked ? 'true' : 'false',
-    notify_whatsapp:   document.getElementById('notify_whatsapp').checked ? 'true' : 'false',
-    digest_hour_utc:   document.getElementById('digest_hour_utc').value,
-    digest_minute_utc: document.getElementById('digest_minute_utc').value,
+    smtp_user:              document.getElementById('smtp_user').value,
+    smtp_pass:              document.getElementById('smtp_pass').value,
+    digest_to:              document.getElementById('digest_to').value,
+    atq_url:                document.getElementById('atq_url').value,
+    notify_email:           document.getElementById('notify_email').checked ? 'true' : 'false',
+    notify_whatsapp:        document.getElementById('notify_whatsapp').checked ? 'true' : 'false',
+    digest_hour_utc:        document.getElementById('digest_hour_utc').value,
+    digest_minute_utc:      document.getElementById('digest_minute_utc').value,
+    morning_hour_utc:       document.getElementById('morning_hour_utc').value,
+    morning_minute_utc:     document.getElementById('morning_minute_utc').value,
+    alert_stop_loss:        document.getElementById('alert_stop_loss').checked ? 'true' : 'false',
+    alert_portfolio_drop:   document.getElementById('alert_portfolio_drop').checked ? 'true' : 'false',
+    alert_portfolio_drop_pct: document.getElementById('alert_portfolio_drop_pct').value,
+    alert_high_score:       document.getElementById('alert_high_score').checked ? 'true' : 'false',
+    alert_high_score_min:   document.getElementById('alert_high_score_min').value,
   };
   const r = await fetch('/api/settings', {
     method: 'POST',

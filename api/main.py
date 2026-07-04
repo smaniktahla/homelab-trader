@@ -342,10 +342,17 @@ _SETTINGS_DEFAULTS = {
     "smtp_pass":        os.environ.get("SMTP_PASS", ""),
     "digest_to":        os.environ.get("DIGEST_TO", os.environ.get("SMTP_USER", "")),
     "atq_url":          os.environ.get("ATQ_URL", "http://10.10.10.226:8700"),
-    "notify_email":     "true",
-    "notify_whatsapp":  "true",
-    "digest_hour_utc":  "21",
-    "digest_minute_utc": "30",
+    "notify_email":           "true",
+    "notify_whatsapp":        "true",
+    "digest_hour_utc":        "21",
+    "digest_minute_utc":      "30",
+    "morning_hour_utc":       "13",
+    "morning_minute_utc":     "30",
+    "alert_stop_loss":        "true",
+    "alert_portfolio_drop":   "true",
+    "alert_portfolio_drop_pct": "3.0",
+    "alert_high_score":       "true",
+    "alert_high_score_min":   "80",
 }
 
 def _ensure_settings_table(conn):
@@ -391,6 +398,13 @@ class SettingsUpdate(BaseModel):
     notify_whatsapp: Optional[str] = None
     digest_hour_utc: Optional[str] = None
     digest_minute_utc: Optional[str] = None
+    morning_hour_utc: Optional[str] = None
+    morning_minute_utc: Optional[str] = None
+    alert_stop_loss: Optional[str] = None
+    alert_portfolio_drop: Optional[str] = None
+    alert_portfolio_drop_pct: Optional[str] = None
+    alert_high_score: Optional[str] = None
+    alert_high_score_min: Optional[str] = None
 
 @app.post("/api/settings")
 def api_save_settings(body: SettingsUpdate):

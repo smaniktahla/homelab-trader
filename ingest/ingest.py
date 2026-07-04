@@ -40,39 +40,109 @@ def get_app_settings(conn):
         rows = cur.fetchall()
     s = {r[0]: r[1] for r in rows} if rows else {}
     return {
-        "smtp_user":        s.get("smtp_user") or _SMTP_ENV_USER,
-        "smtp_pass":        s.get("smtp_pass") or _SMTP_ENV_PASS,
-        "digest_to":        s.get("digest_to") or s.get("smtp_user") or _SMTP_ENV_USER,
-        "atq_url":          s.get("atq_url") or ATQ_URL,
-        "notify_email":     s.get("notify_email", "true") == "true",
-        "notify_whatsapp":  s.get("notify_whatsapp", "true") == "true",
-        "digest_hour_utc":  int(s.get("digest_hour_utc", "21")),
-        "digest_minute_utc": int(s.get("digest_minute_utc", "30")),
+        "smtp_user":              s.get("smtp_user") or _SMTP_ENV_USER,
+        "smtp_pass":              s.get("smtp_pass") or _SMTP_ENV_PASS,
+        "digest_to":              s.get("digest_to") or s.get("smtp_user") or _SMTP_ENV_USER,
+        "atq_url":                s.get("atq_url") or ATQ_URL,
+        "notify_email":           s.get("notify_email", "true") == "true",
+        "notify_whatsapp":        s.get("notify_whatsapp", "true") == "true",
+        "digest_hour_utc":        int(s.get("digest_hour_utc", "21")),
+        "digest_minute_utc":      int(s.get("digest_minute_utc", "30")),
+        "morning_hour_utc":       int(s.get("morning_hour_utc", "13")),
+        "morning_minute_utc":     int(s.get("morning_minute_utc", "30")),
+        "alert_stop_loss":        s.get("alert_stop_loss", "true") == "true",
+        "alert_portfolio_drop":   s.get("alert_portfolio_drop", "true") == "true",
+        "alert_portfolio_drop_pct": float(s.get("alert_portfolio_drop_pct", "3.0")),
+        "alert_high_score":       s.get("alert_high_score", "true") == "true",
+        "alert_high_score_min":   float(s.get("alert_high_score_min", "80")),
     }
 
 
-def get_last_digest_date(conn):
-    """Read persisted last digest date from DB."""
+def get_kv(conn, key):
+    """Read a single value from app_settings."""
     with conn.cursor() as cur:
-        cur.execute("SELECT value FROM app_settings WHERE key='last_digest_date'")
+        cur.execute("SELECT value FROM app_settings WHERE key=%s", (key,))
         row = cur.fetchone()
     if row and row[0]:
+        return row[0]
+    return None
+
+def set_kv(conn, key, value):
+    """Write a single value to app_settings."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO app_settings (key, value) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+            (key, str(value))
+        )
+    conn.commit()
+
+def get_last_digest_date(conn):
+    v = get_kv(conn, "last_digest_date")
+    if v:
         try:
-            return date.fromisoformat(row[0])
+            return date.fromisoformat(v)
         except ValueError:
             pass
     return None
 
-
 def set_last_digest_date(conn, d: date):
-    """Persist last digest date to DB so restarts don't skip digests."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO app_settings (key, value) VALUES ('last_digest_date', %s) "
-            "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
-            (d.isoformat(),)
-        )
-    conn.commit()
+    set_kv(conn, "last_digest_date", d.isoformat())
+
+def get_last_morning_date(conn):
+    v = get_kv(conn, "last_morning_date")
+    if v:
+        try:
+            return date.fromisoformat(v)
+        except ValueError:
+            pass
+    return None
+
+def set_last_morning_date(conn, d: date):
+    set_kv(conn, "last_morning_date", d.isoformat())
+
+def alert_throttled(conn, alert_key, hours=4):
+    """Return True if we've already sent this alert within the throttle window."""
+    v = get_kv(conn, f"alert_sent_{alert_key}")
+    if v:
+        try:
+            last = datetime.fromisoformat(v)
+            if (datetime.now(timezone.utc) - last).total_seconds() < hours * 3600:
+                return True
+        except ValueError:
+            pass
+    return False
+
+def mark_alert_sent(conn, alert_key):
+    set_kv(conn, f"alert_sent_{alert_key}", datetime.now(timezone.utc).isoformat())
+
+def get_market_status():
+    """
+    Returns (is_trading_day, is_currently_open, next_open_str).
+    Uses Alpaca /v2/calendar to determine if today is a scheduled trading day.
+    """
+    today_str = date.today().isoformat()
+    try:
+        r = requests.get(f"{ALPACA_BASE}/v2/calendar",
+                         params={"start": today_str, "end": today_str},
+                         headers=ALPACA_HEADERS, timeout=8)
+        r.raise_for_status()
+        calendar = r.json()
+        is_trading_day = len(calendar) > 0
+    except Exception as e:
+        log.warning(f"Could not check market calendar: {e}")
+        is_trading_day = True  # assume trading on failure
+
+    try:
+        r2 = requests.get(f"{ALPACA_BASE}/v2/clock", headers=ALPACA_HEADERS, timeout=8)
+        r2.raise_for_status()
+        clock = r2.json()
+        is_open = clock.get("is_open", False)
+        next_open = clock.get("next_open", "")[:10]
+    except Exception:
+        is_open, next_open = False, ""
+
+    return is_trading_day, is_open, next_open
 
 
 def get_db():
@@ -350,6 +420,228 @@ def send_digest(conn):
         log.error(f"Digest failed: {e}")
 
 
+def send_notification(cfg, subject, html_body, whatsapp_text, log_label="notification"):
+    """Send email + WhatsApp based on cfg toggles."""
+    if cfg["notify_email"] and cfg["smtp_user"] and cfg["smtp_pass"]:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = cfg["smtp_user"]
+            msg["To"] = cfg["digest_to"]
+            msg.attach(MIMEText(html_body, "html"))
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+                s.login(cfg["smtp_user"], cfg["smtp_pass"])
+                s.sendmail(cfg["smtp_user"], cfg["digest_to"], msg.as_string())
+            log.info(f"{log_label} email sent to {cfg['digest_to']}")
+        except Exception as e:
+            log.error(f"{log_label} email failed: {e}")
+
+    if cfg["notify_whatsapp"] and whatsapp_text:
+        try:
+            requests.post(f"{cfg['atq_url']}/whatsapp/send",
+                          json={"message": whatsapp_text}, timeout=10)
+            log.info(f"{log_label} WhatsApp sent")
+        except Exception as e:
+            log.warning(f"{log_label} WhatsApp failed: {e}")
+
+
+def send_holiday_digest(conn, cfg, next_open=""):
+    """Send a brief 'markets closed today' message on weekday holidays."""
+    today = date.today().strftime("%B %d, %Y")
+    next_open_str = f" Markets reopen {next_open}." if next_open else ""
+
+    html = f"""
+    <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:600px">
+      <h2 style="margin:0 0 8px">📅 Markets Closed — {today}</h2>
+      <p style="color:#888">It's a market holiday today — no trading activity, no new signals.{next_open_str}</p>
+      <p style="color:#555;font-size:11px;margin-top:20px">
+        <a href="http://10.10.10.13:8100" style="color:#4f8ef7">Open Dashboard</a>
+      </p>
+    </div>"""
+    whatsapp = f"📅 Markets closed today ({today}).{next_open_str} No new signals — enjoy the day!"
+    send_notification(cfg, f"📅 Markets Closed — {today}", html, whatsapp, "holiday")
+
+
+def send_morning_digest(conn, cfg):
+    """Send pre-market morning briefing."""
+    try:
+        acct = requests.get(f"{ALPACA_BASE}/v2/account", headers=ALPACA_HEADERS, timeout=10).json()
+        pos_list = requests.get(f"{ALPACA_BASE}/v2/positions", headers=ALPACA_HEADERS, timeout=10).json()
+
+        portfolio_value = float(acct.get("portfolio_value", 0))
+        cash = float(acct.get("cash", 0))
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT symbol, side, qty, signal_score FROM trade_proposals WHERE decision IS NULL ORDER BY signal_score DESC LIMIT 5")
+            proposals = cur.fetchall()
+            cur.execute("""
+                SELECT symbol, price, rsi, buy_score FROM universe_scan
+                WHERE buy_score >= 50 AND scanned_at > NOW() - INTERVAL '12 hours'
+                ORDER BY buy_score DESC, rsi ASC LIMIT 5
+            """)
+            top_buys = cur.fetchall()
+            cur.execute("SELECT key, value FROM signal_params WHERE key='stop_loss_pct'")
+            sl_row = cur.fetchone()
+            stop_loss_pct = float(sl_row[1]) if sl_row else 0.08
+
+        today = date.today().strftime("%B %d, %Y")
+        sign = lambda v: ("+" if v >= 0 else "") + f"{v:.2f}"
+
+        # Positions table
+        pos_rows = ""
+        stop_alerts = []
+        for p in pos_list:
+            plpc = float(p.get("unrealized_plpc", 0)) * 100
+            upl = float(p.get("unrealized_pl", 0))
+            color = "#2ecc71" if upl >= 0 else "#e74c3c"
+            if float(p.get("unrealized_plpc", 0)) <= -stop_loss_pct:
+                stop_alerts.append(p["symbol"])
+            pos_rows += f"""
+            <tr>
+              <td style="padding:5px 12px;font-weight:600">{p['symbol']}</td>
+              <td style="padding:5px 12px">{float(p['qty']):.0f}</td>
+              <td style="padding:5px 12px">${float(p['current_price']):.2f}</td>
+              <td style="padding:5px 12px;color:{color}">{sign(upl)} ({sign(plpc)}%)</td>
+            </tr>"""
+
+        stop_html = ""
+        if stop_alerts:
+            stop_html = f"<p style='color:#e74c3c;font-weight:600'>⚠️ Near stop-loss: {', '.join(stop_alerts)}</p>"
+
+        prop_html = ""
+        if proposals:
+            rows = "".join(f"<tr><td style='padding:4px 12px'>{p[0]}</td><td style='padding:4px 12px'>{p[1]}</td><td style='padding:4px 12px'>{p[3]}</td></tr>" for p in proposals)
+            prop_html = f"""
+            <h3 style="color:#aaa;font-size:13px;margin:20px 0 8px">PENDING PROPOSALS ({len(proposals)})</h3>
+            <table style="border-collapse:collapse;background:#1a1d27;border-radius:8px;width:100%">
+              <tr style="color:#888;font-size:11px"><td style="padding:4px 12px">SYMBOL</td><td style="padding:4px 12px">SIDE</td><td style="padding:4px 12px">SCORE</td></tr>
+              {rows}
+            </table>"""
+
+        watch_html = ""
+        if top_buys:
+            badges = " ".join(f"<span style='background:#1a2a4a;color:#4f8ef7;border:1px solid #2a4a7a;padding:3px 10px;border-radius:20px;font-size:.82rem;font-weight:600'>{r[0]} RSI {float(r[2]):.0f}</span>" for r in top_buys)
+            watch_html = f"<h3 style='color:#aaa;font-size:13px;margin:20px 0 8px'>WATCH TODAY</h3><div style='display:flex;flex-wrap:wrap;gap:6px'>{badges}</div>"
+
+        html = f"""
+        <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:600px">
+          <h2 style="margin:0 0 4px">☀️ Morning Briefing — {today}</h2>
+          <p style="color:#888;margin:0 0 20px;font-size:13px">Portfolio: ${portfolio_value:,.2f} &nbsp;·&nbsp; Cash: ${cash:,.2f}</p>
+          {stop_html}
+          <h3 style="color:#aaa;font-size:13px;margin:0 0 8px">YOUR POSITIONS</h3>
+          <table style="border-collapse:collapse;width:100%;background:#1a1d27;border-radius:8px">
+            <tr style="color:#888;font-size:11px">
+              <td style="padding:5px 12px">SYMBOL</td><td style="padding:5px 12px">QTY</td>
+              <td style="padding:5px 12px">PRICE</td><td style="padding:5px 12px">UNREALIZED P&L</td>
+            </tr>
+            {pos_rows}
+          </table>
+          {prop_html}
+          {watch_html}
+          <p style="color:#555;font-size:11px;margin-top:24px">
+            <a href="http://10.10.10.13:8100" style="color:#4f8ef7">Open Dashboard</a>
+          </p>
+        </div>"""
+
+        pos_summary = " | ".join(f"{p['symbol']} {sign(float(p['unrealized_plpc'])*100)}%" for p in pos_list[:5])
+        whatsapp = f"☀️ *Morning Briefing — {today}*\nPortfolio: ${portfolio_value:,.0f} · Cash: ${cash:,.0f}\n{pos_summary}"
+        if stop_alerts:
+            whatsapp += f"\n⚠️ Near stop-loss: {', '.join(stop_alerts)}"
+        if proposals:
+            whatsapp += f"\n⚡ {len(proposals)} pending proposal(s)"
+        if top_buys:
+            whatsapp += f"\n👀 Watch: {', '.join(r[0] for r in top_buys[:3])}"
+
+        send_notification(cfg, f"☀️ Morning Briefing — {today}", html, whatsapp, "morning digest")
+
+    except Exception as e:
+        log.error(f"Morning digest failed: {e}")
+
+
+def check_alerts(conn, cfg):
+    """Check for drastic conditions each cycle and send immediate alerts."""
+    try:
+        acct = requests.get(f"{ALPACA_BASE}/v2/account", headers=ALPACA_HEADERS, timeout=10).json()
+        pos_list = requests.get(f"{ALPACA_BASE}/v2/positions", headers=ALPACA_HEADERS, timeout=10).json()
+        portfolio_value = float(acct.get("portfolio_value", 0))
+        last_equity = float(acct.get("last_equity", portfolio_value))
+    except Exception as e:
+        log.warning(f"Alert check: could not fetch account data: {e}")
+        return
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT key, value FROM signal_params WHERE key IN ('stop_loss_pct')")
+        params = {r[0]: float(r[1]) for r in cur.fetchall()}
+    stop_loss_pct = params.get("stop_loss_pct", 0.08)
+
+    # ── Stop-loss alerts ──────────────────────────────────────────────────
+    if cfg["alert_stop_loss"]:
+        for p in pos_list:
+            plpc = float(p.get("unrealized_plpc", 0))
+            if plpc <= -stop_loss_pct:
+                sym = p["symbol"]
+                key = f"stoploss_{sym}"
+                if not alert_throttled(conn, key, hours=4):
+                    pct_str = f"{plpc*100:.1f}%"
+                    subject = f"🚨 Stop-Loss Alert: {sym} is down {pct_str}"
+                    html = f"""
+                    <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:500px">
+                      <h2 style="color:#e74c3c;margin:0 0 12px">🚨 Stop-Loss Alert</h2>
+                      <p><strong>{sym}</strong> is down <strong style="color:#e74c3c">{pct_str}</strong> — at or past your {round(stop_loss_pct*100)}% stop-loss threshold.</p>
+                      <p style="color:#888;margin-top:12px">Consider selling to limit further losses. Current price: ${float(p['current_price']):.2f}</p>
+                      <p style="margin-top:20px"><a href="http://10.10.10.13:8100/symbol/{sym}" style="color:#4f8ef7">View {sym} →</a></p>
+                    </div>"""
+                    whatsapp = f"🚨 *Stop-Loss Alert: {sym}*\nDown {pct_str} — past your {round(stop_loss_pct*100)}% threshold. Consider selling.\nPrice: ${float(p['current_price']):.2f}\nDashboard: http://10.10.10.13:8100/symbol/{sym}"
+                    send_notification(cfg, subject, html, whatsapp, f"stop-loss alert {sym}")
+                    mark_alert_sent(conn, key)
+
+    # ── Portfolio drop alert ──────────────────────────────────────────────
+    if cfg["alert_portfolio_drop"] and last_equity > 0:
+        day_drop_pct = (portfolio_value - last_equity) / last_equity * 100
+        threshold = -cfg["alert_portfolio_drop_pct"]
+        if day_drop_pct <= threshold and not alert_throttled(conn, "portfolio_drop", hours=4):
+            subject = f"📉 Portfolio Down {day_drop_pct:.1f}% Today"
+            html = f"""
+            <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:500px">
+              <h2 style="color:#e74c3c;margin:0 0 12px">📉 Portfolio Alert</h2>
+              <p>Your portfolio is down <strong style="color:#e74c3c">{day_drop_pct:.1f}%</strong> today.</p>
+              <p style="color:#888">Value: ${portfolio_value:,.2f} (was ${last_equity:,.2f})</p>
+              <p style="margin-top:20px"><a href="http://10.10.10.13:8100" style="color:#4f8ef7">Open Dashboard →</a></p>
+            </div>"""
+            whatsapp = f"📉 *Portfolio Alert*\nDown {day_drop_pct:.1f}% today.\nValue: ${portfolio_value:,.0f} (was ${last_equity:,.0f})\nhttp://10.10.10.13:8100"
+            send_notification(cfg, subject, html, whatsapp, "portfolio drop alert")
+            mark_alert_sent(conn, "portfolio_drop")
+
+    # ── High-score signal alert ───────────────────────────────────────────
+    if cfg["alert_high_score"]:
+        min_score = cfg["alert_high_score_min"]
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT symbol, signal_type, score, rationale FROM signals
+                WHERE score >= %s AND generated_at > NOW() - INTERVAL '2 hours'
+                ORDER BY score DESC LIMIT 5
+            """, (min_score,))
+            hot_signals = cur.fetchall()
+
+        if hot_signals:
+            alert_key = f"highscore_{date.today().isoformat()}"
+            if not alert_throttled(conn, alert_key, hours=6):
+                lines = "\n".join(f"  {r[0]} {r[1]} score={r[2]}" for r in hot_signals)
+                subject = f"⚡ High-Confidence Signal: {hot_signals[0][0]}"
+                html = f"""
+                <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:500px">
+                  <h2 style="color:#f7c94f;margin:0 0 12px">⚡ High-Confidence Signal</h2>
+                  <p>Strong signal(s) detected above your {min_score:.0f} score threshold:</p>
+                  <ul style="color:#ccc;margin:12px 0">
+                    {"".join(f"<li><strong>{r[0]}</strong> — {r[1]} (score {r[2]})<br><span style='color:#888;font-size:.82rem'>{r[3]}</span></li>" for r in hot_signals)}
+                  </ul>
+                  <p style="margin-top:16px"><a href="http://10.10.10.13:8100" style="color:#4f8ef7">Review Proposals →</a></p>
+                </div>"""
+                whatsapp = f"⚡ *High-Confidence Signal*\n{lines}\nReview: http://10.10.10.13:8100"
+                send_notification(cfg, subject, html, whatsapp, "high-score alert")
+                mark_alert_sent(conn, alert_key)
+
+
 def run_once(conn, last_universe_scan):
     symbols = get_watchlist(conn)
     log.info(f"Watchlist ({len(symbols)} symbols): {symbols}")
@@ -402,20 +694,36 @@ if __name__ == "__main__":
         try:
             last_universe_scan = run_once(conn, last_universe_scan)
 
-            # Daily digest: weekdays at configured UTC hour (default 21:30 = 4:30pm ET)
             now_utc = datetime.now(timezone.utc)
             is_weekday = now_utc.weekday() < 5
-            try:
-                cfg = get_app_settings(conn)
-                digest_hour = cfg["digest_hour_utc"]
-                digest_minute = cfg["digest_minute_utc"]
-            except Exception:
-                digest_hour, digest_minute = 21, 30
-            is_digest_time = now_utc.hour == digest_hour and now_utc.minute >= digest_minute
-            last_digest_date = get_last_digest_date(conn)
-            if is_weekday and is_digest_time and last_digest_date != now_utc.date():
-                send_digest(conn)
-                set_last_digest_date(conn, now_utc.date())
+            cfg = get_app_settings(conn)
+
+            is_trading_day, is_currently_open, next_open = get_market_status()
+
+            if is_weekday:
+                today = now_utc.date()
+
+                # ── Morning digest ────────────────────────────────────────────
+                m_hour, m_min = cfg["morning_hour_utc"], cfg["morning_minute_utc"]
+                past_morning = now_utc.hour > m_hour or (now_utc.hour == m_hour and now_utc.minute >= m_min)
+                if past_morning and get_last_morning_date(conn) != today:
+                    if is_trading_day:
+                        send_morning_digest(conn, cfg)
+                    else:
+                        send_holiday_digest(conn, cfg, next_open)
+                    set_last_morning_date(conn, today)
+
+                # ── Evening digest (market days only) ─────────────────────────
+                e_hour, e_min = cfg["digest_hour_utc"], cfg["digest_minute_utc"]
+                past_evening = now_utc.hour > e_hour or (now_utc.hour == e_hour and now_utc.minute >= e_min)
+                if past_evening and get_last_digest_date(conn) != today and is_trading_day:
+                    send_digest(conn)
+                    set_last_digest_date(conn, today)
+
+                # ── Alerts (every cycle on active market days) ────────────────
+                if is_trading_day and is_currently_open:
+                    check_alerts(conn, cfg)
+
         except Exception as e:
             log.error(f"Ingest cycle failed: {e}")
         finally:
