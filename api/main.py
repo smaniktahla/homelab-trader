@@ -17,6 +17,12 @@ _security = HTTPBasic()
 _AUTH_USER = os.environ.get("INVEST_USER", "invest")
 _AUTH_PASS = os.environ.get("INVEST_PASS", "")
 
+if not _AUTH_PASS:
+    raise RuntimeError(
+        "INVEST_PASS is not set. The API will not start without authentication "
+        "because it can place real trades. Set INVEST_PASS in your .env file."
+    )
+
 def _check_auth(creds: HTTPBasicCredentials = Depends(_security)):
     ok = (
         secrets.compare_digest(creds.username.encode(), _AUTH_USER.encode()) and
@@ -26,8 +32,7 @@ def _check_auth(creds: HTTPBasicCredentials = Depends(_security)):
         raise HTTPException(status_code=401, detail="Unauthorized",
                             headers={"WWW-Authenticate": "Basic realm=invest"})
 
-_global_deps = [Depends(_check_auth)] if _AUTH_PASS else []
-app = FastAPI(title="invest-api", dependencies=_global_deps)
+app = FastAPI(title="invest-api", dependencies=[Depends(_check_auth)])
 templates = Jinja2Templates(directory="/app/templates")
 
 def db():
