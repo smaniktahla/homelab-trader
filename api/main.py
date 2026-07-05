@@ -1,10 +1,10 @@
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import Optional
-import psycopg2, psycopg2.extras, os, requests as http, secrets
+import psycopg2, psycopg2.extras, os, requests as http, secrets, time
 from datetime import datetime, timezone
 
 DB_DSN = os.environ["DATABASE_URL"]
@@ -182,6 +182,30 @@ def get_summary():
 
 # ── Trade execution ───────────────────────────────────────────────────────────
 
+def _reconcile_fill(trade_id: int, order_id: str, expected_qty: float,
+                    max_attempts: int = 8, interval_s: float = 3.0):
+    """Background task: poll Alpaca until the order fills, then update the trade record."""
+    for _ in range(max_attempts):
+        time.sleep(interval_s)
+        try:
+            order = alpaca("GET", f"/v2/orders/{order_id}")
+            status = order.get("status", "")
+            filled_price = float(order.get("filled_avg_price") or 0)
+            filled_qty   = float(order.get("filled_qty")       or 0) or expected_qty
+            if filled_price > 0:
+                notional = filled_qty * filled_price
+                with db() as conn, conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE trades
+                        SET status=%s, qty=%s, price=%s, notional=%s
+                        WHERE id=%s
+                    """, (status, filled_qty, filled_price, notional, trade_id))
+                    conn.commit()
+                return  # done
+        except Exception:
+            pass  # try again next iteration
+
+
 class TradeRequest(BaseModel):
     symbol: str
     side: str          # buy | sell
@@ -191,7 +215,7 @@ class TradeRequest(BaseModel):
     proposal_id: Optional[int] = None
 
 @app.post("/api/trade")
-def execute_trade(req: TradeRequest):
+def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     if req.side not in ("buy", "sell"):
         raise HTTPException(400, "side must be buy or sell")
     if req.qty <= 0:
@@ -232,6 +256,9 @@ def execute_trade(req: TradeRequest):
             """, (req.proposal_id,))
             conn.commit()
 
+    # Market orders fill within seconds — reconcile fill price in the background
+    background_tasks.add_task(_reconcile_fill, trade_id, order["id"], filled_qty)
+
     return {"trade_id": trade_id, "order_id": order["id"], "status": order["status"]}
 
 class ProposalDecision(BaseModel):
@@ -240,7 +267,7 @@ class ProposalDecision(BaseModel):
     rejection_reason: Optional[str] = None
 
 @app.patch("/api/proposals/{proposal_id}")
-def decide_proposal(proposal_id: int, body: ProposalDecision):
+def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: BackgroundTasks):
     with db() as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM trade_proposals WHERE id=%s", (proposal_id,))
         p = cur.fetchone()
@@ -263,11 +290,15 @@ def decide_proposal(proposal_id: int, body: ProposalDecision):
             cur.execute("""
                 INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
             """, (p["symbol"], p["side"], filled_qty, filled_price,
                   filled_qty * filled_price, order["id"],
                   datetime.now(timezone.utc), "model_approved", order["status"], proposal_id))
+            new_trade_id = cur.fetchone()["id"]
             # update proposal qty if it was null
             cur.execute("UPDATE trade_proposals SET qty=%s WHERE id=%s AND qty IS NULL", (trade_qty, proposal_id))
+            # Reconcile fill in background
+            background_tasks.add_task(_reconcile_fill, new_trade_id, order["id"], filled_qty)
 
         cur.execute("""
             UPDATE trade_proposals
