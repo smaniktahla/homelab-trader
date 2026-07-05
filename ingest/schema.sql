@@ -41,10 +41,30 @@ CREATE TABLE IF NOT EXISTS signals (
 
 INSERT INTO watchlist (symbol, name) VALUES
     ('SPY', 'SPDR S&P 500 ETF'),
+    ('QQQ', 'Invesco QQQ (NASDAQ-100)'),
     ('AAPL', 'Apple Inc'),
     ('MSFT', 'Microsoft Corp'),
     ('NVDA', 'NVIDIA Corp')
 ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS market_context (
+    id           INTEGER PRIMARY KEY DEFAULT 1,  -- single-row table, upserted on conflict
+    spy_trend    TEXT,
+    qqq_trend    TEXT,
+    spy_sma50    NUMERIC,
+    spy_sma200   NUMERIC,
+    spy_vs_sma200_pct NUMERIC,
+    qqq_sma50    NUMERIC,
+    qqq_sma200   NUMERIC,
+    qqq_vs_sma200_pct NUMERIC,
+    vix          NUMERIC,
+    vix_regime   TEXT,
+    overall      TEXT,
+    score_modifier INTEGER DEFAULT 0,
+    alloc_modifier NUMERIC DEFAULT 1.0,
+    rationale    TEXT,
+    updated_at   TIMESTAMPTZ DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS trades (
     id BIGSERIAL PRIMARY KEY,

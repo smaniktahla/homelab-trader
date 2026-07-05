@@ -178,7 +178,7 @@ def score_signal(rsi, price, bb_upper, bb_lower, regime, side, p):
         elif regime == "trending_up":
             score *= 0.80; parts.append("uptrend reduces MR reliability")
         elif regime == "trending_down":
-            score *= 0.90; parts.append("downtrend — catch-falling-knife risk")
+            score *= 0.60; parts.append("downtrend — catch-falling-knife risk, heavily penalized")
 
     else:  # sell
         if rsi is not None:
@@ -266,15 +266,42 @@ def check_stop_losses(conn, positions, p):
             log.info(f"Stop-loss PROPOSAL created: sell {pos['qty']} {sym}")
 
 
+def _load_market_context(conn):
+    """Load market context from DB. Returns (score_modifier, alloc_modifier, overall)."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT score_modifier, alloc_modifier, overall, rationale FROM market_context LIMIT 1")
+            row = cur.fetchone()
+        if row:
+            return int(row[0] or 0), float(row[1] or 1.0), row[2] or "unknown", row[3] or ""
+    except Exception:
+        pass
+    return 0, 1.0, "unknown", ""
+
+
 def compute_signals(conn, symbols):
     """Main entry point: compute signals for all symbols, write to DB, create proposals."""
     p = load_params(conn)
+
+    # Load market regime modifiers computed by market_regime.py this cycle
+    score_mod, alloc_mod, market_overall, market_rationale = _load_market_context(conn)
+    effective_proposal_min = p["score_proposal_min"] + score_mod
+    effective_alloc = p["trade_allocation_pct"] * alloc_mod
+
     log.info(
         f"Signal params: RSI({int(p['rsi_period'])}) oversold={p['rsi_oversold']} overbought={p['rsi_overbought']} "
-        f"BB({int(p['bb_period'])},{p['bb_std']}) proposal_min={p['score_proposal_min']} "
-        f"alloc={p['trade_allocation_pct']*100:.0f}% max_pos={p['max_position_pct']*100:.0f}% "
-        f"max_open={int(p['max_open_positions'])} stop_loss={p['stop_loss_pct']*100:.0f}%"
+        f"BB({int(p['bb_period'])},{p['bb_std']}) proposal_min={effective_proposal_min:.0f} "
+        f"(base {p['score_proposal_min']:.0f}+regime {score_mod:+d}) "
+        f"alloc={effective_alloc*100:.1f}% (base {p['trade_allocation_pct']*100:.0f}%×{alloc_mod:.0%}) "
+        f"max_pos={p['max_position_pct']*100:.0f}% max_open={int(p['max_open_positions'])} "
+        f"stop_loss={p['stop_loss_pct']*100:.0f}% market={market_overall}"
     )
+    if market_rationale:
+        log.info(f"Market regime: {market_rationale}")
+
+    # Apply alloc modifier to the working params copy used for position sizing
+    p_gated = dict(p)
+    p_gated["trade_allocation_pct"] = effective_alloc
 
     # Fetch live portfolio state from Alpaca
     cash, portfolio_value, positions = fetch_alpaca_portfolio()
@@ -316,7 +343,9 @@ def compute_signals(conn, symbols):
                 conn.commit()
                 log.info(f"Signal {sym} {side}: score={score} — {rationale}")
 
-                if score < p["score_proposal_min"]:
+                if score < effective_proposal_min:
+                    if score_mod > 0:
+                        log.info(f"Signal {sym} {side}: score {score} below regime-adjusted threshold {effective_proposal_min:.0f} (market={market_overall}), skipped")
                     continue
 
                 # Check for existing open proposal
@@ -340,11 +369,12 @@ def compute_signals(conn, symbols):
                         )
                         continue
                     existing_mv = positions.get(sym, {}).get("market_value", 0.0)
-                    qty, sizing_note = calc_buy_qty(price, cash, portfolio_value, existing_mv, p)
+                    qty, sizing_note = calc_buy_qty(price, cash, portfolio_value, existing_mv, p_gated)
                     if qty is None:
                         log.info(f"Skipping buy proposal for {sym}: {sizing_note}")
                         continue
-                    rationale = f"{rationale}; sized {qty} shares (~${qty*price:.0f}) — {sizing_note}"
+                    regime_note = f" [regime={market_overall}, alloc×{alloc_mod:.0%}]" if alloc_mod != 1.0 else ""
+                    rationale = f"{rationale}; sized {qty} shares (~${qty*price:.0f}) — {sizing_note}{regime_note}"
                 else:
                     # Only propose sells for positions we actually hold
                     if sym not in positions:

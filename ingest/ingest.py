@@ -10,6 +10,7 @@ from email.mime.text import MIMEText
 
 from signals import compute_signals
 from scanner import seed_universe, scan_universe, promote_demote
+from market_regime import compute_market_regime, save_market_context
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -647,6 +648,14 @@ def run_once(conn, last_universe_scan):
     log.info(f"Watchlist ({len(symbols)} symbols): {symbols}")
     ingest_prices(conn, symbols)
     ingest_news(conn, symbols)
+
+    # Update market regime before running signals so gating is current
+    try:
+        ctx = compute_market_regime()
+        save_market_context(conn, ctx)
+    except Exception as e:
+        log.warning(f"Market regime update failed: {e}")
+
     compute_signals(conn, symbols)
     reconcile_orders(conn)
 

@@ -136,6 +136,55 @@
     cursor:pointer; padding:10px 0; }
   .wiz-horizon-cards { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:28px; }
 
+  /* ── Market Context Bar ──────────────────────────────────────── */
+  .mkt-bar { display:flex; align-items:center; gap:10px; padding:10px 16px; margin-bottom:14px;
+    background:#12141e; border:1px solid #1e2030; border-radius:8px; flex-wrap:wrap; }
+  .mkt-bar .mkt-label { font-size:.68rem; color:#555; text-transform:uppercase; letter-spacing:.06em;
+    margin-right:2px; }
+  .mkt-badge { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:20px;
+    font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
+  .mkt-badge.bull   { background:#1a3a2a; color:#3ecf6e; }
+  .mkt-badge.bear   { background:#3a1a1a; color:#f75f5f; }
+  .mkt-badge.neutral { background:#222; color:#888; }
+  .mkt-badge.unknown { background:#1a1d27; color:#555; }
+  .mkt-badge.calm    { background:#1a2a3a; color:#4f8ef7; }
+  .mkt-badge.elevated { background:#3a2a10; color:#f7c94f; }
+  .mkt-badge.fear    { background:#3a1a1a; color:#f75f5f; }
+  .mkt-sep { color:#333; font-size:.9rem; }
+  .mkt-regime { display:inline-flex; align-items:center; gap:5px; padding:3px 12px; border-radius:20px;
+    font-size:.75rem; font-weight:700; }
+  .mkt-regime.bull_calm    { background:#1a3a2a; color:#3ecf6e; }
+  .mkt-regime.bull_volatile { background:#2a3a1a; color:#a0e060; }
+  .mkt-regime.neutral      { background:#222; color:#888; }
+  .mkt-regime.bear_calm    { background:#2a1a1a; color:#f09060; }
+  .mkt-regime.bear_fear    { background:#3a1010; color:#f75f5f; }
+  .mkt-regime.fear         { background:#3a1a1a; color:#f75f5f; }
+  .mkt-regime.unknown      { background:#1a1d27; color:#555; }
+  .mkt-rationale { font-size:.72rem; color:#555; margin-left:4px; }
+  .mkt-updated { font-size:.65rem; color:#333; margin-left:auto; }
+
+  .mkt-regime-wrap { position:relative; display:inline-flex; align-items:center; }
+  .mkt-regime-wrap .mkt-tip {
+    display:none; position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%);
+    background:#0d0f1a; border:1px solid #2a2d3a; border-radius:8px; padding:12px 14px;
+    min-width:340px; z-index:200; box-shadow:0 8px 24px rgba(0,0,0,.6);
+    pointer-events:none;
+  }
+  .mkt-regime-wrap:hover .mkt-tip { display:block; }
+  .mkt-tip table { border-collapse:collapse; width:100%; font-size:.74rem; }
+  .mkt-tip th { color:#555; font-weight:600; text-align:left; padding:3px 8px 6px;
+    border-bottom:1px solid #1e2030; text-transform:uppercase; letter-spacing:.05em; font-size:.65rem; }
+  .mkt-tip td { padding:5px 8px; color:#aaa; border-bottom:1px solid #151720; }
+  .mkt-tip tr:last-child td { border-bottom:none; }
+  .mkt-tip .regime-cell { font-weight:700; white-space:nowrap; }
+  .mkt-tip .rc-bull_calm    { color:#3ecf6e; }
+  .mkt-tip .rc-bull_volatile { color:#a0e060; }
+  .mkt-tip .rc-neutral      { color:#888; }
+  .mkt-tip .rc-bear_calm    { color:#f09060; }
+  .mkt-tip .rc-bear_fear    { color:#f75f5f; }
+  .mkt-tip .rc-fear         { color:#f75f5f; }
+  .mkt-tip .effect-cell     { color:#666; font-size:.72rem; }
+
   /* ── Advisor ──────────────────────────────────────────────────── */
   .advisor-card { border-radius:10px; padding:18px 22px; margin-bottom:20px;
     border-left:4px solid #555; background:#1a1d27; border:1px solid #2a2d3a; border-left-width:4px; }
@@ -198,6 +247,56 @@
     </div>
   </div>
 
+
+  <!-- Market Context Bar -->
+  <div id="mkt-bar" class="mkt-bar" style="display:none">
+    <span class="mkt-label">Market</span>
+    <span class="mkt-badge" id="mkt-spy-badge">SPY —</span>
+    <span class="mkt-sep">·</span>
+    <span class="mkt-badge" id="mkt-qqq-badge">QQQ —</span>
+    <span class="mkt-sep">·</span>
+    <span class="mkt-label">VIX</span>
+    <span class="mkt-badge" id="mkt-vix-badge">—</span>
+    <span class="mkt-sep">|</span>
+    <span class="mkt-label">Regime</span>
+    <span class="mkt-regime-wrap">
+      <span class="mkt-regime" id="mkt-regime-badge">—</span>
+      <span class="mkt-tip">
+        <table>
+          <thead><tr><th>Regime</th><th>VIX</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="regime-cell rc-bull_calm">Bull calm</td>
+              <td>calm (&lt;15)</td>
+              <td class="effect-cell">Normal — mean reversion reliable, full size</td>
+            </tr>
+            <tr>
+              <td class="regime-cell rc-bull_volatile">Bull volatile</td>
+              <td>elevated (15–25)</td>
+              <td class="effect-cell">Allow buys, threshold +5, size ×85%</td>
+            </tr>
+            <tr>
+              <td class="regime-cell rc-neutral">Neutral</td>
+              <td>any</td>
+              <td class="effect-cell">Require stronger signals, threshold +10, size ×85%</td>
+            </tr>
+            <tr>
+              <td class="regime-cell rc-bear_calm">Bear calm</td>
+              <td>calm</td>
+              <td class="effect-cell">High bar only, threshold +20, size ×70%</td>
+            </tr>
+            <tr>
+              <td class="regime-cell rc-bear_fear">Bear + fear</td>
+              <td>crisis (&gt;25)</td>
+              <td class="effect-cell">Near-freeze on new buys, threshold +35, size ×50%</td>
+            </tr>
+          </tbody>
+        </table>
+      </span>
+    </span>
+    <span class="mkt-rationale" id="mkt-rationale"></span>
+    <span class="mkt-updated" id="mkt-updated"></span>
+  </div>
 
   <!-- Portfolio Advisor -->
   <div id="advisor-card" class="advisor-card" style="display:none">
@@ -586,6 +685,50 @@ async function loadAdvisor() {
   } catch(e) { console.error('advisor:', e); }
 }
 
+// ── Market Context Bar ─────────────────────────────────────────────
+async function loadMarketContext() {
+  try {
+    const m = await fetch('/api/market-context').then(r => r.json());
+    if (!m || !m.overall) return;
+
+    const trendClass = t => t === 'bull' ? 'bull' : t === 'bear' ? 'bear' : t === 'neutral' ? 'neutral' : 'unknown';
+    const trendLabel = (sym, t, pct) => {
+      const arrow = t === 'bull' ? '▲' : t === 'bear' ? '▼' : '—';
+      const pctStr = pct != null ? ` ${pct > 0 ? '+' : ''}${pct.toFixed(1)}%` : '';
+      return `${sym} ${arrow}${pctStr}`;
+    };
+
+    const spyEl = document.getElementById('mkt-spy-badge');
+    spyEl.textContent = trendLabel('SPY', m.spy_trend, m.spy_vs_sma200_pct);
+    spyEl.className = `mkt-badge ${trendClass(m.spy_trend)}`;
+
+    const qqqEl = document.getElementById('mkt-qqq-badge');
+    qqqEl.textContent = trendLabel('QQQ', m.qqq_trend, m.qqq_vs_sma200_pct);
+    qqqEl.className = `mkt-badge ${trendClass(m.qqq_trend)}`;
+
+    const vixEl = document.getElementById('mkt-vix-badge');
+    const vixLevel = m.vix != null ? m.vix.toFixed(1) : '—';
+    vixEl.textContent = `${vixLevel} ${m.vix_regime === 'calm' ? '·calm' : m.vix_regime === 'elevated' ? '·elevated' : m.vix_regime === 'fear' ? '⚠ fear' : ''}`;
+    vixEl.className = `mkt-badge ${m.vix_regime || 'unknown'}`;
+
+    const regEl = document.getElementById('mkt-regime-badge');
+    regEl.textContent = (m.overall || 'unknown').replace('_', ' ');
+    regEl.className = `mkt-regime ${m.overall || 'unknown'}`;
+
+    const modNote = m.score_modifier > 0
+      ? `+${m.score_modifier} score threshold · ${Math.round((1 - m.alloc_modifier) * 100)}% reduced size`
+      : '';
+    document.getElementById('mkt-rationale').textContent = modNote;
+
+    if (m.updated_at) {
+      const age = Math.round((Date.now() - new Date(m.updated_at).getTime()) / 60000);
+      document.getElementById('mkt-updated').textContent = `updated ${age}m ago`;
+    }
+
+    document.getElementById('mkt-bar').style.display = 'flex';
+  } catch(e) { console.error('market context:', e); }
+}
+
 // ── Init ───────────────────────────────────────────────────────────
 loadAccount();
 loadPositions();
@@ -593,9 +736,11 @@ loadAdvisor();
 loadProposals();
 loadLeaderboard();
 loadTrades();
+loadMarketContext();
 setInterval(() => { loadAccount(); loadPositions(); loadProposals(); }, 60000);
 setInterval(loadLeaderboard, 300000); // leaderboard refreshes every 5 min
 setInterval(loadAdvisor, 300000);
+setInterval(loadMarketContext, 1800000); // market context refreshes every 30 min
 
 
 // ── Wizard ─────────────────────────────────────────────────────────

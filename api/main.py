@@ -338,6 +338,25 @@ def get_leaderboard(limit: int = 30, side: str = "both"):
         """, (limit,))
         return cur.fetchall()
 
+@app.get("/api/market-context")
+def get_market_context():
+    """Latest market regime snapshot — SPY/QQQ trend, VIX, overall regime, trading modifiers."""
+    try:
+        with db() as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM market_context LIMIT 1")
+            row = cur.fetchone()
+        if row:
+            return dict(row)
+    except Exception:
+        pass
+    return {
+        "spy_trend": "unknown", "qqq_trend": "unknown",
+        "vix": None, "vix_regime": "unknown",
+        "overall": "unknown", "score_modifier": 0, "alloc_modifier": 1.0,
+        "rationale": "No market context data yet — runs on next ingest cycle",
+        "updated_at": None,
+    }
+
 @app.get("/api/universe/stats")
 def get_universe_stats():
     with db() as conn, conn.cursor() as cur:
