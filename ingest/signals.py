@@ -65,7 +65,9 @@ def fetch_closes(symbol, yf_range="1y"):
     data = r.json()
     result = data["chart"]["result"][0]
     timestamps = result["timestamp"]
-    raw_closes = result["indicators"]["quote"][0]["close"]
+    # Use adjclose: split-adjusted AND dividend-adjusted. quote.close is split-adjusted only.
+    adj = result["indicators"].get("adjclose")
+    raw_closes = adj[0]["adjclose"] if adj else result["indicators"]["quote"][0]["close"]
     closes = [float(c) for c, ts in zip(raw_closes, timestamps) if c is not None]
     return closes
 

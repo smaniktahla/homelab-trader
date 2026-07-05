@@ -34,7 +34,8 @@ def _fetch_closes_yf(symbol, yf_range="1y"):
     r.raise_for_status()
     data = r.json()
     result = data["chart"]["result"][0]
-    raw = result["indicators"]["quote"][0]["close"]
+    adj = result["indicators"].get("adjclose")
+    raw = adj[0]["adjclose"] if adj else result["indicators"]["quote"][0]["close"]
     return [float(c) for c in raw if c is not None]
 
 
@@ -185,7 +186,12 @@ def compute_market_regime():
         overall        = "bear_calm"
         score_modifier = 20      # significantly more selective
         alloc_modifier = 0.70
-        rationale      = "Bear market — only very high-conviction signals; reduce position size"
+        rationale      = "Bear market, calm VIX — only high-conviction signals; reduce position size"
+    elif market == "bear" and vix_regime == "elevated":
+        overall        = "bear_volatile"
+        score_modifier = 28      # between bear_calm and bear_fear
+        alloc_modifier = 0.60
+        rationale      = "Bear market with elevated VIX — significantly reduced activity"
     elif market in ("bear", "neutral") and vix_regime == "fear":
         overall        = "bear_fear"
         score_modifier = 35      # near-freeze on new buys

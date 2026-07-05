@@ -156,8 +156,9 @@
   .mkt-regime.bull_calm    { background:#1a3a2a; color:#3ecf6e; }
   .mkt-regime.bull_volatile { background:#2a3a1a; color:#a0e060; }
   .mkt-regime.neutral      { background:#222; color:#888; }
-  .mkt-regime.bear_calm    { background:#2a1a1a; color:#f09060; }
-  .mkt-regime.bear_fear    { background:#3a1010; color:#f75f5f; }
+  .mkt-regime.bear_calm     { background:#2a1a1a; color:#f09060; }
+  .mkt-regime.bear_volatile { background:#2e1a10; color:#f07040; }
+  .mkt-regime.bear_fear     { background:#3a1010; color:#f75f5f; }
   .mkt-regime.fear         { background:#3a1a1a; color:#f75f5f; }
   .mkt-regime.unknown      { background:#1a1d27; color:#555; }
   .mkt-rationale { font-size:.72rem; color:#555; margin-left:4px; }
@@ -180,8 +181,9 @@
   .mkt-tip .rc-bull_calm    { color:#3ecf6e; }
   .mkt-tip .rc-bull_volatile { color:#a0e060; }
   .mkt-tip .rc-neutral      { color:#888; }
-  .mkt-tip .rc-bear_calm    { color:#f09060; }
-  .mkt-tip .rc-bear_fear    { color:#f75f5f; }
+  .mkt-tip .rc-bear_calm     { color:#f09060; }
+  .mkt-tip .rc-bear_volatile { color:#f07040; }
+  .mkt-tip .rc-bear_fear     { color:#f75f5f; }
   .mkt-tip .rc-fear         { color:#f75f5f; }
   .mkt-tip .effect-cell     { color:#666; font-size:.72rem; }
 
@@ -282,12 +284,17 @@
             </tr>
             <tr>
               <td class="regime-cell rc-bear_calm">Bear calm</td>
-              <td>calm</td>
-              <td class="effect-cell">High bar only, threshold +20, size ×70%</td>
+              <td>calm (&lt;15)</td>
+              <td class="effect-cell">High bar, threshold +20, size ×70%</td>
+            </tr>
+            <tr>
+              <td class="regime-cell rc-bear_volatile">Bear volatile</td>
+              <td>elevated (15–25)</td>
+              <td class="effect-cell">Significantly reduced, threshold +28, size ×60%</td>
             </tr>
             <tr>
               <td class="regime-cell rc-bear_fear">Bear + fear</td>
-              <td>crisis (&gt;25)</td>
+              <td>stress (&gt;25)</td>
               <td class="effect-cell">Near-freeze on new buys, threshold +35, size ×50%</td>
             </tr>
           </tbody>
