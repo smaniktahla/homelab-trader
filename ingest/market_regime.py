@@ -145,8 +145,9 @@ def compute_market_regime():
         result["vix_regime"] = vix_regime
         log.info(f"Market: VIX={vix_level:.1f} → {vix_regime}")
     except Exception as e:
-        log.warning(f"Market regime: VIX fetch failed: {e}")
-        vix_regime = "unknown"
+        log.warning(f"Market regime: VIX fetch failed: {e} — defaulting to 'elevated' (fail closed)")
+        result["vix_regime"] = "elevated"
+        vix_regime = "elevated"  # fail closed: unknown VIX → treat as elevated, not calm
 
     # ── Overall regime + trading modifiers ───────────────────────────────
     spy = result["spy_trend"]
@@ -196,10 +197,12 @@ def compute_market_regime():
         alloc_modifier = 0.60
         rationale      = "High VIX fear regime — require very strong signals, reduce size"
     else:
+        # Fail closed: when we can't classify, treat as neutral/elevated rather than bull/calm.
+        # This prevents a data outage from silently removing all risk controls.
         overall        = "unknown"
-        score_modifier = 0
-        alloc_modifier = 1.0
-        rationale      = "Market regime unknown — operating with standard parameters"
+        score_modifier = 10
+        alloc_modifier = 0.85
+        rationale      = "Market regime unknown (data gap) — applying neutral-level caution"
 
     result["overall"]        = overall
     result["score_modifier"] = score_modifier
