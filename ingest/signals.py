@@ -249,6 +249,16 @@ def calc_buy_qty(price, cash, portfolio_value, existing_market_value, p):
     return qty, f"${trade_dollars:.0f} allocation ({p['trade_allocation_pct']*100:.0f}% of ${cash:.0f} cash)"
 
 
+def _open_sell_exists(conn, sym):
+    """Return True if an undecided sell proposal already exists for this symbol."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id FROM trade_proposals
+            WHERE symbol=%s AND side='sell' AND decision IS NULL
+        """, (sym,))
+        return cur.fetchone() is not None
+
+
 def check_stop_losses(conn, positions, p):
     """Create sell proposals for positions that have breached the stop-loss threshold."""
     if not positions:
@@ -263,20 +273,79 @@ def check_stop_losses(conn, positions, p):
                 f"(threshold {stop_pct*100:.0f}%)"
             )
             log.warning(f"Stop-loss triggered: {rationale}")
+            if _open_sell_exists(conn, sym):
+                log.info(f"Stop-loss proposal for {sym} already open, skipping")
+                continue
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT id FROM trade_proposals
-                    WHERE symbol=%s AND side='sell' AND decision IS NULL
-                """, (sym,))
-                if cur.fetchone():
-                    log.info(f"Stop-loss proposal for {sym} already open, skipping")
-                    continue
-                cur.execute("""
-                    INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score)
-                    VALUES (%s, 'sell', %s, %s, 99)
+                    INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason)
+                    VALUES (%s, 'sell', %s, %s, 99, 'stop_loss')
                 """, (sym, pos["qty"], rationale))
             conn.commit()
             log.info(f"Stop-loss PROPOSAL created: sell {pos['qty']} {sym}")
+
+
+def check_symbol_exits(conn, sym, price, bb_middle, positions, p):
+    """
+    Check thesis-complete and time-stop exit conditions for a held symbol.
+    Called inside the per-symbol loop once BB is computed.
+
+    thesis_complete: price returned to SMA20 — mean reversion achieved.
+    time_stop:       held > 20 trading days without thesis completing.
+    """
+    if sym not in positions or _open_sell_exists(conn, sym):
+        return
+
+    pos = positions[sym]
+    qty = pos["qty"]
+    avg_entry = pos["avg_entry"]
+
+    # ── Thesis-complete: price crossed back above SMA20 / BB midline ─────
+    if bb_middle is not None and price >= bb_middle:
+        gain_pct = (price - avg_entry) / avg_entry * 100
+        rationale = (
+            f"THESIS COMPLETE: {sym} price ${price:.2f} ≥ SMA20 ${bb_middle:.2f} — "
+            f"mean reversion achieved. Entry ${avg_entry:.2f} ({gain_pct:+.1f}%)"
+        )
+        log.info(f"Exit [thesis_complete]: {rationale}")
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason)
+                VALUES (%s, 'sell', %s, %s, 90, 'thesis_complete')
+            """, (sym, qty, rationale))
+        conn.commit()
+        return  # don't also check time_stop in the same cycle
+
+    # ── Time-stop: held > ~20 trading days, thesis unresolved ────────────
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT MAX(proposed_at) FROM trade_proposals
+            WHERE symbol=%s AND side='buy' AND decision='approved'
+        """, (sym,))
+        row = cur.fetchone()
+
+    if row and row[0]:
+        from datetime import datetime, timezone
+        entry_ts = row[0]
+        if entry_ts.tzinfo is None:
+            entry_ts = entry_ts.replace(tzinfo=timezone.utc)
+        calendar_days = (datetime.now(timezone.utc) - entry_ts).days
+        approx_trading_days = int(calendar_days * 5 / 7)
+
+        if approx_trading_days >= 20:
+            gain_pct = (price - avg_entry) / avg_entry * 100
+            rationale = (
+                f"TIME STOP: {sym} held ~{approx_trading_days} trading days "
+                f"({calendar_days} calendar days) without thesis completing. "
+                f"Entry ${avg_entry:.2f} → current ${price:.2f} ({gain_pct:+.1f}%)"
+            )
+            log.warning(f"Exit [time_stop]: {rationale}")
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason)
+                    VALUES (%s, 'sell', %s, %s, 85, 'time_stop')
+                """, (sym, qty, rationale))
+            conn.commit()
 
 
 def _load_market_context(conn):
@@ -343,6 +412,9 @@ def compute_signals(conn, symbols):
             bb_str = f"[{bb_lower:.2f},{bb_upper:.2f}]" if bb_lower is not None else "[?]"
             log.info(f"Signals {sym}: price={price:.2f} RSI={rsi_str} BB={bb_str} regime={regime}")
 
+            # Exit condition checks for held positions (thesis_complete, time_stop)
+            check_symbol_exits(conn, sym, price, bb_middle, positions, p)
+
             for side in ("buy", "sell"):
                 score, rationale = score_signal(rsi, price, bb_upper, bb_lower, band_std, regime, side, p)
                 if score < p["score_log_min"]:
@@ -395,11 +467,12 @@ def compute_signals(conn, symbols):
                     qty = positions[sym]["qty"]
                     rationale = f"{rationale}; sell full position ({qty} shares)"
 
+                exit_reason = "overbought" if side == "sell" else None
                 with conn.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (sym, side, qty, rationale, score))
+                        INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (sym, side, qty, rationale, score, exit_reason))
                 conn.commit()
                 log.info(f"PROPOSAL created: {sym} {side} qty={qty} score={score}")
 

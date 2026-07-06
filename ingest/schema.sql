@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS market_context (
     updated_at   TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- exit_reason classifies sell proposals by which rule triggered them:
+-- thesis_complete | time_stop | stop_loss | overbought | regime_deterioration | manual
+ALTER TABLE trade_proposals ADD COLUMN IF NOT EXISTS exit_reason TEXT;
+
 CREATE TABLE IF NOT EXISTS trades (
     id BIGSERIAL PRIMARY KEY,
     symbol TEXT NOT NULL,
