@@ -617,28 +617,94 @@ def check_alerts(conn, cfg):
     if cfg["alert_high_score"]:
         min_score = cfg["alert_high_score_min"]
         with conn.cursor() as cur:
+            # Secondary sort: 30d avg volume descending — more liquid stocks first when scores tie
             cur.execute("""
-                SELECT symbol, signal_type, score, rationale FROM signals
-                WHERE score >= %s AND generated_at > NOW() - INTERVAL '2 hours'
-                ORDER BY score DESC LIMIT 5
+                SELECT s.symbol, s.signal_type, s.score, s.rationale,
+                       COALESCE((
+                           SELECT AVG(ph.volume)::BIGINT
+                           FROM price_history ph
+                           WHERE ph.symbol = s.symbol
+                             AND ph.ts > NOW() - INTERVAL '30 days'
+                       ), 0) AS avg_volume
+                FROM signals s
+                WHERE s.score >= %s AND s.generated_at > NOW() - INTERVAL '2 hours'
+                ORDER BY s.score DESC, avg_volume DESC
+                LIMIT 5
             """, (min_score,))
             hot_signals = cur.fetchall()
 
         if hot_signals:
             alert_key = f"highscore_{date.today().isoformat()}"
             if not alert_throttled(conn, alert_key, hours=6):
-                lines = "\n".join(f"  {r[0]} {r[1]} score={r[2]}" for r in hot_signals)
+                # Capital context — acct already fetched at top of check_alerts
+                buying_power  = float(acct.get("buying_power", acct.get("cash", 0)))
+                open_count    = len(pos_list)
+                with conn.cursor() as cur:
+                    cur.execute("SELECT value FROM signal_params WHERE key='max_open_positions'")
+                    row = cur.fetchone()
+                max_open = int(float(row[0])) if row else 5
+                slots_left = max(0, max_open - open_count)
+
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT p.value * COALESCE(m.alloc_modifier, 1.0)
+                        FROM signal_params p
+                        LEFT JOIN market_context m ON TRUE
+                        WHERE p.key = 'trade_allocation_pct'
+                        LIMIT 1
+                    """)
+                    row = cur.fetchone()
+                effective_alloc = float(row[0]) if row else 0.05
+                trade_dollars = buying_power * effective_alloc
+
+                capital_html = f"""
+                  <table style="width:100%;border-collapse:collapse;margin-bottom:16px;font-size:.88rem">
+                    <tr style="border-bottom:1px solid #2a2d3e">
+                      <td style="padding:6px 0;color:#888">Buying power</td>
+                      <td style="padding:6px 0;text-align:right;color:#e8eaf6"><strong>${buying_power:,.0f}</strong></td>
+                    </tr>
+                    <tr style="border-bottom:1px solid #2a2d3e">
+                      <td style="padding:6px 0;color:#888">Position slots remaining</td>
+                      <td style="padding:6px 0;text-align:right;color:{'#4caf50' if slots_left > 0 else '#e74c3c'}"><strong>{slots_left} of {max_open}</strong></td>
+                    </tr>
+                    <tr>
+                      <td style="padding:6px 0;color:#888">Est. trade size (regime-adjusted)</td>
+                      <td style="padding:6px 0;text-align:right;color:#e8eaf6"><strong>${trade_dollars:,.0f}</strong></td>
+                    </tr>
+                  </table>"""
+
+                def _vol_fmt(v):
+                    v = int(v or 0)
+                    if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
+                    if v >= 1_000: return f"{v/1_000:.0f}K"
+                    return str(v)
+
+                signal_items = "".join(
+                    f"<li style='margin-bottom:10px'>"
+                    f"<strong>{r[0]}</strong> — {r[1]} (score {r[2]})"
+                    f"<span style='color:#666;font-size:.8rem'> · {_vol_fmt(r[4])} avg vol</span>"
+                    f"<br><span style='color:#888;font-size:.82rem'>{r[3]}</span></li>"
+                    for r in hot_signals
+                )
                 subject = f"⚡ High-Confidence Signal: {hot_signals[0][0]}"
                 html = f"""
                 <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:500px">
                   <h2 style="color:#f7c94f;margin:0 0 12px">⚡ High-Confidence Signal</h2>
-                  <p>Strong signal(s) detected above your {min_score:.0f} score threshold:</p>
-                  <ul style="color:#ccc;margin:12px 0">
-                    {"".join(f"<li><strong>{r[0]}</strong> — {r[1]} (score {r[2]})<br><span style='color:#888;font-size:.82rem'>{r[3]}</span></li>" for r in hot_signals)}
+                  <p style="margin:0 0 16px">Strong signal(s) detected above your {min_score:.0f} score threshold:</p>
+                  {capital_html}
+                  <ul style="color:#ccc;margin:12px 0;padding-left:18px">
+                    {signal_items}
                   </ul>
                   <p style="margin-top:16px"><a href="http://10.10.10.13:8100" style="color:#4f8ef7">Review Proposals →</a></p>
                 </div>"""
-                whatsapp = f"⚡ *High-Confidence Signal*\n{lines}\nReview: http://10.10.10.13:8100"
+                lines = "\n".join(
+                    f"  {r[0]} score={r[2]} vol={_vol_fmt(r[4])}" for r in hot_signals
+                )
+                whatsapp = (
+                    f"⚡ *High-Confidence Signal*\n"
+                    f"Buying power: ${buying_power:,.0f} · {slots_left}/{max_open} slots · ~${trade_dollars:,.0f}/trade\n"
+                    f"{lines}\nReview: http://10.10.10.13:8100"
+                )
                 send_notification(cfg, subject, html, whatsapp, "high-score alert")
                 mark_alert_sent(conn, alert_key)
 
