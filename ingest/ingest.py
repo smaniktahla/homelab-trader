@@ -637,8 +637,9 @@ def check_alerts(conn, cfg):
                 FROM signals s
                 WHERE s.score >= %s AND s.generated_at > NOW() - INTERVAL '2 hours'
                 ORDER BY s.score DESC,
-                         (COALESCE((SELECT ph2.volume FROM price_history ph2 WHERE ph2.symbol = s.symbol ORDER BY ph2.ts DESC LIMIT 1), 0)::FLOAT
-                          / NULLIF((SELECT AVG(ph3.volume) FROM price_history ph3 WHERE ph3.symbol = s.symbol AND ph3.ts > NOW() - INTERVAL '30 days'), 0)
+                         LEAST(4.0,
+                           COALESCE((SELECT ph2.volume FROM price_history ph2 WHERE ph2.symbol = s.symbol ORDER BY ph2.ts DESC LIMIT 1), 0)::FLOAT
+                           / NULLIF((SELECT AVG(ph3.volume) FROM price_history ph3 WHERE ph3.symbol = s.symbol AND ph3.ts > NOW() - INTERVAL '30 days'), 0)
                          ) DESC NULLS LAST
                 LIMIT 5
             """, (min_score,))
@@ -693,9 +694,11 @@ def check_alerts(conn, cfg):
                 def _spike_label(latest, avg):
                     avg = float(avg or 1)
                     if avg == 0: return ""
-                    ratio = float(latest or 0) / avg
-                    color = "#f7c94f" if ratio >= 1.5 else "#888"
-                    return f"<span style='color:{color};font-size:.8rem'> · {ratio:.1f}× vol ({_vol_fmt(latest)})</span>"
+                    ratio = min(float(latest or 0) / avg, 4.0)
+                    capped = ratio >= 4.0
+                    color = "#f7c94f" if 1.5 <= ratio <= 4.0 else ("#888" if ratio < 1.5 else "#e74c3c")
+                    label = f"{ratio:.1f}×" + ("+ vol (event?)" if capped else f"× vol ({_vol_fmt(latest)})")
+                    return f"<span style='color:{color};font-size:.8rem'> · {label}</span>"
 
                 signal_items = "".join(
                     f"<li style='margin-bottom:10px'>"
@@ -718,7 +721,9 @@ def check_alerts(conn, cfg):
 
                 def _spike_str(latest, avg):
                     avg = float(avg or 1)
-                    return f"{float(latest or 0)/avg:.1f}×vol" if avg else ""
+                    if not avg: return ""
+                    ratio = min(float(latest or 0) / avg, 4.0)
+                    return f"{ratio:.1f}×vol" + ("+" if ratio >= 4.0 else "")
 
                 lines = "\n".join(
                     f"  {r[0]} score={r[2]} {_spike_str(r[4], r[5])}" for r in hot_signals
