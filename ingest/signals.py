@@ -122,12 +122,12 @@ def compute_rsi(closes, period):
 def compute_bollinger(closes, period, num_std):
     period = int(period)
     if len(closes) < period:
-        return None, None, None
+        return None, None, None, None
     window = closes[-period:]
     sma = sum(window) / period
     variance = sum((x - sma) ** 2 for x in window) / period
     std = variance ** 0.5
-    return sma + num_std * std, sma, sma - num_std * std
+    return sma + num_std * std, sma, sma - num_std * std, std
 
 
 def detect_regime(closes, fast, slow, band):
@@ -151,7 +151,7 @@ def detect_regime(closes, fast, slow, band):
     return "ranging"
 
 
-def score_signal(rsi, price, bb_upper, bb_lower, regime, side, p):
+def score_signal(rsi, price, bb_upper, bb_lower, band_std, regime, side, p):
     """Return (score 0-100, rationale string) for a given side."""
     score = 0.0
     parts = []
@@ -169,11 +169,17 @@ def score_signal(rsi, price, bb_upper, bb_lower, regime, side, p):
             elif rsi < oversold + 5:
                 score += 20; parts.append(f"RSI {rsi:.1f} near oversold")
 
-        if bb_lower is not None:
-            if price <= bb_lower:
-                score += 35; parts.append(f"Price ${price:.2f} below lower BB ${bb_lower:.2f}")
-            elif (bb_lower - price) / bb_lower > -0.01:
-                score += 20; parts.append(f"Price ${price:.2f} near lower BB ${bb_lower:.2f}")
+        if bb_lower is not None and band_std:
+            # Continuous z-score: how many band-stds below the lower band is price?
+            # Positive = below band, negative = above band.
+            bb_dist = (bb_lower - price) / band_std
+            if bb_dist > -0.5:  # within half a std of lower band, or below it
+                bb_score = int(max(15, min(45, 20 + 25 * bb_dist)))
+                score += bb_score
+                if bb_dist >= 0:
+                    parts.append(f"Price ${price:.2f} {bb_dist:.2f}σ below lower BB ${bb_lower:.2f} (+{bb_score})")
+                else:
+                    parts.append(f"Price ${price:.2f} near lower BB ${bb_lower:.2f} ({-bb_dist:.2f}σ above) (+{bb_score})")
 
         if regime == "ranging":
             score = min(score * 1.15, 100); parts.append("ranging market boosts MR")
@@ -191,11 +197,16 @@ def score_signal(rsi, price, bb_upper, bb_lower, regime, side, p):
             elif rsi > overbought - 5:
                 score += 20; parts.append(f"RSI {rsi:.1f} near overbought")
 
-        if bb_upper is not None:
-            if price >= bb_upper:
-                score += 35; parts.append(f"Price ${price:.2f} above upper BB ${bb_upper:.2f}")
-            elif (price - bb_upper) / bb_upper > -0.01:
-                score += 20; parts.append(f"Price ${price:.2f} near upper BB ${bb_upper:.2f}")
+        if bb_upper is not None and band_std:
+            # Continuous z-score: how many band-stds above the upper band is price?
+            bb_dist = (price - bb_upper) / band_std
+            if bb_dist > -0.5:
+                bb_score = int(max(15, min(45, 20 + 25 * bb_dist)))
+                score += bb_score
+                if bb_dist >= 0:
+                    parts.append(f"Price ${price:.2f} {bb_dist:.2f}σ above upper BB ${bb_upper:.2f} (+{bb_score})")
+                else:
+                    parts.append(f"Price ${price:.2f} near upper BB ${bb_upper:.2f} ({-bb_dist:.2f}σ below) (+{bb_score})")
 
         if regime == "ranging":
             score = min(score * 1.15, 100); parts.append("ranging market boosts MR")
@@ -325,7 +336,7 @@ def compute_signals(conn, symbols):
 
             price = closes[-1]
             rsi = compute_rsi(closes, p["rsi_period"])
-            bb_upper, bb_middle, bb_lower = compute_bollinger(closes, p["bb_period"], p["bb_std"])
+            bb_upper, bb_middle, bb_lower, band_std = compute_bollinger(closes, p["bb_period"], p["bb_std"])
             regime = detect_regime(closes, p["regime_sma_fast"], p["regime_sma_slow"], p["regime_band"])
 
             rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
@@ -333,7 +344,7 @@ def compute_signals(conn, symbols):
             log.info(f"Signals {sym}: price={price:.2f} RSI={rsi_str} BB={bb_str} regime={regime}")
 
             for side in ("buy", "sell"):
-                score, rationale = score_signal(rsi, price, bb_upper, bb_lower, regime, side, p)
+                score, rationale = score_signal(rsi, price, bb_upper, bb_lower, band_std, regime, side, p)
                 if score < p["score_log_min"]:
                     continue
 

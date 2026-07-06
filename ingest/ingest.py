@@ -617,18 +617,29 @@ def check_alerts(conn, cfg):
     if cfg["alert_high_score"]:
         min_score = cfg["alert_high_score_min"]
         with conn.cursor() as cur:
-            # Secondary sort: 30d avg volume descending — more liquid stocks first when scores tie
+            # Secondary sort: volume spike ratio (today ÷ 30d avg).
+            # Elevated volume on a dip is a capitulation signal; a normally-high-volume
+            # stock trading at its usual level is not.
             cur.execute("""
                 SELECT s.symbol, s.signal_type, s.score, s.rationale,
                        COALESCE((
-                           SELECT AVG(ph.volume)::BIGINT
+                           SELECT ph.volume
+                           FROM price_history ph
+                           WHERE ph.symbol = s.symbol
+                           ORDER BY ph.ts DESC LIMIT 1
+                       ), 0) AS latest_volume,
+                       COALESCE((
+                           SELECT AVG(ph.volume)
                            FROM price_history ph
                            WHERE ph.symbol = s.symbol
                              AND ph.ts > NOW() - INTERVAL '30 days'
-                       ), 0) AS avg_volume
+                       ), 1) AS avg_volume
                 FROM signals s
                 WHERE s.score >= %s AND s.generated_at > NOW() - INTERVAL '2 hours'
-                ORDER BY s.score DESC, avg_volume DESC
+                ORDER BY s.score DESC,
+                         (COALESCE((SELECT ph2.volume FROM price_history ph2 WHERE ph2.symbol = s.symbol ORDER BY ph2.ts DESC LIMIT 1), 0)::FLOAT
+                          / NULLIF((SELECT AVG(ph3.volume) FROM price_history ph3 WHERE ph3.symbol = s.symbol AND ph3.ts > NOW() - INTERVAL '30 days'), 0)
+                         ) DESC NULLS LAST
                 LIMIT 5
             """, (min_score,))
             hot_signals = cur.fetchall()
@@ -679,10 +690,17 @@ def check_alerts(conn, cfg):
                     if v >= 1_000: return f"{v/1_000:.0f}K"
                     return str(v)
 
+                def _spike_label(latest, avg):
+                    avg = float(avg or 1)
+                    if avg == 0: return ""
+                    ratio = float(latest or 0) / avg
+                    color = "#f7c94f" if ratio >= 1.5 else "#888"
+                    return f"<span style='color:{color};font-size:.8rem'> · {ratio:.1f}× vol ({_vol_fmt(latest)})</span>"
+
                 signal_items = "".join(
                     f"<li style='margin-bottom:10px'>"
                     f"<strong>{r[0]}</strong> — {r[1]} (score {r[2]})"
-                    f"<span style='color:#666;font-size:.8rem'> · {_vol_fmt(r[4])} avg vol</span>"
+                    f"{_spike_label(r[4], r[5])}"
                     f"<br><span style='color:#888;font-size:.82rem'>{r[3]}</span></li>"
                     for r in hot_signals
                 )
@@ -697,8 +715,13 @@ def check_alerts(conn, cfg):
                   </ul>
                   <p style="margin-top:16px"><a href="http://10.10.10.13:8100" style="color:#4f8ef7">Review Proposals →</a></p>
                 </div>"""
+
+                def _spike_str(latest, avg):
+                    avg = float(avg or 1)
+                    return f"{float(latest or 0)/avg:.1f}×vol" if avg else ""
+
                 lines = "\n".join(
-                    f"  {r[0]} score={r[2]} vol={_vol_fmt(r[4])}" for r in hot_signals
+                    f"  {r[0]} score={r[2]} {_spike_str(r[4], r[5])}" for r in hot_signals
                 )
                 whatsapp = (
                     f"⚡ *High-Confidence Signal*\n"
