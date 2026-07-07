@@ -265,6 +265,8 @@ def check_stop_losses(conn, positions, p):
         return
     stop_pct = p["stop_loss_pct"]
     for sym, pos in positions.items():
+        if pos["qty"] < 0:
+            continue  # short position — our stop-loss logic only applies to longs
         loss_pct = (pos["avg_entry"] - pos["current_price"]) / pos["avg_entry"]
         if loss_pct >= stop_pct:
             rationale = (
@@ -298,6 +300,8 @@ def check_symbol_exits(conn, sym, price, bb_middle, positions, p):
 
     pos = positions[sym]
     qty = pos["qty"]
+    if qty < 0:
+        return  # short position — exit logic only applies to long positions
     avg_entry = pos["avg_entry"]
 
     # ── Thesis-complete: price crossed back above SMA20 / BB midline ─────
@@ -461,8 +465,8 @@ def compute_signals(conn, symbols):
                     regime_note = f" [regime={market_overall}, alloc×{alloc_mod:.0%}]" if alloc_mod != 1.0 else ""
                     rationale = f"{rationale}; sized {qty} shares (~${qty*price:.0f}) — {sizing_note}{regime_note}"
                 else:
-                    # Only propose sells for positions we actually hold
-                    if sym not in positions:
+                    # Only propose sells for long positions we actually hold
+                    if sym not in positions or positions[sym]["qty"] < 0:
                         continue
                     qty = positions[sym]["qty"]
                     rationale = f"{rationale}; sell full position ({qty} shares)"
