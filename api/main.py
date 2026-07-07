@@ -155,13 +155,30 @@ def get_account():
 
 @app.get("/api/proposals")
 def get_proposals():
+    # Fetch live buying power so the frontend can show a running cash balance
+    buying_power = None
+    try:
+        acct = alpaca("GET", "/v2/account")
+        buying_power = float(acct.get("buying_power", acct.get("cash", 0)))
+    except Exception:
+        pass
+
     with db() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT * FROM trade_proposals
-            WHERE decision IS NULL
-            ORDER BY proposed_at DESC
+            SELECT tp.*,
+                   ph.close AS current_price
+            FROM trade_proposals tp
+            LEFT JOIN LATERAL (
+                SELECT close FROM price_history
+                WHERE symbol = tp.symbol
+                ORDER BY ts DESC LIMIT 1
+            ) ph ON TRUE
+            WHERE tp.decision IS NULL
+            ORDER BY tp.proposed_at DESC
         """)
-        return cur.fetchall()
+        proposals = cur.fetchall()
+
+    return {"buying_power": buying_power, "proposals": proposals}
 
 @app.get("/api/summary")
 def get_summary():

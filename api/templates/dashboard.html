@@ -335,6 +335,13 @@
   <!-- Proposals -->
   <div id="proposals-wrap" style="display:none">
     <h2>Proposed Trades</h2>
+    <div id="proposals-cash-bar" style="display:none;align-items:center;gap:16px;margin-bottom:10px;font-size:.85rem;color:#aaa;padding:8px 12px;background:#12151f;border-radius:6px;border:1px solid #2a2d3e">
+      <span>Available: <strong id="pcb-available" style="color:#e8eaf6">—</strong></span>
+      <span style="color:#2a2d3e">|</span>
+      <span>Pending approvals: <strong id="pcb-pending" style="color:#f7c94f">—</strong></span>
+      <span style="color:#2a2d3e">|</span>
+      <span>Remaining after pending: <strong id="pcb-remaining" style="color:#4caf50">—</strong></span>
+    </div>
     <div class="proposals-section" id="proposals-list"></div>
   </div>
 
@@ -484,32 +491,68 @@ async function loadPositions() {
 }
 
 // ── Proposals ──────────────────────────────────────────────────────
+// Track buys approved this session so the cash bar stays accurate between refreshes
+let _sessionApprovedCost = 0;
+
+function _updateCashBar(buyingPower, proposals) {
+  const bar = document.getElementById('proposals-cash-bar');
+  if (buyingPower == null) { bar.style.display = 'none'; return; }
+
+  // Sum estimated cost of all pending buy proposals (qty × current_price)
+  const pendingCost = proposals
+    .filter(p => p.side === 'buy' && p.qty != null && p.current_price != null)
+    .reduce((sum, p) => sum + p.qty * p.current_price, 0);
+
+  const remaining = Math.max(0, buyingPower - pendingCost);
+  document.getElementById('pcb-available').textContent = `$${buyingPower.toLocaleString('en-US', {maximumFractionDigits:0})}`;
+  document.getElementById('pcb-pending').textContent  = pendingCost > 0 ? `-$${pendingCost.toLocaleString('en-US', {maximumFractionDigits:0})}` : '$0';
+  document.getElementById('pcb-remaining').textContent = `$${remaining.toLocaleString('en-US', {maximumFractionDigits:0})}`;
+  document.getElementById('pcb-remaining').style.color = remaining < buyingPower * 0.1 ? '#e74c3c' : '#4caf50';
+  bar.style.display = 'flex';
+}
+
 async function loadProposals() {
   const wrap = document.getElementById('proposals-wrap');
   const list = document.getElementById('proposals-list');
   try {
-    const proposals = await fetch('/api/proposals').then(r => r.json());
-    if (!proposals.length) { wrap.style.display = 'none'; return; }
+    const resp = await fetch('/api/proposals').then(r => r.json());
+    const proposals = resp.proposals ?? resp;  // backwards compat
+    const buyingPower = resp.buying_power ?? null;
+
+    if (!proposals.length) { wrap.style.display = 'none'; document.getElementById('proposals-cash-bar').style.display='none'; return; }
     wrap.style.display = 'block';
-    list.innerHTML = proposals.map(p => `
+
+    _updateCashBar(buyingPower, proposals);
+
+    list.innerHTML = proposals.map(p => {
+      const estCost = (p.qty != null && p.current_price != null)
+        ? `~$${(p.qty * p.current_price).toLocaleString('en-US', {maximumFractionDigits:0})} @ $${parseFloat(p.current_price).toFixed(2)}`
+        : '';
+      const exitTag = p.exit_reason ? `<span style="font-size:.75rem;padding:2px 6px;border-radius:3px;margin-left:6px;background:#2a2d3e;color:#aaa">${p.exit_reason.replace('_',' ')}</span>` : '';
+      // Strip the stale dollar amount from the rationale tail (everything after "; sized")
+      const cleanRationale = (p.rationale || '').replace(/;\s*sized.*$/, '');
+      return `
       <div class="proposal-row">
         <div class="prop-info">
           <strong>${p.side.toUpperCase()} ${p.qty ?? '?'} <a href="/symbol/${p.symbol}">${p.symbol}</a></strong>
+          ${exitTag}
           &nbsp;<span style="color:#888;font-size:.8rem">score ${p.signal_score ?? '—'}</span>
-          <div class="prop-meta">${p.rationale || 'No rationale'}</div>
+          ${estCost ? `<span style="color:#f7c94f;font-size:.82rem;margin-left:8px">${estCost}</span>` : ''}
+          <div class="prop-meta">${cleanRationale || 'No rationale'}</div>
         </div>
         <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
           ${p.qty == null ? `<input id="prop-qty-${p.id}" type="number" min="0.001" step="0.001" placeholder="qty" style="width:70px;padding:4px 6px;background:#12151f;border:1px solid #4f8ef7;border-radius:4px;color:#e8eaf6;font-size:.85rem">` : ''}
-          <button class="btn-sm btn-buy" onclick="approveProposal(${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty})">Approve</button>
+          <button class="btn-sm btn-buy" onclick="approveProposal(${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
           <button class="btn-sm btn-sell" onclick="rejectProposal(${p.id})">Reject</button>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   } catch(e) {
     wrap.style.display = 'none';
   }
 }
 
-async function approveProposal(id, symbol, side, qty) {
+async function approveProposal(id, symbol, side, qty, currentPrice) {
   let finalQty = qty;
   if (finalQty == null) {
     const inp = document.getElementById(`prop-qty-${id}`);
@@ -522,8 +565,10 @@ async function approveProposal(id, symbol, side, qty) {
     body: JSON.stringify({decision:'approved', qty: finalQty})
   });
   const data = await r.json();
-  if (r.ok) { showToast(`${side.toUpperCase()} ${symbol} approved`); loadProposals(); loadPositions(); loadAccount(); loadTrades(); }
-  else showToast(data.detail || 'Error', 'error');
+  if (r.ok) {
+    showToast(`${side.toUpperCase()} ${symbol} approved`);
+    loadProposals(); loadPositions(); loadAccount(); loadTrades();
+  } else showToast(data.detail || 'Error', 'error');
 }
 
 async function rejectProposal(id) {
