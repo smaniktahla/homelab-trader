@@ -303,6 +303,21 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
             trade_qty = body.qty or p["qty"]
             if not trade_qty:
                 raise HTTPException(400, "qty required for approval (proposal has no default qty)")
+
+            # For sell orders: verify we hold enough long shares to cover the sale.
+            # Selling more than held would open or deepen a short position, which requires
+            # explicit intent — not a single approve click.
+            if p["side"] == "sell":
+                try:
+                    pos = alpaca("GET", f"/v2/positions/{p['symbol']}")
+                    held_qty = float(pos.get("qty", 0))
+                except Exception:
+                    held_qty = 0.0
+                if held_qty <= 0:
+                    raise HTTPException(400, f"No long position in {p['symbol']} — cannot sell. Close any short position manually.")
+                if trade_qty > held_qty:
+                    raise HTTPException(400, f"Sell qty {trade_qty} exceeds held shares {held_qty} for {p['symbol']}. Reduce qty to {held_qty} or less.")
+
             order = alpaca("POST", "/v2/orders", json={
                 "symbol": p["symbol"], "qty": str(trade_qty),
                 "side": p["side"], "type": "market", "time_in_force": "gtc",
