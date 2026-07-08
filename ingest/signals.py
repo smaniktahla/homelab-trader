@@ -9,6 +9,8 @@ import math
 import os
 import requests
 
+from earnings import earnings_blackout_reason
+
 log = logging.getLogger(__name__)
 
 YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; invest-agent/1.0)"}
@@ -38,6 +40,8 @@ DEFAULTS = {
     "max_position_pct": 0.20,
     "max_open_positions": 5,
     "stop_loss_pct": 0.08,
+    "sector_max_pct": 0.30,
+    "earnings_blackout_days": 3,
 }
 
 
@@ -286,6 +290,36 @@ def _propose_outcome(conn, outcome_id, proposal_id):
     conn.commit()
 
 
+def _load_sector_map(conn, symbols):
+    """symbol -> GICS sector for the given symbols. Symbols with no sector
+    (ETFs, unclassified) are simply absent from the returned dict."""
+    if not symbols:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT symbol, sector FROM universe
+            WHERE symbol = ANY(%s) AND sector IS NOT NULL
+        """, (list(symbols),))
+        return {r[0]: r[1] for r in cur.fetchall()}
+
+
+def _sector_cap_block_reason(sym, price, qty, sector_map, positions, portfolio_value, p):
+    """Return a block reason string if buying qty*price of sym would push its
+    GICS sector over sector_max_pct of the portfolio, else None."""
+    sector = sector_map.get(sym)
+    if not sector or not portfolio_value:
+        return None
+    current_sector_value = sum(
+        pos["market_value"] for s, pos in positions.items()
+        if sector_map.get(s) == sector
+    )
+    projected_pct = (current_sector_value + qty * price) / portfolio_value
+    cap = p["sector_max_pct"]
+    if projected_pct > cap:
+        return f"sector_cap_exceeded:{sector} ({projected_pct*100:.0f}%>{cap*100:.0f}%)"
+    return None
+
+
 def _open_sell_exists(conn, sym):
     """Return True if an undecided sell proposal already exists for this symbol."""
     with conn.cursor() as cur:
@@ -437,6 +471,10 @@ def compute_signals(conn, symbols):
     # Count open positions for the max_open_positions gate
     open_position_count = len(positions)
 
+    # Sector map for the sector-concentration cap, covers watchlist + any
+    # held position not currently in the watchlist slice being scanned
+    sector_map = _load_sector_map(conn, set(symbols) | set(positions.keys()))
+
     for sym in symbols:
         try:
             closes = fetch_closes(sym, "1y")
@@ -503,11 +541,22 @@ def compute_signals(conn, symbols):
                         )
                         _block_outcome(conn, outcome_id, "max_open_positions")
                         continue
+                    eb_block = earnings_blackout_reason(conn, sym, p["earnings_blackout_days"])
+                    if eb_block:
+                        log.info(f"Skipping buy proposal for {sym}: {eb_block}")
+                        _block_outcome(conn, outcome_id, eb_block)
+                        continue
                     existing_mv = positions.get(sym, {}).get("market_value", 0.0)
                     qty, sizing_note = calc_buy_qty(price, cash, portfolio_value, existing_mv, p_gated)
                     if qty is None:
                         log.info(f"Skipping buy proposal for {sym}: {sizing_note}")
                         _block_outcome(conn, outcome_id, sizing_note)
+                        continue
+                    sector_block = _sector_cap_block_reason(
+                        sym, price, qty, sector_map, positions, portfolio_value, p)
+                    if sector_block:
+                        log.info(f"Skipping buy proposal for {sym}: {sector_block}")
+                        _block_outcome(conn, outcome_id, sector_block)
                         continue
                     regime_note = f" [regime={market_overall}, alloc×{alloc_mod:.0%}]" if alloc_mod != 1.0 else ""
                     rationale = f"{rationale}; sized {qty} shares (~${qty*price:.0f}) — {sizing_note}{regime_note}"

@@ -118,3 +118,29 @@ CREATE INDEX IF NOT EXISTS idx_signal_outcomes_symbol ON signal_outcomes(symbol)
 CREATE INDEX IF NOT EXISTS idx_signal_outcomes_generated_at ON signal_outcomes(generated_at);
 CREATE INDEX IF NOT EXISTS idx_signal_outcomes_proposal_id ON signal_outcomes(proposal_id);
 CREATE INDEX IF NOT EXISTS idx_signal_outcomes_pending ON signal_outcomes(forward_return_20d) WHERE forward_return_20d IS NULL;
+
+-- PRD v1.1 #3: Sector Concentration Cap. GICS sector, scraped alongside the
+-- S&P 500 constituent list already fetched in scanner.py; NULL for ETFs/
+-- unclassified symbols, which the cap check skips.
+ALTER TABLE universe ADD COLUMN IF NOT EXISTS sector TEXT;
+
+INSERT INTO signal_params (key, value, description) VALUES
+    ('sector_max_pct', 0.30, 'Max portfolio fraction in any single GICS sector (30%)')
+ON CONFLICT (key) DO NOTHING;
+
+-- PRD v1.1 #2: Earnings Blackout. Known earnings dates from Finnhub's free
+-- calendar endpoint; signals.py blocks new BUY proposals within
+-- earnings_blackout_days of a symbol's date (either side).
+CREATE TABLE IF NOT EXISTS earnings_events (
+    id             BIGSERIAL PRIMARY KEY,
+    symbol         TEXT NOT NULL,
+    earnings_date  DATE NOT NULL,
+    fetched_at     TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (symbol, earnings_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_earnings_events_symbol ON earnings_events(symbol);
+
+INSERT INTO signal_params (key, value, description) VALUES
+    ('earnings_blackout_days', 3, 'Block new BUY proposals within N days of a known earnings date, either side')
+ON CONFLICT (key) DO NOTHING;

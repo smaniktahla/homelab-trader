@@ -33,13 +33,14 @@ CORE_ETFS = [
 
 
 class _SP500Parser(HTMLParser):
-    """Parse S&P 500 table from Wikipedia."""
+    """Parse S&P 500 table (Symbol + GICS Sector) from Wikipedia."""
     def __init__(self):
         super().__init__()
         self._in_table = False
         self._in_cell = False
         self._col = 0
-        self.symbols = []
+        self._cur_symbol = None
+        self.rows = []  # [(symbol, sector), ...]
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
@@ -47,6 +48,7 @@ class _SP500Parser(HTMLParser):
             self._in_table = True
         if self._in_table and tag == "tr":
             self._col = 0
+            self._cur_symbol = None
         if self._in_table and tag == "td":
             self._in_cell = True
 
@@ -58,14 +60,22 @@ class _SP500Parser(HTMLParser):
             self._col += 1
 
     def handle_data(self, data):
-        if self._in_cell and self._col == 0:
-            sym = data.strip().replace(".", "-")  # BRK.B → BRK-B for Yahoo
-            if sym and 1 <= len(sym) <= 5:
-                self.symbols.append(sym)
+        if not self._in_cell:
+            return
+        text = data.strip()
+        if not text:
+            return
+        if self._col == 0:
+            sym = text.replace(".", "-")  # BRK.B → BRK-B for Yahoo
+            if 1 <= len(sym) <= 5:
+                self._cur_symbol = sym
+        elif self._col == 2 and self._cur_symbol:
+            self.rows.append((self._cur_symbol, text))
 
 
-def _fetch_sp500_symbols():
-    """Fetch current S&P 500 constituents from Wikipedia."""
+def _fetch_sp500_data():
+    """Fetch current S&P 500 constituents + GICS sector from Wikipedia.
+    Returns [(symbol, sector), ...], deduped, preserving order."""
     try:
         r = requests.get(
             "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
@@ -75,9 +85,9 @@ def _fetch_sp500_symbols():
         r.raise_for_status()
         parser = _SP500Parser()
         parser.feed(r.text)
-        symbols = list(dict.fromkeys(parser.symbols))  # dedupe, preserve order
-        log.info(f"Fetched {len(symbols)} S&P 500 symbols from Wikipedia")
-        return symbols
+        rows = list(dict(parser.rows).items())  # dedupe by symbol, preserve order
+        log.info(f"Fetched {len(rows)} S&P 500 symbols (with sector) from Wikipedia")
+        return rows
     except Exception as e:
         log.warning(f"Could not fetch S&P 500 from Wikipedia: {e}")
         return []
@@ -135,55 +145,69 @@ def seed_universe(conn):
     Populate universe table.
     - All Alpaca US equities (full metadata, tradable flag)
     - Mark S&P 500 + core ETFs as scannable=True (these get RSI scanned)
+    - Tag S&P 500 constituents with their GICS sector (for the sector cap)
     """
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM universe WHERE scannable = TRUE")
         row = cur.fetchone()
         scannable = row[0] if isinstance(row, (list, tuple)) else row["count"]
 
-    if scannable > 400:
+    if scannable <= 400:
+        # Fetch all Alpaca assets for metadata
+        log.info("Seeding universe from Alpaca assets API...")
+        try:
+            r = requests.get(
+                f"{ALPACA_BASE}/v2/assets",
+                params={"status": "active", "asset_class": "us_equity"},
+                headers=ALPACA_HEADERS,
+                timeout=30,
+            )
+            r.raise_for_status()
+            assets = r.json()
+            valid_exchanges = {"NYSE", "NASDAQ", "ARCA", "BATS", "NYSE ARCA", "NYSE MKT"}
+            with conn.cursor() as cur:
+                for a in assets:
+                    if (a.get("tradable") and a.get("exchange") in valid_exchanges
+                            and "." not in a["symbol"] and "/" not in a["symbol"]
+                            and len(a["symbol"]) <= 5):
+                        cur.execute("""
+                            INSERT INTO universe (symbol, name, exchange)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (symbol) DO NOTHING
+                        """, (a["symbol"], a.get("name", ""), a.get("exchange", "")))
+            conn.commit()
+            log.info(f"Universe: {len(assets)} Alpaca assets loaded")
+        except Exception as e:
+            log.warning(f"Alpaca asset seed failed: {e}")
+    else:
         log.info(f"Universe already seeded ({scannable} scannable symbols)")
+
+    # Sector backfill runs independently of the scannable check above, so
+    # upgrading an already-seeded deployment to sector-aware caps doesn't
+    # require a full universe reset.
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM universe WHERE sector IS NOT NULL")
+        sector_count = cur.fetchone()[0]
+
+    if sector_count >= 100:
+        log.info(f"Sector data already populated ({sector_count} symbols)")
         return
 
-    # Fetch all Alpaca assets for metadata
-    log.info("Seeding universe from Alpaca assets API...")
-    try:
-        r = requests.get(
-            f"{ALPACA_BASE}/v2/assets",
-            params={"status": "active", "asset_class": "us_equity"},
-            headers=ALPACA_HEADERS,
-            timeout=30,
-        )
-        r.raise_for_status()
-        assets = r.json()
-        valid_exchanges = {"NYSE", "NASDAQ", "ARCA", "BATS", "NYSE ARCA", "NYSE MKT"}
-        with conn.cursor() as cur:
-            for a in assets:
-                if (a.get("tradable") and a.get("exchange") in valid_exchanges
-                        and "." not in a["symbol"] and "/" not in a["symbol"]
-                        and len(a["symbol"]) <= 5):
-                    cur.execute("""
-                        INSERT INTO universe (symbol, name, exchange)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT (symbol) DO NOTHING
-                    """, (a["symbol"], a.get("name", ""), a.get("exchange", "")))
-        conn.commit()
-        log.info(f"Universe: {len(assets)} Alpaca assets loaded")
-    except Exception as e:
-        log.warning(f"Alpaca asset seed failed: {e}")
-
-    # Mark S&P 500 + core ETFs as scannable
-    sp500 = _fetch_sp500_symbols()
-    scannable_syms = list(dict.fromkeys(sp500 + CORE_ETFS))
+    sp500 = _fetch_sp500_data()
+    sector_map = dict(sp500)
+    scannable_syms = list(dict.fromkeys([s for s, _ in sp500] + CORE_ETFS))
     with conn.cursor() as cur:
         for sym in scannable_syms:
             cur.execute("""
-                INSERT INTO universe (symbol, name, exchange, scannable)
-                VALUES (%s, '', '', TRUE)
-                ON CONFLICT (symbol) DO UPDATE SET scannable = TRUE
-            """, (sym,))
+                INSERT INTO universe (symbol, name, exchange, scannable, sector)
+                VALUES (%s, '', '', TRUE, %s)
+                ON CONFLICT (symbol) DO UPDATE SET
+                    scannable = TRUE,
+                    sector = COALESCE(EXCLUDED.sector, universe.sector)
+            """, (sym, sector_map.get(sym)))
     conn.commit()
-    log.info(f"Marked {len(scannable_syms)} symbols as scannable (S&P 500 + ETFs)")
+    log.info(f"Marked {len(scannable_syms)} symbols as scannable (S&P 500 + ETFs), "
+             f"{len(sector_map)} with GICS sector")
 
 
 def _fetch_closes_yf(symbol, range_="1mo"):
