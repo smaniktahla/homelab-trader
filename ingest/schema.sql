@@ -81,3 +81,40 @@ CREATE TABLE IF NOT EXISTS trades (
     traded_at TIMESTAMPTZ NOT NULL,
     notes TEXT
 );
+
+-- PRD v1.1 #1: Signal Outcome Tracking. One row per scored buy/sell signal
+-- (mirrors `signals`), whether it turned into a proposal or was blocked by
+-- risk gates, plus forward returns/MAE/MFE backfilled by outcomes.py.
+CREATE TABLE IF NOT EXISTS signal_outcomes (
+    id                  BIGSERIAL PRIMARY KEY,
+    signal_id           BIGINT REFERENCES signals(id),
+    symbol              TEXT NOT NULL,
+    side                TEXT NOT NULL,          -- buy | sell
+    generated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    score               NUMERIC,
+    rsi                 NUMERIC,
+    bb_upper            NUMERIC,
+    bb_middle           NUMERIC,
+    bb_lower            NUMERIC,
+    band_std            NUMERIC,
+    market_regime       TEXT,                   -- market_context.overall at signal time
+    symbol_regime       TEXT,                   -- trending_up | trending_down | ranging
+    price_at_signal     NUMERIC,
+    proposal_id         BIGINT REFERENCES trade_proposals(id),
+    proposal_status     TEXT NOT NULL DEFAULT 'blocked',  -- proposed | blocked
+    block_reason        TEXT,
+    approval_status     TEXT DEFAULT 'n/a',      -- pending | approved | rejected | ignored | n/a
+    rejection_reason    TEXT,
+    forward_return_1d   NUMERIC,
+    forward_return_5d   NUMERIC,
+    forward_return_10d  NUMERIC,
+    forward_return_20d  NUMERIC,
+    mae                 NUMERIC,                 -- max adverse excursion, %
+    mfe                 NUMERIC,                 -- max favorable excursion, %
+    outcome_updated_at  TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_outcomes_symbol ON signal_outcomes(symbol);
+CREATE INDEX IF NOT EXISTS idx_signal_outcomes_generated_at ON signal_outcomes(generated_at);
+CREATE INDEX IF NOT EXISTS idx_signal_outcomes_proposal_id ON signal_outcomes(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_signal_outcomes_pending ON signal_outcomes(forward_return_20d) WHERE forward_return_20d IS NULL;

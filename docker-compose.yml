@@ -10,6 +10,9 @@ services:
   invest-api:
     build: ./api
     container_name: invest-api
+    labels:
+      kuma.invest-api.http.name: "Invest API"
+      kuma.invest-api.http.url: "http://10.10.10.13:8100/docs"
     restart: unless-stopped
     env_file: .env
     ports:

@@ -11,6 +11,7 @@ from email.mime.text import MIMEText
 from signals import compute_signals
 from scanner import seed_universe, scan_universe, promote_demote
 from market_regime import compute_market_regime, save_market_context
+from outcomes import update_signal_outcomes
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -752,6 +753,7 @@ def run_once(conn, last_universe_scan):
 
     compute_signals(conn, symbols)
     reconcile_orders(conn)
+    update_signal_outcomes(conn)
 
     # Universe scan runs on its own slower interval
     now = time.time()

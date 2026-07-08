@@ -249,6 +249,43 @@ def calc_buy_qty(price, cash, portfolio_value, existing_market_value, p):
     return qty, f"${trade_dollars:.0f} allocation ({p['trade_allocation_pct']*100:.0f}% of ${cash:.0f} cash)"
 
 
+def _record_outcome(conn, signal_id, sym, side, score, rsi, bb_upper, bb_middle, bb_lower,
+                     band_std, market_regime, symbol_regime, price):
+    """Insert the signal_outcomes stub row for a scored signal. Defaults to blocked
+    until the caller marks it proposed."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO signal_outcomes
+                (signal_id, symbol, side, score, rsi, bb_upper, bb_middle, bb_lower, band_std,
+                 market_regime, symbol_regime, price_at_signal)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
+        """, (signal_id, sym, side, score, rsi, bb_upper, bb_middle, bb_lower, band_std,
+              market_regime, symbol_regime, price))
+        outcome_id = cur.fetchone()[0]
+    conn.commit()
+    return outcome_id
+
+
+def _block_outcome(conn, outcome_id, reason):
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE signal_outcomes SET proposal_status='blocked', block_reason=%s
+            WHERE id=%s
+        """, (reason, outcome_id))
+    conn.commit()
+
+
+def _propose_outcome(conn, outcome_id, proposal_id):
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE signal_outcomes
+            SET proposal_status='proposed', proposal_id=%s, approval_status='pending', block_reason=NULL
+            WHERE id=%s
+        """, (proposal_id, outcome_id))
+    conn.commit()
+
+
 def _open_sell_exists(conn, sym):
     """Return True if an undecided sell proposal already exists for this symbol."""
     with conn.cursor() as cur:
@@ -428,13 +465,20 @@ def compute_signals(conn, symbols):
                     cur.execute("""
                         INSERT INTO signals (symbol, signal_type, score, rationale)
                         VALUES (%s, %s, %s, %s)
+                        RETURNING id
                     """, (sym, f"rsi_mr_{side}", score, rationale))
+                    signal_id = cur.fetchone()[0]
                 conn.commit()
                 log.info(f"Signal {sym} {side}: score={score} — {rationale}")
+
+                outcome_id = _record_outcome(conn, signal_id, sym, side, score, rsi,
+                                              bb_upper, bb_middle, bb_lower, band_std,
+                                              market_overall, regime, price)
 
                 if score < effective_proposal_min:
                     if score_mod > 0:
                         log.info(f"Signal {sym} {side}: score {score} below regime-adjusted threshold {effective_proposal_min:.0f} (market={market_overall}), skipped")
+                    _block_outcome(conn, outcome_id, "below_proposal_threshold")
                     continue
 
                 # Check for existing open proposal
@@ -445,6 +489,7 @@ def compute_signals(conn, symbols):
                     """, (sym, side))
                     if cur.fetchone():
                         log.info(f"Proposal for {sym} {side} already open, skipping")
+                        _block_outcome(conn, outcome_id, "duplicate_open_proposal")
                         continue
 
                 # Position sizing for buy signals
@@ -456,17 +501,20 @@ def compute_signals(conn, symbols):
                             f"Skipping buy proposal for {sym}: at max_open_positions "
                             f"({open_position_count}/{int(p['max_open_positions'])})"
                         )
+                        _block_outcome(conn, outcome_id, "max_open_positions")
                         continue
                     existing_mv = positions.get(sym, {}).get("market_value", 0.0)
                     qty, sizing_note = calc_buy_qty(price, cash, portfolio_value, existing_mv, p_gated)
                     if qty is None:
                         log.info(f"Skipping buy proposal for {sym}: {sizing_note}")
+                        _block_outcome(conn, outcome_id, sizing_note)
                         continue
                     regime_note = f" [regime={market_overall}, alloc×{alloc_mod:.0%}]" if alloc_mod != 1.0 else ""
                     rationale = f"{rationale}; sized {qty} shares (~${qty*price:.0f}) — {sizing_note}{regime_note}"
                 else:
                     # Only propose sells for long positions we actually hold
                     if sym not in positions or positions[sym]["qty"] < 0:
+                        _block_outcome(conn, outcome_id, "no_position_held")
                         continue
                     qty = positions[sym]["qty"]
                     rationale = f"{rationale}; sell full position ({qty} shares)"
@@ -476,9 +524,12 @@ def compute_signals(conn, symbols):
                     cur.execute("""
                         INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason)
                         VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING id
                     """, (sym, side, qty, rationale, score, exit_reason))
+                    proposal_id = cur.fetchone()[0]
                 conn.commit()
                 log.info(f"PROPOSAL created: {sym} {side} qty={qty} score={score}")
+                _propose_outcome(conn, outcome_id, proposal_id)
 
         except Exception as e:
             log.warning(f"Signals failed for {sym}: {e}")

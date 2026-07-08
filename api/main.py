@@ -120,6 +120,20 @@ def get_signals_latest():
             }
         return result
 
+@app.get("/api/signal-outcomes")
+def get_signal_outcomes(symbol: Optional[str] = None, limit: int = 200):
+    with db() as conn, conn.cursor() as cur:
+        if symbol:
+            cur.execute("""
+                SELECT * FROM signal_outcomes WHERE symbol=%s
+                ORDER BY generated_at DESC LIMIT %s
+            """, (symbol.upper(), limit))
+        else:
+            cur.execute("""
+                SELECT * FROM signal_outcomes ORDER BY generated_at DESC LIMIT %s
+            """, (limit,))
+        return cur.fetchall()
+
 @app.get("/api/trades")
 def get_trades(limit: int = 200):
     with db() as conn, conn.cursor() as cur:
