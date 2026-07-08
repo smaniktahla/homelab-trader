@@ -144,3 +144,20 @@ CREATE INDEX IF NOT EXISTS idx_earnings_events_symbol ON earnings_events(symbol)
 INSERT INTO signal_params (key, value, description) VALUES
     ('earnings_blackout_days', 3, 'Block new BUY proposals within N days of a known earnings date, either side')
 ON CONFLICT (key) DO NOTHING;
+
+-- PRD v1.1 #4: Portfolio Circuit Breaker. high_water_mark is the running
+-- all-time max portfolio value since tracking began (not a fixed account
+-- baseline); drawdown_pct is computed against it on every ingest cycle.
+CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    id                BIGSERIAL PRIMARY KEY,
+    snapshot_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    portfolio_value   NUMERIC NOT NULL,
+    high_water_mark   NUMERIC NOT NULL,
+    drawdown_pct      NUMERIC NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_at ON portfolio_snapshots(snapshot_at);
+
+INSERT INTO signal_params (key, value, description) VALUES
+    ('circuit_breaker_drawdown_pct', 0.15, 'Pause new BUY proposals if drawdown from all-time high-water mark exceeds this fraction (15%). Sells continue; never liquidates automatically.')
+ON CONFLICT (key) DO NOTHING;

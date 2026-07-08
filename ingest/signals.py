@@ -10,6 +10,7 @@ import os
 import requests
 
 from earnings import earnings_blackout_reason
+from circuit_breaker import record_snapshot_and_check
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ DEFAULTS = {
     "stop_loss_pct": 0.08,
     "sector_max_pct": 0.30,
     "earnings_blackout_days": 3,
+    "circuit_breaker_drawdown_pct": 0.15,
 }
 
 # Relative strength vs SPY and ATR-normalized move: score modifiers layered
@@ -579,6 +581,12 @@ def compute_signals(conn, symbols):
     if cash is not None:
         log.info(f"Portfolio: cash=${cash:.2f} total=${portfolio_value:.2f} positions={list(positions.keys())}")
 
+    # Circuit breaker: record this cycle's snapshot against the all-time
+    # high-water mark. If drawdown exceeds threshold, buys pause below —
+    # sells are never affected, and nothing is liquidated automatically.
+    circuit_breaker_active, hwm, drawdown_pct = record_snapshot_and_check(
+        conn, portfolio_value, p["circuit_breaker_drawdown_pct"])
+
     # Stop-loss check on existing positions
     check_stop_losses(conn, positions, p)
 
@@ -654,6 +662,11 @@ def compute_signals(conn, symbols):
                 qty = None
                 sizing_note = ""
                 if side == "buy":
+                    if circuit_breaker_active:
+                        log.info(f"Skipping buy proposal for {sym}: circuit breaker active "
+                                 f"(drawdown {drawdown_pct*100:.1f}% from HWM ${hwm:,.2f})")
+                        _block_outcome(conn, outcome_id, f"circuit_breaker_drawdown:{drawdown_pct*100:.1f}%")
+                        continue
                     if open_position_count >= int(p["max_open_positions"]):
                         log.info(
                             f"Skipping buy proposal for {sym}: at max_open_positions "

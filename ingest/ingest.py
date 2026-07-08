@@ -58,6 +58,7 @@ def get_app_settings(conn):
         "alert_portfolio_drop_pct": float(s.get("alert_portfolio_drop_pct", "3.0")),
         "alert_high_score":       s.get("alert_high_score", "true") == "true",
         "alert_high_score_min":   float(s.get("alert_high_score_min", "80")),
+        "alert_circuit_breaker":  s.get("alert_circuit_breaker", "true") == "true",
     }
 
 
@@ -737,6 +738,43 @@ def check_alerts(conn, cfg):
                 )
                 send_notification(cfg, subject, html, whatsapp, "high-score alert")
                 mark_alert_sent(conn, alert_key)
+
+    # ── Circuit breaker alert ────────────────────────────────────────────
+    if cfg["alert_circuit_breaker"]:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT drawdown_pct, high_water_mark FROM portfolio_snapshots
+                ORDER BY snapshot_at DESC LIMIT 1
+            """)
+            row = cur.fetchone()
+        if row:
+            drawdown_pct, hwm = float(row[0]), float(row[1])
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM signal_params WHERE key='circuit_breaker_drawdown_pct'")
+                r2 = cur.fetchone()
+            threshold = float(r2[0]) if r2 else 0.15
+
+            if drawdown_pct >= threshold and not alert_throttled(conn, "circuit_breaker", hours=12):
+                pct_str = f"{drawdown_pct*100:.1f}%"
+                subject = f"🛑 Circuit Breaker: Portfolio down {pct_str} from peak"
+                html = f"""
+                <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:500px">
+                  <h2 style="color:#e74c3c;margin:0 0 12px">🛑 Circuit Breaker Active</h2>
+                  <p>Portfolio drawdown is <strong style="color:#e74c3c">{pct_str}</strong> from its
+                     all-time high of <strong>${hwm:,.2f}</strong> — past the {round(threshold*100)}% threshold.</p>
+                  <p style="color:#888;margin-top:12px">New BUY proposals are paused until the portfolio
+                     recovers above the threshold. SELL proposals continue as normal. No positions are
+                     liquidated automatically.</p>
+                  <p style="margin-top:20px"><a href="http://10.10.10.13:8100" style="color:#4f8ef7">Open Dashboard →</a></p>
+                </div>"""
+                whatsapp = (
+                    f"🛑 *Circuit Breaker Active*\n"
+                    f"Drawdown {pct_str} from all-time high ${hwm:,.0f} — past {round(threshold*100)}% threshold.\n"
+                    f"New BUY proposals paused. Sells continue. Nothing liquidated automatically.\n"
+                    f"http://10.10.10.13:8100"
+                )
+                send_notification(cfg, subject, html, whatsapp, "circuit breaker alert")
+                mark_alert_sent(conn, "circuit_breaker")
 
 
 def run_once(conn, last_universe_scan):

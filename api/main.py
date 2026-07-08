@@ -463,6 +463,7 @@ _SETTINGS_DEFAULTS = {
     "alert_portfolio_drop_pct": "3.0",
     "alert_high_score":       "true",
     "alert_high_score_min":   "80",
+    "alert_circuit_breaker":  "true",
 }
 
 def _ensure_settings_table(conn):
@@ -515,6 +516,7 @@ class SettingsUpdate(BaseModel):
     alert_portfolio_drop_pct: Optional[str] = None
     alert_high_score: Optional[str] = None
     alert_high_score_min: Optional[str] = None
+    alert_circuit_breaker: Optional[str] = None
 
 @app.post("/api/settings")
 def api_save_settings(body: SettingsUpdate):
