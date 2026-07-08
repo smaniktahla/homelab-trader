@@ -44,6 +44,32 @@ DEFAULTS = {
     "earnings_blackout_days": 3,
 }
 
+# Relative strength vs SPY and ATR-normalized move: score modifiers layered
+# on top of RSI+BB+regime. Tuning constants, not DB params — same precedent
+# as the regime multipliers above (0.80/0.60/1.15 etc), which are also
+# hardcoded rather than exposed via signal_params.
+RS_LOOKBACK_DAYS = 20
+ATR_PERIOD = 14
+
+# Reward mean-reversion buys in stocks that haven't cratered relative to the
+# market (avoids "falling knife" dips driven by idiosyncratic bad news), and
+# reward mean-reversion sells in stocks that haven't been on a genuine
+# momentum run (avoids selling into strength that may keep running).
+RS_BUY_WEAK_PCT = -15      # underperformance vs SPY beyond this penalizes a buy
+RS_BUY_STRONG_PCT = 10     # outperformance vs SPY beyond this rewards a buy
+RS_SELL_STRONG_PCT = 15    # outperformance vs SPY beyond this penalizes a sell
+RS_SELL_WEAK_PCT = -10     # underperformance vs SPY beyond this rewards a sell
+RS_PENALTY_MULT = 0.75
+RS_BONUS_MULT = 1.05
+
+# How many true-range units price has moved from the 20-day mean (BB
+# midline). A large move relative to a stock's own typical range is more
+# conviction-worthy than the same raw % move in a normally-quiet stock.
+ATR_STRONG_RATIO = 2.0
+ATR_WEAK_RATIO = 0.75
+ATR_BOOST_MULT = 1.10
+ATR_PENALTY_MULT = 0.85
+
 
 def load_params(conn):
     try:
@@ -123,6 +149,57 @@ def compute_rsi(closes, period):
     return 100.0 - (100.0 / (1.0 + rs))
 
 
+def _load_recent_closes_from_db(conn, symbol, n):
+    """Oldest -> newest closes from already-ingested price_history."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT close FROM price_history
+            WHERE symbol=%s ORDER BY ts DESC LIMIT %s
+        """, (symbol, n))
+        rows = cur.fetchall()
+    return [float(r[0]) for r in reversed(rows)]
+
+
+def _load_recent_ohlc_from_db(conn, symbol, n):
+    """Oldest -> newest (high, low, close) from already-ingested price_history."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT high, low, close FROM price_history
+            WHERE symbol=%s ORDER BY ts DESC LIMIT %s
+        """, (symbol, n))
+        rows = cur.fetchall()
+    return [(float(h), float(l), float(c)) for h, l, c in reversed(rows)]
+
+
+def compute_atr(ohlc, period=ATR_PERIOD):
+    """Wilder's ATR from a list of (high, low, close) oldest->newest."""
+    if len(ohlc) < period + 1:
+        return None
+    trs = []
+    prev_close = ohlc[0][2]
+    for h, l, c in ohlc[1:]:
+        trs.append(max(h - l, abs(h - prev_close), abs(l - prev_close)))
+        prev_close = c
+    if len(trs) < period:
+        return None
+    atr = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
+
+
+def relative_strength_vs_spy(conn, sym, lookback=RS_LOOKBACK_DAYS):
+    """sym's %-return over `lookback` days minus SPY's, in percentage points.
+    None if either doesn't have enough price_history yet."""
+    sym_closes = _load_recent_closes_from_db(conn, sym, lookback + 5)
+    spy_closes = _load_recent_closes_from_db(conn, "SPY", lookback + 5)
+    if len(sym_closes) < lookback + 1 or len(spy_closes) < lookback + 1:
+        return None
+    sym_ret = (sym_closes[-1] - sym_closes[-lookback - 1]) / sym_closes[-lookback - 1] * 100
+    spy_ret = (spy_closes[-1] - spy_closes[-lookback - 1]) / spy_closes[-lookback - 1] * 100
+    return sym_ret - spy_ret
+
+
 def compute_bollinger(closes, period, num_std):
     period = int(period)
     if len(closes) < period:
@@ -155,7 +232,24 @@ def detect_regime(closes, fast, slow, band):
     return "ranging"
 
 
-def score_signal(rsi, price, bb_upper, bb_lower, band_std, regime, side, p):
+def _apply_atr_modifier(score, price, bb_middle, atr, parts):
+    """Magnitude-only modifier: how many ATRs price has moved from the
+    20-day mean. Same logic for buy and sell — it's about conviction in
+    the size of the dislocation, not its direction."""
+    if not atr or bb_middle is None:
+        return score
+    atr_move = abs(price - bb_middle) / atr
+    if atr_move >= ATR_STRONG_RATIO:
+        score *= ATR_BOOST_MULT
+        parts.append(f"{atr_move:.1f}x ATR from mean — large dislocation (+{int((ATR_BOOST_MULT-1)*100)}%)")
+    elif atr_move < ATR_WEAK_RATIO:
+        score *= ATR_PENALTY_MULT
+        parts.append(f"{atr_move:.1f}x ATR from mean — shallow dislocation ({int((ATR_PENALTY_MULT-1)*100)}%)")
+    return score
+
+
+def score_signal(rsi, price, bb_upper, bb_lower, band_std, bb_middle, regime, side, p,
+                  rs_pct=None, atr=None):
     """Return (score 0-100, rationale string) for a given side."""
     score = 0.0
     parts = []
@@ -192,6 +286,16 @@ def score_signal(rsi, price, bb_upper, bb_lower, band_std, regime, side, p):
         elif regime == "trending_down":
             score *= 0.60; parts.append("downtrend — catch-falling-knife risk, heavily penalized")
 
+        if rs_pct is not None:
+            if rs_pct < RS_BUY_WEAK_PCT:
+                score *= RS_PENALTY_MULT
+                parts.append(f"underperforming SPY {rs_pct:+.1f}pp/{RS_LOOKBACK_DAYS}d — possible fundamental weakness")
+            elif rs_pct > RS_BUY_STRONG_PCT:
+                score *= RS_BONUS_MULT
+                parts.append(f"resilient vs SPY ({rs_pct:+.1f}pp) despite oversold — cleaner MR candidate")
+
+        score = _apply_atr_modifier(score, price, bb_middle, atr, parts)
+
     else:  # sell
         if rsi is not None:
             if rsi > strong_overbought:
@@ -218,6 +322,16 @@ def score_signal(rsi, price, bb_upper, bb_lower, band_std, regime, side, p):
             score *= 0.80; parts.append("downtrend reduces overbought signal reliability")
         elif regime == "trending_up":
             score *= 0.90; parts.append("uptrend — overbought less meaningful")
+
+        if rs_pct is not None:
+            if rs_pct > RS_SELL_STRONG_PCT:
+                score *= RS_PENALTY_MULT
+                parts.append(f"outperforming SPY {rs_pct:+.1f}pp/{RS_LOOKBACK_DAYS}d — momentum may override MR")
+            elif rs_pct < RS_SELL_WEAK_PCT:
+                score *= RS_BONUS_MULT
+                parts.append(f"already lagging SPY ({rs_pct:+.1f}pp) despite overbought — MR more credible")
+
+        score = _apply_atr_modifier(score, price, bb_middle, atr, parts)
 
     return int(score), "; ".join(parts)
 
@@ -494,8 +608,14 @@ def compute_signals(conn, symbols):
             # Exit condition checks for held positions (thesis_complete, time_stop)
             check_symbol_exits(conn, sym, price, bb_middle, positions, p)
 
+            # Relative strength vs SPY + ATR, computed once per symbol (side-independent)
+            rs_pct = relative_strength_vs_spy(conn, sym)
+            ohlc = _load_recent_ohlc_from_db(conn, sym, ATR_PERIOD + 10)
+            atr = compute_atr(ohlc)
+
             for side in ("buy", "sell"):
-                score, rationale = score_signal(rsi, price, bb_upper, bb_lower, band_std, regime, side, p)
+                score, rationale = score_signal(rsi, price, bb_upper, bb_lower, band_std, bb_middle,
+                                                 regime, side, p, rs_pct=rs_pct, atr=atr)
                 if score < p["score_log_min"]:
                     continue
 
