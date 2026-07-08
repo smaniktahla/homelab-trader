@@ -145,8 +145,15 @@ def get_trades(limit: int = 200):
 @app.get("/api/positions")
 def get_positions():
     positions = alpaca("GET", "/v2/positions")
+    symbols = [p["symbol"] for p in positions]
+    names = {}
+    if symbols:
+        with db() as conn, conn.cursor() as cur:
+            cur.execute("SELECT symbol, name FROM universe WHERE symbol = ANY(%s)", (symbols,))
+            names = {r["symbol"]: r["name"] for r in cur.fetchall()}
     return [{
         "symbol": p["symbol"],
+        "company_name": names.get(p["symbol"]) or None,
         "qty": float(p["qty"]),
         "avg_entry_price": float(p["avg_entry_price"]),
         "current_price": float(p["current_price"]),
@@ -373,11 +380,13 @@ def get_leaderboard(limit: int = 30, side: str = "both"):
         else:
             order_col = "GREATEST(buy_score, sell_score)"
         cur.execute(f"""
-            SELECT u.symbol, u.price, u.rsi, u.buy_score, u.sell_score, u.regime, u.scanned_at,
+            SELECT u.symbol, uni.name AS company_name, u.price, u.rsi, u.buy_score, u.sell_score,
+                   u.regime, u.scanned_at,
                    w.symbol IS NOT NULL AS on_watchlist,
                    w.pinned
             FROM universe_scan u
             LEFT JOIN watchlist w ON w.symbol = u.symbol
+            LEFT JOIN universe uni ON uni.symbol = u.symbol
             WHERE GREATEST(u.buy_score, u.sell_score) > 0
             ORDER BY {order_col} DESC
             LIMIT %s

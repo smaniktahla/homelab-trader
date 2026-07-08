@@ -54,6 +54,9 @@
   .tab-btn { padding: 4px 12px; border-radius: 4px; border: 1px solid #2a2d3a; background: transparent; color: #888; font-size: .8rem; cursor: pointer; }
   .tab-btn.active { background: #4f8ef7; color: #fff; border-color: #4f8ef7; }
   .score-bar { display: inline-block; height: 6px; border-radius: 3px; vertical-align: middle; margin-left: 6px; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { color: #aaa; }
+  .sort-arrow { color: #4f8ef7; }
 
   /* Status badges */
   .badge { font-size: .72rem; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
@@ -326,10 +329,20 @@
   <h2>Positions</h2>
   <table>
     <thead><tr>
-      <th>Symbol</th><th>Shares</th><th>Avg Cost</th><th>Current</th>
-      <th>Market Value</th><th>Cost Basis</th><th>Unrealized P&amp;L</th><th>Return</th><th>RSI</th><th>Sell Signal</th><th></th>
+      <th class="sortable" onclick="sortPositions('symbol')">Symbol<span class="sort-arrow" id="parrow-symbol"></span></th>
+      <th class="sortable" onclick="sortPositions('company_name')">Company<span class="sort-arrow" id="parrow-company_name"></span></th>
+      <th class="sortable" onclick="sortPositions('qty')">Shares<span class="sort-arrow" id="parrow-qty"></span></th>
+      <th class="sortable" onclick="sortPositions('avg_entry_price')">Avg Cost<span class="sort-arrow" id="parrow-avg_entry_price"></span></th>
+      <th class="sortable" onclick="sortPositions('current_price')">Current<span class="sort-arrow" id="parrow-current_price"></span></th>
+      <th class="sortable" onclick="sortPositions('market_value')">Market Value<span class="sort-arrow" id="parrow-market_value"></span></th>
+      <th class="sortable" onclick="sortPositions('cost_basis')">Cost Basis<span class="sort-arrow" id="parrow-cost_basis"></span></th>
+      <th class="sortable" onclick="sortPositions('unrealized_pl')">Unrealized P&amp;L<span class="sort-arrow" id="parrow-unrealized_pl"></span></th>
+      <th class="sortable" onclick="sortPositions('unrealized_plpc')">Return<span class="sort-arrow" id="parrow-unrealized_plpc"></span></th>
+      <th class="sortable" onclick="sortPositions('rsi')">RSI<span class="sort-arrow" id="parrow-rsi"></span></th>
+      <th class="sortable" onclick="sortPositions('sellScore')">Sell Signal<span class="sort-arrow" id="parrow-sellScore"></span></th>
+      <th></th>
     </tr></thead>
-    <tbody id="positions-body"><tr><td colspan="9" class="no-data">Loading…</td></tr></tbody>
+    <tbody id="positions-body"><tr><td colspan="12" class="no-data">Loading…</td></tr></tbody>
   </table>
 
   <!-- Proposals -->
@@ -356,9 +369,17 @@
     </div>
     <table>
       <thead><tr>
-        <th>Symbol</th><th>Price</th><th>RSI</th><th>Buy Score</th><th>Sell Score</th><th>Watchlist</th><th>Scanned</th><th></th>
+        <th class="sortable" onclick="sortLeaderboard('symbol')">Symbol<span class="sort-arrow" id="arrow-symbol"></span></th>
+        <th class="sortable" onclick="sortLeaderboard('company_name')">Company<span class="sort-arrow" id="arrow-company_name"></span></th>
+        <th class="sortable" onclick="sortLeaderboard('price')">Price<span class="sort-arrow" id="arrow-price"></span></th>
+        <th class="sortable" onclick="sortLeaderboard('rsi')">RSI<span class="sort-arrow" id="arrow-rsi"></span></th>
+        <th class="sortable" onclick="sortLeaderboard('buy_score')">Buy Score<span class="sort-arrow" id="arrow-buy_score"></span></th>
+        <th class="sortable" onclick="sortLeaderboard('sell_score')">Sell Score<span class="sort-arrow" id="arrow-sell_score"></span></th>
+        <th class="sortable" onclick="sortLeaderboard('on_watchlist')">Watchlist<span class="sort-arrow" id="arrow-on_watchlist"></span></th>
+        <th class="sortable" onclick="sortLeaderboard('scanned_at')">Scanned<span class="sort-arrow" id="arrow-scanned_at"></span></th>
+        <th></th>
       </tr></thead>
-      <tbody id="leaderboard-body"><tr><td colspan="8" class="no-data">Loading universe scan…</td></tr></tbody>
+      <tbody id="leaderboard-body"><tr><td colspan="9" class="no-data">Loading universe scan…</td></tr></tbody>
     </table>
   </div>
 
@@ -447,6 +468,71 @@ async function loadAccount() {
 }
 
 // ── Positions ──────────────────────────────────────────────────────
+let posRows = [];
+let posSortKey = null;
+let posSortDir = 'desc';
+
+function sortPositions(key) {
+  if (posSortKey === key) {
+    posSortDir = posSortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    posSortKey = key;
+    posSortDir = key === 'symbol' ? 'asc' : 'desc';
+  }
+  renderPositions();
+}
+
+function renderPositions() {
+  const tbody = document.getElementById('positions-body');
+  let rows = posRows.slice();
+
+  if (posSortKey) {
+    rows.sort((a, b) => {
+      let av = a[posSortKey], bv = b[posSortKey];
+      if (typeof av === 'string') { av = av.toLowerCase(); bv = (bv || '').toLowerCase(); }
+      if (av == null) av = -Infinity;
+      if (bv == null) bv = -Infinity;
+      if (typeof av === 'string') return posSortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+      return posSortDir === 'asc' ? av - bv : bv - av;
+    });
+  }
+
+  document.querySelectorAll('[id^="parrow-"]').forEach(el => el.textContent = '');
+  if (posSortKey) {
+    const arrow = document.getElementById(`parrow-${posSortKey}`);
+    if (arrow) arrow.textContent = posSortDir === 'asc' ? ' ▲' : ' ▼';
+  }
+
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="12" class="no-data">No open positions — all cash.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(p => {
+    const plClass = p.unrealized_pl >= 0 ? 'up' : 'down';
+    const rsiColor = p.rsi == null ? '#888' : p.rsi > 70 ? '#f75f5f' : p.rsi < 30 ? '#3ecf6e' : '#e8eaf6';
+    const scoreBar = p.sellScore > 0
+      ? `<div style="display:inline-block;width:${Math.round(p.sellScore * 0.6)}px;height:6px;background:#f75f5f;border-radius:3px;vertical-align:middle;margin-left:4px"></div>`
+      : '—';
+    return `<tr>
+      <td><a href="/symbol/${p.symbol}">${p.symbol}</a></td>
+      <td style="color:#888;font-size:.8rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.company_name || ''}">${p.company_name || '—'}</td>
+      <td>${fmt(p.qty, p.qty % 1 === 0 ? 0 : 4)}</td>
+      <td>${fmtUSD(p.avg_entry_price)}</td>
+      <td>${fmtUSD(p.current_price)}</td>
+      <td>${fmtUSD(p.market_value)}</td>
+      <td>${fmtUSD(p.cost_basis)}</td>
+      <td class="${plClass}">${p.unrealized_pl >= 0 ? '+' : ''}${fmtUSD(p.unrealized_pl)}</td>
+      <td class="${plClass}">${p.unrealized_pl >= 0 ? '▲' : '▼'} ${Math.abs(p.unrealized_plpc)}%</td>
+      <td style="color:${rsiColor};font-variant-numeric:tabular-nums">${p.rsi != null ? p.rsi.toFixed(1) : '—'}</td>
+      <td style="white-space:nowrap">${p.sellScore > 0 ? `<span style="color:#f75f5f;font-size:.8rem">${p.sellScore}</span>` : ''}${scoreBar}</td>
+      <td style="white-space:nowrap">
+        <button class="btn-sm btn-buy" onclick="openModal('${p.symbol}','buy')">Buy</button>
+        <button class="btn-sm btn-sell" onclick="openModal('${p.symbol}','sell')">Sell</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
 async function loadPositions() {
   const tbody = document.getElementById('positions-body');
   try {
@@ -454,39 +540,15 @@ async function loadPositions() {
       fetch('/api/positions').then(r => r.json()),
       fetch('/api/signals/latest').then(r => r.json()).catch(() => ({})),
     ]);
-    if (!positions.length) {
-      tbody.innerHTML = '<tr><td colspan="11" class="no-data">No open positions — all cash.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = positions.map(p => {
-      const plClass = p.unrealized_pl >= 0 ? 'up' : 'down';
+    posRows = positions.map(p => {
       const sig = signals[p.symbol] || {};
       const sell = sig.sell || {};
       const rsi = sig.sell?.rsi ?? sig.buy?.rsi ?? null;
-      const rsiColor = rsi == null ? '#888' : rsi > 70 ? '#f75f5f' : rsi < 30 ? '#3ecf6e' : '#e8eaf6';
-      const sellScore = sell.score ?? 0;
-      const scoreBar = sellScore > 0
-        ? `<div style="display:inline-block;width:${Math.round(sellScore * 0.6)}px;height:6px;background:#f75f5f;border-radius:3px;vertical-align:middle;margin-left:4px"></div>`
-        : '—';
-      return `<tr>
-        <td><a href="/symbol/${p.symbol}">${p.symbol}</a></td>
-        <td>${fmt(p.qty, p.qty % 1 === 0 ? 0 : 4)}</td>
-        <td>${fmtUSD(p.avg_entry_price)}</td>
-        <td>${fmtUSD(p.current_price)}</td>
-        <td>${fmtUSD(p.market_value)}</td>
-        <td>${fmtUSD(p.cost_basis)}</td>
-        <td class="${plClass}">${p.unrealized_pl >= 0 ? '+' : ''}${fmtUSD(p.unrealized_pl)}</td>
-        <td class="${plClass}">${p.unrealized_pl >= 0 ? '▲' : '▼'} ${Math.abs(p.unrealized_plpc)}%</td>
-        <td style="color:${rsiColor};font-variant-numeric:tabular-nums">${rsi != null ? rsi.toFixed(1) : '—'}</td>
-        <td style="white-space:nowrap">${sellScore > 0 ? `<span style="color:#f75f5f;font-size:.8rem">${sellScore}</span>` : ''}${scoreBar}</td>
-        <td style="white-space:nowrap">
-          <button class="btn-sm btn-buy" onclick="openModal('${p.symbol}','buy')">Buy</button>
-          <button class="btn-sm btn-sell" onclick="openModal('${p.symbol}','sell')">Sell</button>
-        </td>
-      </tr>`;
-    }).join('');
+      return { ...p, rsi, sellScore: sell.score ?? 0 };
+    });
+    renderPositions();
   } catch(e) {
-    tbody.innerHTML = `<tr><td colspan="11" class="no-data" style="color:#f75f5f">${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="12" class="no-data" style="color:#f75f5f">${e.message}</td></tr>`;
   }
 }
 
@@ -584,6 +646,9 @@ async function rejectProposal(id) {
 
 // ── Signal Leaderboard ─────────────────────────────────────────────
 let lbSide = 'both';
+let lbRows = [];
+let lbSortKey = null;
+let lbSortDir = 'desc';
 
 function setLbSide(side, btn) {
   lbSide = side;
@@ -595,6 +660,57 @@ function setLbSide(side, btn) {
 function scoreBar(score, color) {
   const w = Math.min(score, 100);
   return `${score} <span class="score-bar" style="width:${w*0.6}px;background:${color}"></span>`;
+}
+
+function sortLeaderboard(key) {
+  if (lbSortKey === key) {
+    lbSortDir = lbSortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    lbSortKey = key;
+    // Text/date-ish columns default to ascending, numeric score/price columns default to descending
+    lbSortDir = (key === 'symbol' || key === 'on_watchlist' || key === 'scanned_at') ? 'asc' : 'desc';
+  }
+  renderLeaderboard();
+}
+
+function renderLeaderboard() {
+  const tbody = document.getElementById('leaderboard-body');
+  let rows = lbRows.slice();
+
+  if (lbSortKey) {
+    rows.sort((a, b) => {
+      let av = a[lbSortKey], bv = b[lbSortKey];
+      if (lbSortKey === 'scanned_at') { av = av ? new Date(av).getTime() : -Infinity; bv = bv ? new Date(bv).getTime() : -Infinity; }
+      else if (lbSortKey === 'on_watchlist') { av = av ? 1 : 0; bv = bv ? 1 : 0; }
+      else if (typeof av === 'string') { av = av.toLowerCase(); bv = (bv || '').toLowerCase(); }
+      if (av == null) av = -Infinity;
+      if (bv == null) bv = -Infinity;
+      if (typeof av === 'string') return lbSortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+      return lbSortDir === 'asc' ? av - bv : bv - av;
+    });
+  }
+
+  document.querySelectorAll('.sort-arrow').forEach(el => el.textContent = '');
+  if (lbSortKey) {
+    const arrow = document.getElementById(`arrow-${lbSortKey}`);
+    if (arrow) arrow.textContent = lbSortDir === 'asc' ? ' ▲' : ' ▼';
+  }
+
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="no-data">No signals yet — universe scan pending.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `<tr>
+    <td><a href="/symbol/${r.symbol}">${r.symbol}</a></td>
+    <td style="color:#888;font-size:.8rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.company_name || ''}">${r.company_name || '—'}</td>
+    <td>${fmtUSD(r.price)}</td>
+    <td style="color:${r.rsi < 35 ? '#3ecf6e' : r.rsi > 65 ? '#f75f5f' : '#ccc'}">${r.rsi ? fmt(r.rsi, 1) : '—'}</td>
+    <td class="up">${r.buy_score > 0 ? scoreBar(r.buy_score, '#3ecf6e') : '—'}</td>
+    <td class="down">${r.sell_score > 0 ? scoreBar(r.sell_score, '#f75f5f') : '—'}</td>
+    <td>${r.on_watchlist ? (r.pinned ? '📌 Pinned' : '✓ Watching') : ''}</td>
+    <td style="color:#555;font-size:.78rem">${r.scanned_at ? new Date(r.scanned_at).toLocaleTimeString() : '—'}</td>
+    <td><button class="btn-sm btn-buy" onclick="openModal('${r.symbol}','buy')">Trade</button></td>
+  </tr>`).join('');
 }
 
 async function loadLeaderboard() {
@@ -611,22 +727,10 @@ async function loadLeaderboard() {
         `${stats.scanned_recently} / ${stats.total} symbols scanned · last: ${last}`;
     }
 
-    if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="8" class="no-data">No signals yet — universe scan pending.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = rows.map(r => `<tr>
-      <td><a href="/symbol/${r.symbol}">${r.symbol}</a></td>
-      <td>${fmtUSD(r.price)}</td>
-      <td style="color:${r.rsi < 35 ? '#3ecf6e' : r.rsi > 65 ? '#f75f5f' : '#ccc'}">${r.rsi ? fmt(r.rsi, 1) : '—'}</td>
-      <td class="up">${r.buy_score > 0 ? scoreBar(r.buy_score, '#3ecf6e') : '—'}</td>
-      <td class="down">${r.sell_score > 0 ? scoreBar(r.sell_score, '#f75f5f') : '—'}</td>
-      <td>${r.on_watchlist ? (r.pinned ? '📌 Pinned' : '✓ Watching') : ''}</td>
-      <td style="color:#555;font-size:.78rem">${r.scanned_at ? new Date(r.scanned_at).toLocaleTimeString() : '—'}</td>
-      <td><button class="btn-sm btn-buy" onclick="openModal('${r.symbol}','buy')">Trade</button></td>
-    </tr>`).join('');
+    lbRows = rows;
+    renderLeaderboard();
   } catch(e) {
-    tbody.innerHTML = `<tr><td colspan="8" class="no-data">${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="no-data">${e.message}</td></tr>`;
   }
 }
 
