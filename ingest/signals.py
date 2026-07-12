@@ -474,6 +474,35 @@ def check_stop_losses(conn, positions, p):
             log.info(f"Stop-loss PROPOSAL created: sell {pos['qty']} {sym}")
 
 
+def check_regime_deterioration_sell(conn, positions, market_overall, market_rationale):
+    """Defensive de-risking: bear_fear is the most severe market regime bucket
+    (bear trend + VIX fear/crisis, per market_regime.py) — exit open longs
+    proactively rather than wait for each position to hit its own stop-loss
+    one at a time."""
+    if market_overall != "bear_fear" or not positions:
+        return
+    for sym, pos in positions.items():
+        if pos["qty"] <= 0:
+            continue  # short position or already flat
+        if _open_sell_exists(conn, sym):
+            log.info(f"Regime-deterioration proposal for {sym} already open, skipping")
+            continue
+        gain_pct = pos["unrealized_plpc"] * 100
+        rationale = (
+            f"REGIME DETERIORATION: market regime is bear_fear — {market_rationale}. "
+            f"De-risking {sym}: entry ${pos['avg_entry']:.2f} → current ${pos['current_price']:.2f} "
+            f"({gain_pct:+.1f}%)"
+        )
+        log.warning(f"Exit [regime_deterioration]: {rationale}")
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason)
+                VALUES (%s, 'sell', %s, %s, 92, 'regime_deterioration')
+            """, (sym, pos["qty"], rationale))
+        conn.commit()
+        log.info(f"Regime-deterioration PROPOSAL created: sell {pos['qty']} {sym}")
+
+
 def check_symbol_exits(conn, sym, price, bb_middle, positions, p):
     """
     Check thesis-complete and time-stop exit conditions for a held symbol.
@@ -589,6 +618,10 @@ def compute_signals(conn, symbols):
 
     # Stop-loss check on existing positions
     check_stop_losses(conn, positions, p)
+
+    # Bear_fear regime: proactively de-risk open longs rather than wait for
+    # each position's own stop-loss to trigger one at a time
+    check_regime_deterioration_sell(conn, positions, market_overall, market_rationale)
 
     # Count open positions for the max_open_positions gate
     open_position_count = len(positions)
