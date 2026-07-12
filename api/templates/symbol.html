@@ -105,6 +105,7 @@
           <button class="range-btn active" onclick="loadChart(14,this)">2W</button>
           <button class="range-btn" onclick="loadChart(30,this)">1M</button>
           <button class="range-btn" onclick="loadChart(90,this)">3M</button>
+          <button class="range-btn" onclick="loadChart(1825,this)">5Y</button>
         </div>
       </div>
       <canvas id="price-chart" height="200"></canvas>
@@ -252,26 +253,39 @@ async function loadChart(days, btn) {
       fetch(`/api/prices/${SYMBOL}?days=${days}`).then(r => r.json()),
       fetch(`/api/trades`).then(r => r.json()).catch(() => []),
     ]);
-    const labels = data.map(r => new Date(r.ts).toLocaleDateString('en-US', {month:'short', day:'numeric'}));
+    const wide = days > 365;
+    const fmtLabel = ts => new Date(ts).toLocaleDateString('en-US',
+      wide ? {month:'short', year:'2-digit'} : {month:'short', day:'numeric'});
+    const labels = data.map(r => fmtLabel(r.ts));
     const prices = data.map(r => r.close);
+    const dataTimes = data.map(r => new Date(r.ts).getTime());
     const color = prices.length > 1 && prices[prices.length-1] >= prices[0] ? '#3ecf6e' : '#f75f5f';
 
-    // Map label → close price for trade marker positioning
-    const priceByLabel = {};
-    data.forEach(r => {
-      priceByLabel[new Date(r.ts).toLocaleDateString('en-US', {month:'short', day:'numeric'})] = r.close;
-    });
+    // Position markers by nearest-data-point INDEX, not label text — with
+    // year-repeating labels (e.g. "Jul 10" appears once per year over a 5Y
+    // span) or multiple points sharing a day label, Chart.js's category
+    // scale resolves a string x to its first match, pinning every trade to
+    // the wrong point. Index is unambiguous and reads y off that same point.
+    function nearestIndex(tradeTime) {
+      if (!dataTimes.length) return null;
+      let idx = 0;
+      for (let i = 0; i < dataTimes.length; i++) {
+        if (dataTimes[i] <= tradeTime) idx = i; else break;
+      }
+      return idx;
+    }
 
     // Build trade marker datasets
     const trades = allTrades.filter(t => t.symbol === SYMBOL && t.status === 'filled');
     const buyPoints = [], sellPoints = [], buyLabels = [], sellLabels = [];
     trades.forEach(t => {
-      const label = new Date(t.traded_at).toLocaleDateString('en-US', {month:'short', day:'numeric'});
-      const y = t.price || priceByLabel[label];
+      const idx = nearestIndex(new Date(t.traded_at).getTime());
+      if (idx === null) return;
+      const y = t.price || prices[idx];
       if (!y) return;
       const dt = new Date(t.traded_at).toLocaleString('en-US', {month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit'});
-      if (t.side === 'buy') { buyPoints.push({x: label, y}); buyLabels.push(`▲ Bought ${t.qty} @ $${parseFloat(y).toFixed(2)}  ·  ${dt}`); }
-      else                  { sellPoints.push({x: label, y}); sellLabels.push(`▼ Sold ${t.qty} @ $${parseFloat(y).toFixed(2)}  ·  ${dt}`); }
+      if (t.side === 'buy') { buyPoints.push({x: idx, y}); buyLabels.push(`▲ Bought ${t.qty} @ $${parseFloat(y).toFixed(2)}  ·  ${dt}`); }
+      else                  { sellPoints.push({x: idx, y}); sellLabels.push(`▼ Sold ${t.qty} @ $${parseFloat(y).toFixed(2)}  ·  ${dt}`); }
     });
 
     if (priceChart) priceChart.destroy();

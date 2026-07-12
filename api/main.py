@@ -193,7 +193,7 @@ def get_trades(limit: int = 200):
         """, (limit,))
         return cur.fetchall()
 
-_PORTFOLIO_HISTORY_RANGE_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365, "3y": 1095}
+_PORTFOLIO_HISTORY_RANGE_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365, "3y": 1095, "5y": 1825}
 
 @app.get("/api/portfolio-history")
 def get_portfolio_history(range: str = "1m"):

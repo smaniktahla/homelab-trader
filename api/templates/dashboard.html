@@ -271,6 +271,7 @@
         <button class="range-btn" onclick="loadPortfolioChart('6m',this)">6M</button>
         <button class="range-btn" onclick="loadPortfolioChart('1y',this)">1Y</button>
         <button class="range-btn" onclick="loadPortfolioChart('3y',this)">3Y</button>
+        <button class="range-btn" onclick="loadPortfolioChart('5y',this)">5Y</button>
       </div>
     </div>
     <canvas id="portfolio-chart" height="80"></canvas>
@@ -925,7 +926,7 @@ async function loadPortfolioChart(range, btn) {
   }
   try {
     const data = await fetch(`/api/portfolio-history?range=${portfolioChartRange}`).then(r => r.json());
-    const wide = ['6m', '1y', '3y'].includes(portfolioChartRange);
+    const wide = ['6m', '1y', '3y', '5y'].includes(portfolioChartRange);
     const fmtLabel = ts => new Date(ts).toLocaleDateString('en-US',
       wide ? {month: 'short', year: '2-digit'} : {month: 'short', day: 'numeric'});
 
