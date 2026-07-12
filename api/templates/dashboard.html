@@ -923,21 +923,33 @@ async function loadPortfolioChart(range, btn) {
 
     const labels = data.snapshots.map(r => fmtLabel(r.snapshot_at));
     const values = data.snapshots.map(r => parseFloat(r.portfolio_value));
+    const snapTimes = data.snapshots.map(r => new Date(r.snapshot_at).getTime());
     const color = values.length > 1 && values[values.length - 1] >= values[0] ? '#3ecf6e' : '#f75f5f';
 
-    // Nearest-label lookup so trade markers land on the line
-    const labelToValue = {};
-    data.snapshots.forEach(r => { labelToValue[fmtLabel(r.snapshot_at)] = parseFloat(r.portfolio_value); });
+    // Position markers by snapshot INDEX (nearest snapshot at-or-before the
+    // trade), not by label text — with hourly snapshots, many rows share the
+    // same day label, and Chart.js's category scale resolves a string x to
+    // its *first* matching label, which pins every same-day trade to that
+    // day's leftmost point. Index-based x is unambiguous and reads the
+    // y-value straight off that same point, so markers always land on the line.
+    function nearestSnapshotIndex(tradeTime) {
+      if (!snapTimes.length) return null;
+      let idx = 0;
+      for (let i = 0; i < snapTimes.length; i++) {
+        if (snapTimes[i] <= tradeTime) idx = i; else break;
+      }
+      return idx;
+    }
 
     const buyPoints = [], sellPoints = [], buyLabels = [], sellLabels = [];
     data.trades.forEach(t => {
-      const label = fmtLabel(t.traded_at);
-      const y = t.portfolio_value != null ? parseFloat(t.portfolio_value) : labelToValue[label];
-      if (y == null) return;
+      const idx = nearestSnapshotIndex(new Date(t.traded_at).getTime());
+      if (idx === null) return;
+      const y = values[idx];
       const dt = new Date(t.traded_at).toLocaleString('en-US', {month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'});
       const desc = `${t.symbol} · ${t.qty} @ $${parseFloat(t.price).toFixed(2)}  ·  ${dt}`;
-      if (t.side === 'buy') { buyPoints.push({x: label, y}); buyLabels.push(`▲ Bought ${desc}`); }
-      else                  { sellPoints.push({x: label, y}); sellLabels.push(`▼ Sold ${desc}`); }
+      if (t.side === 'buy') { buyPoints.push({x: idx, y}); buyLabels.push(`▲ Bought ${desc}`); }
+      else                  { sellPoints.push({x: idx, y}); sellLabels.push(`▼ Sold ${desc}`); }
     });
 
     if (portfolioChart) portfolioChart.destroy();
