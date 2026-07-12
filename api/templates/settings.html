@@ -270,6 +270,8 @@ const EDITABLE_PARAMS = {
     tip: 'Signals below this score are ignored. Higher = fewer but more confident proposals. Lower = more signals, more noise.' },
   max_open_positions:   { label: 'Max open positions', scale: 1, step: 1, min: 1, max: 50,
     tip: 'Maximum stocks held at once. No new buys are proposed once this limit is reached.' },
+  trade_cost_flat:      { label: 'Cost per trade ($)', scale: 1, step: 0.1, min: 0, max: 25,
+    tip: 'Flat $ commission modeled per executed trade. Alpaca’s paper account charges $0 itself, but real brokers don’t — this is subtracted from the cash/portfolio value shown on the dashboard so paper results aren’t misleadingly clean. Applied going forward only; past trades keep the cost that was in effect when they filled.' },
 };
 
 function markDirty() {

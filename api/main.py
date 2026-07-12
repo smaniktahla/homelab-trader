@@ -158,18 +158,31 @@ def get_portfolio_history(range: str = "1m"):
     Ranges beyond 90 days are downsampled to one (last) snapshot per day —
     hourly resolution isn't useful once the window spans months."""
     days = _PORTFOLIO_HISTORY_RANGE_DAYS.get(range.lower(), 30)
+    # Subtracting cumulative modeled trade cost as of each point in time (not
+    # just the current total) so the chart reflects cost-adjusted equity
+    # throughout, matching /api/account's treatment of the current values.
     with db() as conn, conn.cursor() as cur:
         if days > 90:
             cur.execute("""
-                SELECT DISTINCT ON (date_trunc('day', snapshot_at))
-                       snapshot_at, portfolio_value
-                FROM portfolio_snapshots
-                WHERE snapshot_at >= NOW() - INTERVAL '%s days'
-                ORDER BY date_trunc('day', snapshot_at), snapshot_at DESC
+                SELECT snapshot_at,
+                       portfolio_value - COALESCE(
+                           (SELECT SUM(t.cost) FROM trades t WHERE t.traded_at <= snapshot_at), 0
+                       ) AS portfolio_value
+                FROM (
+                    SELECT DISTINCT ON (date_trunc('day', snapshot_at))
+                           snapshot_at, portfolio_value
+                    FROM portfolio_snapshots
+                    WHERE snapshot_at >= NOW() - INTERVAL '%s days'
+                    ORDER BY date_trunc('day', snapshot_at), snapshot_at DESC
+                ) daily
+                ORDER BY snapshot_at
             """, (days,))
         else:
             cur.execute("""
-                SELECT snapshot_at, portfolio_value
+                SELECT snapshot_at,
+                       portfolio_value - COALESCE(
+                           (SELECT SUM(t.cost) FROM trades t WHERE t.traded_at <= snapshot_at), 0
+                       ) AS portfolio_value
                 FROM portfolio_snapshots
                 WHERE snapshot_at >= NOW() - INTERVAL '%s days'
                 ORDER BY snapshot_at
@@ -180,7 +193,10 @@ def get_portfolio_history(range: str = "1m"):
             SELECT t.symbol, t.side, t.qty, t.price, t.traded_at,
                    (SELECT ps.portfolio_value FROM portfolio_snapshots ps
                     WHERE ps.snapshot_at <= t.traded_at
-                    ORDER BY ps.snapshot_at DESC LIMIT 1) AS portfolio_value
+                    ORDER BY ps.snapshot_at DESC LIMIT 1)
+                   - COALESCE(
+                       (SELECT SUM(t2.cost) FROM trades t2 WHERE t2.traded_at <= t.traded_at), 0
+                     ) AS portfolio_value
             FROM trades t
             WHERE t.traded_at >= NOW() - INTERVAL '%s days'
             ORDER BY t.traded_at
@@ -211,14 +227,30 @@ def get_positions():
         "side": p["side"],
     } for p in positions]
 
+def _total_trade_cost(cur):
+    cur.execute("SELECT COALESCE(SUM(cost), 0) AS total FROM trades")
+    return float(cur.fetchone()["total"])
+
+def _current_trade_cost_flat(cur):
+    cur.execute("SELECT value FROM signal_params WHERE key='trade_cost_flat'")
+    row = cur.fetchone()
+    return float(row["value"]) if row else 0.0
+
 @app.get("/api/account")
 def get_account():
     a = alpaca("GET", "/v2/account")
+    with db() as conn, conn.cursor() as cur:
+        total_cost = _total_trade_cost(cur)
+    # buying_power is left as Alpaca reports it — it reflects what can
+    # actually be spent on the next order, which our modeled cost doesn't
+    # change. cash/portfolio_value/equity are the reported performance
+    # numbers, so those absorb the cost drag.
     return {
-        "equity": float(a["equity"]),
-        "cash": float(a["cash"]),
+        "equity": float(a["equity"]) - total_cost,
+        "cash": float(a["cash"]) - total_cost,
         "buying_power": float(a["buying_power"]),
-        "portfolio_value": float(a["portfolio_value"]),
+        "portfolio_value": float(a["portfolio_value"]) - total_cost,
+        "total_trade_cost": total_cost,
     }
 
 @app.get("/api/proposals")
@@ -325,15 +357,16 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
 
     # Log to DB
     with db() as conn, conn.cursor() as cur:
+        cost = _current_trade_cost_flat(cur)
         cur.execute("""
-            INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, notes, source, status, proposal_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, notes, source, status, proposal_id, cost)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             req.symbol.upper(), req.side, filled_qty, filled_price,
             filled_qty * filled_price, order["id"],
             datetime.now(timezone.utc), req.notes, req.source,
-            order["status"], req.proposal_id
+            order["status"], req.proposal_id, cost
         ))
         trade_id = cur.fetchone()["id"]
         conn.commit()
@@ -392,13 +425,14 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
             })
             filled_price = float(order.get("filled_avg_price") or 0)
             filled_qty = float(order.get("filled_qty") or 0) or float(p["qty"])
+            cost = _current_trade_cost_flat(cur)
             cur.execute("""
-                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id, cost)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (p["symbol"], p["side"], filled_qty, filled_price,
                   filled_qty * filled_price, order["id"],
-                  datetime.now(timezone.utc), "model_approved", order["status"], proposal_id))
+                  datetime.now(timezone.utc), "model_approved", order["status"], proposal_id, cost))
             new_trade_id = cur.fetchone()["id"]
             # update proposal qty if it was null
             cur.execute("UPDATE trade_proposals SET qty=%s WHERE id=%s AND qty IS NULL", (trade_qty, proposal_id))

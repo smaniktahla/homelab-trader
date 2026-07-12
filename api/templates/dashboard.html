@@ -261,7 +261,10 @@
   <!-- Portfolio value chart -->
   <div class="card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <h2 style="margin:0">Portfolio Value</h2>
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <h2 style="margin:0">Portfolio Value</h2>
+        <span style="font-size:.75rem;color:#555" id="portfolio-cost-note"></span>
+      </div>
       <div class="range-btns">
         <button class="range-btn active" onclick="loadPortfolioChart('1m',this)">1M</button>
         <button class="range-btn" onclick="loadPortfolioChart('3m',this)">3M</button>
@@ -485,6 +488,11 @@ async function loadAccount() {
   const uplEl = document.getElementById('upl');
   uplEl.textContent = (upl >= 0 ? '+' : '') + fmtUSD(upl);
   uplEl.style.color = upl >= 0 ? '#3ecf6e' : '#f75f5f';
+
+  const costNote = document.getElementById('portfolio-cost-note');
+  if (costNote && acct.total_trade_cost != null) {
+    costNote.textContent = acct.total_trade_cost > 0 ? `net of ${fmtUSD(acct.total_trade_cost)} modeled trade costs` : '';
+  }
 }
 
 // ── Positions ──────────────────────────────────────────────────────

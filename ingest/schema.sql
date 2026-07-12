@@ -181,3 +181,24 @@ CREATE TABLE IF NOT EXISTS strategy_review_proposals (
 );
 
 CREATE INDEX IF NOT EXISTS idx_strategy_review_created_at ON strategy_review_proposals(created_at);
+
+-- Schema-drift fix: these columns exist on the live trades table (added
+-- out-of-band at some point) but were never added here. Declaring them
+-- IF NOT EXISTS is a no-op on the live DB and keeps a from-scratch deploy
+-- (docker compose up on an empty volume) consistent with what main.py's
+-- INSERT statements actually reference (source, status, proposal_id).
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'filled';
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS proposal_id BIGINT REFERENCES trade_proposals(id);
+
+-- Trade cost model: flat $ commission modeled per executed trade (paper
+-- trading only — Alpaca itself charges $0 in the sandbox). Recorded on the
+-- trade row at fill time so changing the setting later doesn't retroactively
+-- rewrite the cost of past trades. Deducted from displayed cash/portfolio
+-- value (see /api/account, /api/portfolio-history) — never from Alpaca's own
+-- account balance, which has no concept of a modeled fee.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS cost NUMERIC NOT NULL DEFAULT 0;
+
+INSERT INTO signal_params (key, value, description) VALUES
+    ('trade_cost_flat', 1.00, 'Flat $ commission modeled per executed trade (paper trading only — Alpaca charges $0 itself). Deducted from displayed cash/portfolio value, not from the real Alpaca balance.')
+ON CONFLICT (key) DO NOTHING;
