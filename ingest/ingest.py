@@ -13,6 +13,7 @@ from scanner import seed_universe, scan_universe, promote_demote
 from market_regime import compute_market_regime, save_market_context
 from outcomes import update_signal_outcomes
 from earnings import sync_earnings_calendar
+from postmortem import run_postmortem_review
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -92,6 +93,18 @@ def get_last_digest_date(conn):
 
 def set_last_digest_date(conn, d: date):
     set_kv(conn, "last_digest_date", d.isoformat())
+
+def get_last_postmortem_at(conn):
+    v = get_kv(conn, "last_postmortem_at")
+    if v:
+        try:
+            return datetime.fromisoformat(v)
+        except ValueError:
+            pass
+    return None
+
+def set_last_postmortem_at(conn, dt: datetime):
+    set_kv(conn, "last_postmortem_at", dt.isoformat())
 
 def get_last_morning_date(conn):
     v = get_kv(conn, "last_morning_date")
@@ -864,6 +877,19 @@ if __name__ == "__main__":
                 if past_evening and get_last_digest_date(conn) != today and is_trading_day:
                     send_digest(conn)
                     set_last_digest_date(conn, today)
+
+                # ── Weekly strategy postmortem ─────────────────────────────────
+                last_postmortem = get_last_postmortem_at(conn)
+                if last_postmortem is None or (now_utc - last_postmortem).days >= 7:
+                    try:
+                        result = run_postmortem_review(conn)
+                        subject = "📊 Weekly Strategy Review"
+                        html = f"<p>{result['finding']}</p><p>N resolved: {result['n_resolved']}</p>"
+                        wa_text = f"{subject}\n{result['finding']}"
+                        send_notification(cfg, subject, html, wa_text, "postmortem review")
+                        set_last_postmortem_at(conn, now_utc)
+                    except Exception as e:
+                        log.error(f"Postmortem review failed: {e}")
 
                 # ── Alerts (every cycle on active market days) ────────────────
                 if is_trading_day and is_currently_open:

@@ -134,6 +134,14 @@ def get_signal_outcomes(symbol: Optional[str] = None, limit: int = 200):
             """, (limit,))
         return cur.fetchall()
 
+@app.get("/api/reviews")
+def get_strategy_reviews(limit: int = 20):
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT * FROM strategy_review_proposals ORDER BY created_at DESC LIMIT %s
+        """, (limit,))
+        return cur.fetchall()
+
 @app.get("/api/trades")
 def get_trades(limit: int = 200):
     with db() as conn, conn.cursor() as cur:

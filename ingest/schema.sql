@@ -161,3 +161,23 @@ CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_at ON portfolio_snapshots(sna
 INSERT INTO signal_params (key, value, description) VALUES
     ('circuit_breaker_drawdown_pct', 0.15, 'Pause new BUY proposals if drawdown from all-time high-water mark exceeds this fraction (15%). Sells continue; never liquidates automatically.')
 ON CONFLICT (key) DO NOTHING;
+
+-- Weekly postmortem: calibration review over resolved signal_outcomes
+-- (forward_return_20d IS NOT NULL). Advisory only — never writes to
+-- signal_params itself; a human applies proposed_param/proposed_value via
+-- the existing PATCH /api/signal-params/{key} endpoint if they agree.
+CREATE TABLE IF NOT EXISTS strategy_review_proposals (
+    id               BIGSERIAL PRIMARY KEY,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    window_start     TIMESTAMPTZ,
+    window_end       TIMESTAMPTZ,
+    n_resolved       INTEGER NOT NULL,
+    metric_summary   JSONB,
+    finding          TEXT NOT NULL,
+    proposed_param   TEXT,
+    current_value    NUMERIC,
+    proposed_value   NUMERIC,
+    status           TEXT NOT NULL DEFAULT 'advisory'  -- advisory | applied | dismissed
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_review_created_at ON strategy_review_proposals(created_at);
