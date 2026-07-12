@@ -150,6 +150,45 @@ def get_trades(limit: int = 200):
         """, (limit,))
         return cur.fetchall()
 
+_PORTFOLIO_HISTORY_RANGE_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365, "3y": 1095}
+
+@app.get("/api/portfolio-history")
+def get_portfolio_history(range: str = "1m"):
+    """Portfolio value over time + trade markers, for the dashboard chart.
+    Ranges beyond 90 days are downsampled to one (last) snapshot per day —
+    hourly resolution isn't useful once the window spans months."""
+    days = _PORTFOLIO_HISTORY_RANGE_DAYS.get(range.lower(), 30)
+    with db() as conn, conn.cursor() as cur:
+        if days > 90:
+            cur.execute("""
+                SELECT DISTINCT ON (date_trunc('day', snapshot_at))
+                       snapshot_at, portfolio_value
+                FROM portfolio_snapshots
+                WHERE snapshot_at >= NOW() - INTERVAL '%s days'
+                ORDER BY date_trunc('day', snapshot_at), snapshot_at DESC
+            """, (days,))
+        else:
+            cur.execute("""
+                SELECT snapshot_at, portfolio_value
+                FROM portfolio_snapshots
+                WHERE snapshot_at >= NOW() - INTERVAL '%s days'
+                ORDER BY snapshot_at
+            """, (days,))
+        snapshots = cur.fetchall()
+
+        cur.execute("""
+            SELECT t.symbol, t.side, t.qty, t.price, t.traded_at,
+                   (SELECT ps.portfolio_value FROM portfolio_snapshots ps
+                    WHERE ps.snapshot_at <= t.traded_at
+                    ORDER BY ps.snapshot_at DESC LIMIT 1) AS portfolio_value
+            FROM trades t
+            WHERE t.traded_at >= NOW() - INTERVAL '%s days'
+            ORDER BY t.traded_at
+        """, (days,))
+        trades = cur.fetchall()
+
+    return {"range": range.lower(), "snapshots": snapshots, "trades": trades}
+
 @app.get("/api/positions")
 def get_positions():
     positions = alpaca("GET", "/v2/positions")

@@ -15,6 +15,12 @@
   /* Account bar */
   .account-bar { display: grid; grid-template-columns: repeat(4, 1fr) auto; gap: 12px; margin-bottom: 4px; }
   .stat-card { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; padding: 14px 18px; }
+
+  /* Portfolio chart */
+  .card { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; padding: 18px; margin: 20px 0; }
+  .range-btns { display: flex; gap: 6px; margin-bottom: 14px; }
+  .range-btn { padding: 3px 10px; border-radius: 4px; border: 1px solid #2a2d3a; background: transparent; color: #888; font-size: .78rem; cursor: pointer; }
+  .range-btn.active { background: #4f8ef7; color: #fff; border-color: #4f8ef7; }
   .stat-card .label { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: #555; margin-bottom: 6px; }
   .stat-card .value { font-size: 1.25rem; font-weight: 700; color: #fff; }
   .btn { padding: 10px 20px; border: none; border-radius: 6px; font-size: .85rem; font-weight: 600; cursor: pointer; }
@@ -252,6 +258,20 @@
     </div>
   </div>
 
+  <!-- Portfolio value chart -->
+  <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <h2 style="margin:0">Portfolio Value</h2>
+      <div class="range-btns">
+        <button class="range-btn active" onclick="loadPortfolioChart('1m',this)">1M</button>
+        <button class="range-btn" onclick="loadPortfolioChart('3m',this)">3M</button>
+        <button class="range-btn" onclick="loadPortfolioChart('6m',this)">6M</button>
+        <button class="range-btn" onclick="loadPortfolioChart('1y',this)">1Y</button>
+        <button class="range-btn" onclick="loadPortfolioChart('3y',this)">3Y</button>
+      </div>
+    </div>
+    <canvas id="portfolio-chart" height="80"></canvas>
+  </div>
 
   <!-- Market Context Bar -->
   <div id="mkt-bar" class="mkt-bar" style="display:none">
@@ -885,6 +905,92 @@ async function loadMarketContext() {
   } catch(e) { console.error('market context:', e); }
 }
 
+// ── Portfolio value chart ─────────────────────────────────────────
+let portfolioChart = null;
+let portfolioChartRange = '1m';
+
+async function loadPortfolioChart(range, btn) {
+  portfolioChartRange = range || portfolioChartRange;
+  if (btn) {
+    btn.closest('.range-btns').querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  }
+  try {
+    const data = await fetch(`/api/portfolio-history?range=${portfolioChartRange}`).then(r => r.json());
+    const wide = ['6m', '1y', '3y'].includes(portfolioChartRange);
+    const fmtLabel = ts => new Date(ts).toLocaleDateString('en-US',
+      wide ? {month: 'short', year: '2-digit'} : {month: 'short', day: 'numeric'});
+
+    const labels = data.snapshots.map(r => fmtLabel(r.snapshot_at));
+    const values = data.snapshots.map(r => parseFloat(r.portfolio_value));
+    const color = values.length > 1 && values[values.length - 1] >= values[0] ? '#3ecf6e' : '#f75f5f';
+
+    // Nearest-label lookup so trade markers land on the line
+    const labelToValue = {};
+    data.snapshots.forEach(r => { labelToValue[fmtLabel(r.snapshot_at)] = parseFloat(r.portfolio_value); });
+
+    const buyPoints = [], sellPoints = [], buyLabels = [], sellLabels = [];
+    data.trades.forEach(t => {
+      const label = fmtLabel(t.traded_at);
+      const y = t.portfolio_value != null ? parseFloat(t.portfolio_value) : labelToValue[label];
+      if (y == null) return;
+      const dt = new Date(t.traded_at).toLocaleString('en-US', {month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'});
+      const desc = `${t.symbol} · ${t.qty} @ $${parseFloat(t.price).toFixed(2)}  ·  ${dt}`;
+      if (t.side === 'buy') { buyPoints.push({x: label, y}); buyLabels.push(`▲ Bought ${desc}`); }
+      else                  { sellPoints.push({x: label, y}); sellLabels.push(`▼ Sold ${desc}`); }
+    });
+
+    if (portfolioChart) portfolioChart.destroy();
+    portfolioChart = new Chart(document.getElementById('portfolio-chart'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            data: values, borderColor: color, borderWidth: 2,
+            pointRadius: 0, pointHoverRadius: 4, pointHoverBackgroundColor: color, tension: 0.25,
+            fill: true, backgroundColor: color + '15',
+          },
+          {
+            type: 'scatter', label: 'Buy', data: buyPoints,
+            backgroundColor: '#3ecf6e', borderColor: '#fff', borderWidth: 1.5,
+            pointRadius: 7, pointStyle: 'triangle', pointHoverRadius: 9,
+            tooltipLabels: buyLabels,
+          },
+          {
+            type: 'scatter', label: 'Sell', data: sellPoints,
+            backgroundColor: '#f75f5f', borderColor: '#fff', borderWidth: 1.5,
+            pointRadius: 7, pointStyle: 'triangle', rotation: 180, pointHoverRadius: 9,
+            tooltipLabels: sellLabels,
+          },
+        ]
+      },
+      options: {
+        interaction: { mode: 'nearest', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#1a1d27', borderColor: '#2a2d3a', borderWidth: 1,
+            titleColor: '#888', bodyColor: '#e8eaf6',
+            callbacks: {
+              label: ctx => {
+                if (ctx.datasetIndex === 0) return ' $' + ctx.parsed.y.toLocaleString('en-US', {maximumFractionDigits: 0});
+                const labels = ctx.dataset.tooltipLabels || [];
+                return ' ' + (labels[ctx.dataIndex] || (ctx.datasetIndex === 1 ? '▲ Buy' : '▼ Sell'));
+              }
+            }
+          }
+        },
+        scales: {
+          x: { grid: { color: '#1a1d27' }, ticks: { color: '#555', maxTicksLimit: 10 } },
+          y: { grid: { color: '#1a1d27' }, ticks: { color: '#555', callback: v => '$' + v.toLocaleString('en-US', {maximumFractionDigits: 0}) } }
+        },
+        animation: false,
+      }
+    });
+  } catch(e) { console.error('portfolio chart:', e); }
+}
+
 // ── Init ───────────────────────────────────────────────────────────
 loadAccount();
 loadPositions();
@@ -893,10 +999,12 @@ loadProposals();
 loadLeaderboard();
 loadTrades();
 loadMarketContext();
+loadPortfolioChart('1m');
 setInterval(() => { loadAccount(); loadPositions(); loadProposals(); }, 60000);
 setInterval(loadLeaderboard, 300000); // leaderboard refreshes every 5 min
 setInterval(loadAdvisor, 300000);
 setInterval(loadMarketContext, 1800000); // market context refreshes every 30 min
+setInterval(() => loadPortfolioChart(portfolioChartRange), 300000); // portfolio chart refreshes every 5 min
 
 
 // ── Wizard ─────────────────────────────────────────────────────────
