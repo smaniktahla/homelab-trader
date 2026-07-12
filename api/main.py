@@ -43,6 +43,46 @@ def alpaca(method, path, **kwargs):
     r.raise_for_status()
     return r.json()
 
+_YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; invest-agent/1.0)"}
+
+def _fetch_prices_yf(symbol, yf_range="1y"):
+    r = http.get(f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}",
+                 params={"interval": "1d", "range": yf_range}, headers=_YF_HEADERS, timeout=15)
+    r.raise_for_status()
+    result = r.json()["chart"]["result"][0]
+    timestamps = result["timestamp"]
+    ohlcv = result["indicators"]["quote"][0]
+    return [{
+        "ts": datetime.fromtimestamp(ts, tz=timezone.utc),
+        "open": ohlcv["open"][i], "high": ohlcv["high"][i],
+        "low": ohlcv["low"][i], "close": ohlcv["close"][i], "volume": ohlcv["volume"][i],
+    } for i, ts in enumerate(timestamps)]
+
+def _backfill_thin_history(cur, symbol):
+    """Symbol detail pages are reachable for any symbol that's ever been
+    scanned (leaderboard, signal history), not just ones currently on the
+    watchlist — the recurring ingest job only ever covers watchlist/held/
+    proposed symbols, so a demoted symbol with a partial history was
+    otherwise stuck showing the same handful of days forever, regardless of
+    the range selected. Backfill on demand here instead: any symbol with
+    fewer than ~3 months of rows gets a synchronous 1y fetch before we read
+    price_history, so it self-heals the first time its page is viewed."""
+    cur.execute("SELECT COUNT(*) AS n FROM price_history WHERE symbol=%s", (symbol,))
+    if cur.fetchone()["n"] >= 65:
+        return
+    try:
+        rows = _fetch_prices_yf(symbol, "1y")
+    except Exception:
+        return  # best-effort — just show whatever's already in the DB
+    for row in rows:
+        if row["open"] is None or row["close"] is None:
+            continue
+        cur.execute("""
+            INSERT INTO price_history (symbol, ts, open, high, low, close, volume)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (symbol, ts) DO NOTHING
+        """, (symbol, row["ts"], row["open"], row["high"], row["low"], row["close"], row["volume"]))
+
 
 # ── Data endpoints ────────────────────────────────────────────────────────────
 
@@ -54,12 +94,15 @@ def get_watchlist():
 
 @app.get("/api/prices/{symbol}")
 def get_prices(symbol: str, days: int = 30):
+    symbol = symbol.upper()
     with db() as conn, conn.cursor() as cur:
+        _backfill_thin_history(cur, symbol)
+        conn.commit()
         cur.execute("""
             SELECT ts, open, high, low, close, volume
             FROM price_history WHERE symbol = %s
             ORDER BY ts DESC LIMIT %s
-        """, (symbol.upper(), days))
+        """, (symbol, days))
         rows = cur.fetchall()
         rows.reverse()
         return rows
