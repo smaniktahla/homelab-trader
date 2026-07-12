@@ -198,10 +198,14 @@ def ingest_prices(conn, symbols):
     with conn.cursor() as cur:
         for sym in symbols:
             try:
-                # Fetch 3 months on first ingest for a symbol, 5 days for updates
+                # Full 1y backfill whenever history is thinner than ~3 months
+                # of trading days, not just on a symbol's literal first ingest —
+                # a symbol that got demoted from the watchlist after a partial
+                # ingest (e.g. only 5d) would otherwise never catch up even if
+                # it's re-promoted or bought later. 5d incremental otherwise.
                 cur.execute("SELECT COUNT(*) FROM price_history WHERE symbol=%s", (sym,))
                 count = cur.fetchone()[0]
-                yf_range = "1y" if count == 0 else "5d"
+                yf_range = "1y" if count < 65 else "5d"
                 rows = fetch_prices_yf(sym, yf_range)
                 for row in rows:
                     if None in (row["open"], row["close"]):
@@ -790,11 +794,34 @@ def check_alerts(conn, cfg):
                 mark_alert_sent(conn, "circuit_breaker")
 
 
+def get_extra_price_symbols(conn):
+    """Symbols that need price_history kept fresh even after falling off the
+    watchlist: currently-held positions and symbols with an open (undecided)
+    proposal. The universe scanner demotes watchlist symbols independently of
+    whether they're held or proposed, so without this a bought/proposed
+    symbol's price chart silently goes stale the moment it's demoted.
+    Widens only the price/news ingest set — signal generation still runs on
+    the watchlist alone."""
+    symbols = set()
+    try:
+        symbols.update(get_positions().keys())
+    except Exception as e:
+        log.warning(f"Could not fetch positions for price ingest: {e}")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT symbol FROM trade_proposals WHERE decision IS NULL")
+            symbols.update(row[0] for row in cur.fetchall())
+    except Exception as e:
+        log.warning(f"Could not fetch open-proposal symbols for price ingest: {e}")
+    return symbols
+
+
 def run_once(conn, last_universe_scan):
     symbols = get_watchlist(conn)
+    price_symbols = sorted(set(symbols) | get_extra_price_symbols(conn))
     log.info(f"Watchlist ({len(symbols)} symbols): {symbols}")
-    ingest_prices(conn, symbols)
-    ingest_news(conn, symbols)
+    ingest_prices(conn, price_symbols)
+    ingest_news(conn, price_symbols)
 
     # Update market regime before running signals so gating is current
     try:
