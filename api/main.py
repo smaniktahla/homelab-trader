@@ -4,7 +4,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import Optional
-import psycopg2, psycopg2.extras, os, requests as http, secrets, time
+import psycopg2, psycopg2.extras, os, requests as http, secrets, time, bisect
 from datetime import datetime, timezone
 
 DB_DSN = os.environ["DATABASE_URL"]
@@ -245,6 +245,35 @@ def get_portfolio_history(range: str = "1m"):
             ORDER BY t.traded_at
         """, (days,))
         trades = cur.fetchall()
+
+        # SPY benchmark: "if this same starting capital had just been put
+        # into SPY at the start of the visible range." Re-anchored per range
+        # (not to account inception), so each button answers "how would SPY
+        # have done over just this window" — matching the portfolio line it
+        # sits next to. Not cost-adjusted: a single lump-sum buy-and-hold
+        # doesn't incur the same per-trade costs the active strategy does.
+        cur.execute("""
+            SELECT DATE(ts) AS d, close FROM price_history
+            WHERE symbol='SPY' AND ts >= NOW() - INTERVAL '%s days'
+            ORDER BY ts ASC
+        """, (days,))
+        spy_by_date = {r["d"]: float(r["close"]) for r in cur.fetchall()}
+
+    spy_dates_sorted = sorted(spy_by_date)
+
+    def nearest_spy_close(d):
+        idx = bisect.bisect_right(spy_dates_sorted, d) - 1
+        return spy_by_date[spy_dates_sorted[idx]] if idx >= 0 else None
+
+    first_portfolio_value = float(snapshots[0]["portfolio_value"]) if snapshots else None
+    first_spy_close = nearest_spy_close(snapshots[0]["snapshot_at"].date()) if snapshots else None
+
+    for s in snapshots:
+        spy_close = nearest_spy_close(s["snapshot_at"].date())
+        s["spy_value"] = (
+            first_portfolio_value * (spy_close / first_spy_close)
+            if spy_close and first_spy_close else None
+        )
 
     return {"range": range.lower(), "snapshots": snapshots, "trades": trades}
 

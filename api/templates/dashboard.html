@@ -263,6 +263,7 @@
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
       <div style="display:flex;align-items:baseline;gap:10px">
         <h2 style="margin:0">Portfolio Value</h2>
+        <span style="font-size:.75rem;color:#888">- - SPY (equal investment)</span>
         <span style="font-size:.75rem;color:#555" id="portfolio-cost-note"></span>
       </div>
       <div class="range-btns">
@@ -932,6 +933,7 @@ async function loadPortfolioChart(range, btn) {
 
     const labels = data.snapshots.map(r => fmtLabel(r.snapshot_at));
     const values = data.snapshots.map(r => parseFloat(r.portfolio_value));
+    const spyValues = data.snapshots.map(r => r.spy_value != null ? parseFloat(r.spy_value) : null);
     const snapTimes = data.snapshots.map(r => new Date(r.snapshot_at).getTime());
     const color = values.length > 1 && values[values.length - 1] >= values[0] ? '#3ecf6e' : '#f75f5f';
 
@@ -984,6 +986,11 @@ async function loadPortfolioChart(range, btn) {
             pointRadius: 7, pointStyle: 'triangle', rotation: 180, pointHoverRadius: 9,
             tooltipLabels: sellLabels,
           },
+          {
+            label: 'SPY (equal investment)', data: spyValues,
+            borderColor: '#888', borderWidth: 1.5, borderDash: [4, 4],
+            pointRadius: 0, pointHoverRadius: 3, fill: false, tension: 0.25, spanGaps: true,
+          },
         ]
       },
       options: {
@@ -996,6 +1003,7 @@ async function loadPortfolioChart(range, btn) {
             callbacks: {
               label: ctx => {
                 if (ctx.datasetIndex === 0) return ' $' + ctx.parsed.y.toLocaleString('en-US', {maximumFractionDigits: 0});
+                if (ctx.datasetIndex === 3) return ' SPY: $' + ctx.parsed.y.toLocaleString('en-US', {maximumFractionDigits: 0});
                 const labels = ctx.dataset.tooltipLabels || [];
                 return ' ' + (labels[ctx.dataIndex] || (ctx.datasetIndex === 1 ? '▲ Buy' : '▼ Sell'));
               }
