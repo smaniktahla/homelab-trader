@@ -92,7 +92,11 @@
     align-items:center; justify-content:center; }
   .wiz-overlay.open { display:flex; }
   .wiz-box { background:#1a1d27; border:1px solid #2a2d3a; border-radius:14px;
-    padding:36px 40px; width:560px; max-width:95vw; }
+    padding:36px 40px; width:560px; max-width:95vw; position:relative; }
+  .wiz-close { display:none; position:absolute; top:16px; right:16px; background:none; border:none;
+    color:#666; font-size:1.3rem; line-height:1; cursor:pointer; padding:4px 8px; border-radius:6px; }
+  .wiz-close:hover { color:#fff; background:#2a2d3a; }
+  .wiz-box.closable .wiz-close { display:block; }
   .wiz-step { display:none; }
   .wiz-step.active { display:block; }
   .wiz-title { font-size:1.4rem; font-weight:700; color:#fff; margin-bottom:6px; }
@@ -1046,6 +1050,7 @@ let wizProfile = null, wizAccountValue = 0;
 
 function resetProfile() {
   document.getElementById('wizard').classList.add('open');
+  document.getElementById('wiz-box').classList.add('closable');
   // Reset step to 1
   wizNext(1); wizProfile = null;
   document.querySelectorAll('.wiz-card').forEach(c => c.classList.remove('selected'));
@@ -1058,9 +1063,20 @@ function resetProfile() {
   }).catch(() => {});
 }
 
+function closeWizard() {
+  if (!document.getElementById('wiz-box').classList.contains('closable')) return;
+  document.getElementById('wizard').classList.remove('open');
+  document.getElementById('wiz-box').classList.remove('closable');
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeWizard();
+});
+
 async function checkWizard() {
   const profile = await fetch('/api/profile').then(r => r.json()).catch(() => null);
   if (!profile) {
+    // First-run setup — no existing profile to fall back to, so this step can't be dismissed.
     document.getElementById('wizard').classList.add('open');
     const acct = await fetch('/api/account').then(r => r.json()).catch(() => null);
     if (acct) {
@@ -1176,8 +1192,9 @@ checkWizard();
 </script>
 
 <!-- Getting Started Wizard -->
-<div class="wiz-overlay" id="wizard">
-  <div class="wiz-box">
+<div class="wiz-overlay" id="wizard" onclick="if (event.target === this) closeWizard();">
+  <div class="wiz-box" id="wiz-box">
+    <button class="wiz-close" onclick="closeWizard()" aria-label="Close">×</button>
     <div class="wiz-progress">
       <div class="wiz-dot done" id="wdot-1"></div>
       <div class="wiz-dot" id="wdot-2"></div>

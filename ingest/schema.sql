@@ -202,3 +202,28 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS cost NUMERIC NOT NULL DEFAULT 0;
 INSERT INTO signal_params (key, value, description) VALUES
     ('trade_cost_flat', 1.00, 'Flat $ commission modeled per executed trade (paper trading only — Alpaca charges $0 itself). Deducted from displayed cash/portfolio value, not from the real Alpaca balance.')
 ON CONFLICT (key) DO NOTHING;
+
+-- Thesis horizon taxonomy: long_term (daily data, current mean_reversion
+-- thesis) / short_term (hourly data, still human-approved) / day_trading
+-- (reserved value only — no signal engine, no execution loop, no PDT/risk
+-- model built for it). See docs/thesis-horizons-and-intraday-data.md.
+-- Existing theses rows backfill to 'long_term' via the column DEFAULT.
+ALTER TABLE theses ADD COLUMN IF NOT EXISTS horizon TEXT NOT NULL
+    DEFAULT 'long_term' CHECK (horizon IN ('long_term', 'short_term', 'day_trading'));
+
+-- Hourly OHLC bars — separate from price_history's daily bars, independently
+-- sourced from Alpaca (not rolled up into or derived from price_history, no
+-- rename of price_history itself). Nothing reads this table yet; it exists
+-- so a future short_term thesis has data to backtest against from day one.
+-- See docs/thesis-horizons-and-intraday-data.md.
+CREATE TABLE IF NOT EXISTS price_history_hourly (
+    id BIGSERIAL PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    ts TIMESTAMPTZ NOT NULL,
+    open NUMERIC,
+    high NUMERIC,
+    low NUMERIC,
+    close NUMERIC,
+    volume BIGINT,
+    UNIQUE (symbol, ts)
+);

@@ -4,7 +4,7 @@
 import os, time, logging, smtplib
 import psycopg2
 import requests
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -24,6 +24,10 @@ ALPACA_KEY = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.environ.get("ALPACA_API_SECRET", "")
 ALPACA_BASE = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+ALPACA_DATA_BASE = "https://data.alpaca.markets"
+HOURLY_LOOKBACK_DAYS = 2   # short incremental window; ON CONFLICT DO NOTHING makes
+                           # re-fetching overlap harmless, same idiom as ingest_prices()'s
+                           # 5d incremental daily pull — no per-symbol cursor to track
 INTERVAL_SECONDS = int(os.environ.get("INGEST_INTERVAL", "3600"))
 UNIVERSE_SCAN_INTERVAL = int(os.environ.get("UNIVERSE_SCAN_INTERVAL", "14400"))  # 4 hours
 YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; invest-agent/1.0)"}
@@ -219,6 +223,51 @@ def ingest_prices(conn, symbols):
                 log.info(f"Prices for {sym}: {len(rows)} rows ({yf_range})")
             except Exception as e:
                 log.warning(f"Price ingest failed for {sym}: {e}")
+    conn.commit()
+
+
+def ingest_hourly_prices(conn, symbols):
+    """Keep price_history_hourly fresh for the given symbols. Source is
+    Alpaca directly (not Yahoo) — a single intraday source avoids the
+    cross-source timestamp-alignment problem backfill_alpaca.py's daily
+    _normalize_ts exists to solve. Short incremental window, same idiom as
+    ingest_prices()'s 5d daily pull: ON CONFLICT DO NOTHING makes
+    re-fetching overlap harmless, so there's no per-symbol cursor to track.
+    Nothing reads price_history_hourly yet — this just keeps it from going
+    stale immediately after a one-off backfill_intraday_alpaca.py run. See
+    docs/thesis-horizons-and-intraday-data.md."""
+    if not symbols:
+        return
+    start = (datetime.now(timezone.utc) - timedelta(days=HOURLY_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    symbols = sorted(symbols)
+    with conn.cursor() as cur:
+        for i in range(0, len(symbols), 8):
+            batch = symbols[i:i + 8]
+            try:
+                r = requests.get(f"{ALPACA_DATA_BASE}/v2/stocks/bars",
+                                  headers=ALPACA_HEADERS,
+                                  params={"symbols": ",".join(batch), "timeframe": "1Hour",
+                                          "start": start, "limit": 10000, "feed": "iex",
+                                          "adjustment": "split"},
+                                  timeout=30)
+                r.raise_for_status()
+                bars_by_symbol = r.json().get("bars") or {}
+            except Exception as e:
+                log.warning(f"Hourly price ingest failed for batch {batch}: {e}")
+                continue
+            for sym, bars in bars_by_symbol.items():
+                n = 0
+                for b in bars:
+                    if b.get("o") is None or b.get("c") is None:
+                        continue
+                    ts = datetime.fromisoformat(b["t"].replace("Z", "+00:00")).astimezone(timezone.utc)
+                    cur.execute("""
+                        INSERT INTO price_history_hourly (symbol, ts, open, high, low, close, volume)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (symbol, ts) DO NOTHING
+                    """, (sym, ts, b["o"], b["h"], b["l"], b["c"], b.get("v")))
+                    n += cur.rowcount
+                log.info(f"Hourly prices for {sym}: {len(bars)} bars, {n} new rows")
     conn.commit()
 
 
@@ -821,6 +870,7 @@ def run_once(conn, last_universe_scan):
     price_symbols = sorted(set(symbols) | get_extra_price_symbols(conn))
     log.info(f"Watchlist ({len(symbols)} symbols): {symbols}")
     ingest_prices(conn, price_symbols)
+    ingest_hourly_prices(conn, price_symbols)
     ingest_news(conn, price_symbols)
 
     # Update market regime before running signals so gating is current
