@@ -13,9 +13,10 @@ ALPACA_SECRET = os.environ.get("ALPACA_API_SECRET", "")
 ALPACA_BASE = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
 
-_security = HTTPBasic()
+_security = HTTPBasic(auto_error=False)
 _AUTH_USER = os.environ.get("INVEST_USER", "invest")
 _AUTH_PASS = os.environ.get("INVEST_PASS", "")
+_AGENT_API_KEY = os.environ.get("INVEST_AGENT_API_KEY", "")
 
 if not _AUTH_PASS:
     raise RuntimeError(
@@ -23,8 +24,18 @@ if not _AUTH_PASS:
         "because it can place real trades. Set INVEST_PASS in your .env file."
     )
 
-def _check_auth(creds: HTTPBasicCredentials = Depends(_security)):
+def _check_auth(request: Request, creds: Optional[HTTPBasicCredentials] = Depends(_security)):
+    # Service-to-service read access: a valid X-API-Key header grants
+    # GET-only access. Scoped by HTTP method (not by path) so a leaked or
+    # misused agent key can never place a trade or change settings, no
+    # matter which endpoint it's pointed at - every mutating route in this
+    # API is POST/PATCH, every read is GET.
+    if request.method == "GET" and _AGENT_API_KEY:
+        agent_key = request.headers.get("X-API-Key", "")
+        if agent_key and secrets.compare_digest(agent_key.encode(), _AGENT_API_KEY.encode()):
+            return
     ok = (
+        creds is not None and
         secrets.compare_digest(creds.username.encode(), _AUTH_USER.encode()) and
         secrets.compare_digest(creds.password.encode(), _AUTH_PASS.encode())
     )
