@@ -73,6 +73,17 @@ ATR_BOOST_MULT = 1.10
 ATR_PENALTY_MULT = 0.85
 
 
+def mean_reversion_thesis_id(conn):
+    """signals/signal_outcomes/trade_proposals.thesis_id have been NOT NULL
+    since migration 001; this module is entirely the mean_reversion thesis
+    (it isn't parameterized by thesis at all), so every insert here uses
+    this one lookup rather than threading a thesis slug through everything."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM theses WHERE slug='mean_reversion'")
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def load_params(conn):
     try:
         with conn.cursor() as cur:
@@ -370,18 +381,18 @@ def calc_buy_qty(price, cash, portfolio_value, existing_market_value, p):
 
 
 def _record_outcome(conn, signal_id, sym, side, score, rsi, bb_upper, bb_middle, bb_lower,
-                     band_std, market_regime, symbol_regime, price):
+                     band_std, market_regime, symbol_regime, price, thesis_id):
     """Insert the signal_outcomes stub row for a scored signal. Defaults to blocked
     until the caller marks it proposed."""
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO signal_outcomes
                 (signal_id, symbol, side, score, rsi, bb_upper, bb_middle, bb_lower, band_std,
-                 market_regime, symbol_regime, price_at_signal)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                 market_regime, symbol_regime, price_at_signal, thesis_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             RETURNING id
         """, (signal_id, sym, side, score, rsi, bb_upper, bb_middle, bb_lower, band_std,
-              market_regime, symbol_regime, price))
+              market_regime, symbol_regime, price, thesis_id))
         outcome_id = cur.fetchone()[0]
     conn.commit()
     return outcome_id
@@ -446,7 +457,7 @@ def _open_sell_exists(conn, sym):
         return cur.fetchone() is not None
 
 
-def check_stop_losses(conn, positions, p):
+def check_stop_losses(conn, positions, p, thesis_id):
     """Create sell proposals for positions that have breached the stop-loss threshold."""
     if not positions:
         return
@@ -467,14 +478,14 @@ def check_stop_losses(conn, positions, p):
                 continue
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason)
-                    VALUES (%s, 'sell', %s, %s, 99, 'stop_loss')
-                """, (sym, pos["qty"], rationale))
+                    INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason, thesis_id)
+                    VALUES (%s, 'sell', %s, %s, 99, 'stop_loss', %s)
+                """, (sym, pos["qty"], rationale, thesis_id))
             conn.commit()
             log.info(f"Stop-loss PROPOSAL created: sell {pos['qty']} {sym}")
 
 
-def check_regime_deterioration_sell(conn, positions, market_overall, market_rationale):
+def check_regime_deterioration_sell(conn, positions, market_overall, market_rationale, thesis_id):
     """Defensive de-risking: bear_fear is the most severe market regime bucket
     (bear trend + VIX fear/crisis, per market_regime.py) — exit open longs
     proactively rather than wait for each position to hit its own stop-loss
@@ -496,14 +507,14 @@ def check_regime_deterioration_sell(conn, positions, market_overall, market_rati
         log.warning(f"Exit [regime_deterioration]: {rationale}")
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason)
-                VALUES (%s, 'sell', %s, %s, 92, 'regime_deterioration')
-            """, (sym, pos["qty"], rationale))
+                INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason, thesis_id)
+                VALUES (%s, 'sell', %s, %s, 92, 'regime_deterioration', %s)
+            """, (sym, pos["qty"], rationale, thesis_id))
         conn.commit()
         log.info(f"Regime-deterioration PROPOSAL created: sell {pos['qty']} {sym}")
 
 
-def check_symbol_exits(conn, sym, price, bb_middle, positions, p):
+def check_symbol_exits(conn, sym, price, bb_middle, positions, p, thesis_id):
     """
     Check thesis-complete and time-stop exit conditions for a held symbol.
     Called inside the per-symbol loop once BB is computed.
@@ -530,9 +541,9 @@ def check_symbol_exits(conn, sym, price, bb_middle, positions, p):
         log.info(f"Exit [thesis_complete]: {rationale}")
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason)
-                VALUES (%s, 'sell', %s, %s, 90, 'thesis_complete')
-            """, (sym, qty, rationale))
+                INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason, thesis_id)
+                VALUES (%s, 'sell', %s, %s, 90, 'thesis_complete', %s)
+            """, (sym, qty, rationale, thesis_id))
         conn.commit()
         return  # don't also check time_stop in the same cycle
 
@@ -562,9 +573,9 @@ def check_symbol_exits(conn, sym, price, bb_middle, positions, p):
             log.warning(f"Exit [time_stop]: {rationale}")
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason)
-                    VALUES (%s, 'sell', %s, %s, 85, 'time_stop')
-                """, (sym, qty, rationale))
+                    INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason, thesis_id)
+                    VALUES (%s, 'sell', %s, %s, 85, 'time_stop', %s)
+                """, (sym, qty, rationale, thesis_id))
             conn.commit()
 
 
@@ -584,6 +595,7 @@ def _load_market_context(conn):
 def compute_signals(conn, symbols):
     """Main entry point: compute signals for all symbols, write to DB, create proposals."""
     p = load_params(conn)
+    thesis_id = mean_reversion_thesis_id(conn)
 
     # Load market regime modifiers computed by market_regime.py this cycle
     score_mod, alloc_mod, market_overall, market_rationale = _load_market_context(conn)
@@ -617,11 +629,11 @@ def compute_signals(conn, symbols):
         conn, portfolio_value, p["circuit_breaker_drawdown_pct"])
 
     # Stop-loss check on existing positions
-    check_stop_losses(conn, positions, p)
+    check_stop_losses(conn, positions, p, thesis_id)
 
     # Bear_fear regime: proactively de-risk open longs rather than wait for
     # each position's own stop-loss to trigger one at a time
-    check_regime_deterioration_sell(conn, positions, market_overall, market_rationale)
+    check_regime_deterioration_sell(conn, positions, market_overall, market_rationale, thesis_id)
 
     # Count open positions for the max_open_positions gate
     open_position_count = len(positions)
@@ -647,7 +659,7 @@ def compute_signals(conn, symbols):
             log.info(f"Signals {sym}: price={price:.2f} RSI={rsi_str} BB={bb_str} regime={regime}")
 
             # Exit condition checks for held positions (thesis_complete, time_stop)
-            check_symbol_exits(conn, sym, price, bb_middle, positions, p)
+            check_symbol_exits(conn, sym, price, bb_middle, positions, p, thesis_id)
 
             # Relative strength vs SPY + ATR, computed once per symbol (side-independent)
             rs_pct = relative_strength_vs_spy(conn, sym)
@@ -662,17 +674,17 @@ def compute_signals(conn, symbols):
 
                 with conn.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO signals (symbol, signal_type, score, rationale)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO signals (symbol, signal_type, score, rationale, thesis_id)
+                        VALUES (%s, %s, %s, %s, %s)
                         RETURNING id
-                    """, (sym, f"rsi_mr_{side}", score, rationale))
+                    """, (sym, f"rsi_mr_{side}", score, rationale, thesis_id))
                     signal_id = cur.fetchone()[0]
                 conn.commit()
                 log.info(f"Signal {sym} {side}: score={score} — {rationale}")
 
                 outcome_id = _record_outcome(conn, signal_id, sym, side, score, rsi,
                                               bb_upper, bb_middle, bb_lower, band_std,
-                                              market_overall, regime, price)
+                                              market_overall, regime, price, thesis_id)
 
                 if score < effective_proposal_min:
                     if score_mod > 0:
@@ -737,10 +749,10 @@ def compute_signals(conn, symbols):
                 exit_reason = "overbought" if side == "sell" else None
                 with conn.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                        INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason, thesis_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
-                    """, (sym, side, qty, rationale, score, exit_reason))
+                    """, (sym, side, qty, rationale, score, exit_reason, thesis_id))
                     proposal_id = cur.fetchone()[0]
                 conn.commit()
                 log.info(f"PROPOSAL created: {sym} {side} qty={qty} score={score}")

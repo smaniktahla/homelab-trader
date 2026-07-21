@@ -455,7 +455,7 @@
 <script>
 const fmt = (n, d=2) => n == null ? '—' : Number(n).toLocaleString('en-US', {minimumFractionDigits:d, maximumFractionDigits:d});
 const fmtUSD = n => n == null ? '—' : '$' + fmt(n);
-const sourceLabel = { manual: '👤 Manual', model_approved: '🤖 Model', auto: '⚡ Auto' };
+const sourceLabel = { manual: '👤 Manual', model_approved: '🤖 Model', auto: '⚡ Auto', advisor_stop_loss: '⚠️ Stop-loss' };
 
 function statusBadge(s) {
   const map = {
@@ -607,6 +607,34 @@ function _updateCashBar(buyingPower, proposals) {
   bar.style.display = 'flex';
 }
 
+function _renderNoProposalsState(message) {
+  const list = document.getElementById('proposals-list');
+  document.getElementById('proposals-cash-bar').style.display = 'none';
+  list.innerHTML = `
+    <div style="text-align:center;padding:24px 12px;color:#888">
+      <p style="margin:0 0 14px">${message}</p>
+      <button class="btn btn-primary" id="generate-recs-btn" onclick="generateRecommendations()">Generate Recommendations</button>
+    </div>`;
+}
+
+async function generateRecommendations() {
+  const btn = document.getElementById('generate-recs-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking market conditions…'; }
+  try {
+    const resp = await fetch('/api/signals/generate', { method: 'POST' }).then(r => r.json());
+    if (resp.new_proposals && resp.new_proposals.length) {
+      showToast(`${resp.new_proposals.length} new recommendation(s) found`);
+    } else {
+      _renderNoProposalsState('No new recommendations based on current market conditions.');
+      return;
+    }
+  } catch (e) {
+    _renderNoProposalsState('Something went wrong checking for recommendations — try again.');
+    return;
+  }
+  loadProposals();
+}
+
 async function loadProposals() {
   const wrap = document.getElementById('proposals-wrap');
   const list = document.getElementById('proposals-list');
@@ -615,8 +643,9 @@ async function loadProposals() {
     const proposals = resp.proposals ?? resp;  // backwards compat
     const buyingPower = resp.buying_power ?? null;
 
-    if (!proposals.length) { wrap.style.display = 'none'; document.getElementById('proposals-cash-bar').style.display='none'; return; }
     wrap.style.display = 'block';
+
+    if (!proposals.length) { _renderNoProposalsState('No pending recommendations.'); return; }
 
     _updateCashBar(buyingPower, proposals);
 
@@ -655,27 +684,45 @@ async function approveProposal(id, symbol, side, qty, currentPrice) {
     finalQty = inp ? parseFloat(inp.value) : NaN;
     if (!finalQty || isNaN(finalQty)) { showToast('Enter a quantity first', 'error'); return; }
   }
-  const r = await fetch(`/api/proposals/${id}`, {
-    method: 'PATCH',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({decision:'approved', qty: finalQty})
-  });
-  const data = await r.json();
+  let r, data;
+  try {
+    r = await fetch(`/api/proposals/${id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({decision:'approved', qty: finalQty})
+    });
+    data = await r.json();
+  } catch (e) {
+    showToast('Approve failed — no response from server', 'error');
+    return;
+  }
   if (r.ok) {
-    showToast(`${side.toUpperCase()} ${symbol} approved`);
+    if (data.booked_for_next_open) {
+      const when = data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open';
+      showToast(`${side.toUpperCase()} ${symbol} booked — will execute at ${when}`);
+    } else {
+      showToast(`${side.toUpperCase()} ${symbol} approved`);
+    }
     loadProposals(); loadPositions(); loadAccount(); loadTrades();
   } else showToast(data.detail || 'Error', 'error');
 }
 
 async function rejectProposal(id) {
   const reason = '';
-  const r = await fetch(`/api/proposals/${id}`, {
-    method: 'PATCH',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({decision:'rejected', rejection_reason: reason})
-  });
+  let r, data;
+  try {
+    r = await fetch(`/api/proposals/${id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({decision:'rejected', rejection_reason: reason})
+    });
+    data = await r.json();
+  } catch (e) {
+    showToast('Reject failed — no response from server', 'error');
+    return;
+  }
   if (r.ok) { showToast('Proposal rejected'); loadProposals(); }
-  else showToast('Error', 'error');
+  else showToast(data.detail || 'Error', 'error');
 }
 
 // ── Signal Leaderboard ─────────────────────────────────────────────
@@ -808,19 +855,60 @@ async function submitTrade() {
   const qty = parseFloat(document.getElementById('modal-qty').value);
   const notes = document.getElementById('modal-notes').value.trim();
   if (!symbol || !qty || isNaN(qty)) { showToast('Symbol and qty required', 'error'); return; }
-  const r = await fetch('/api/trade', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({symbol, side, qty, notes, source:'manual'})
-  });
-  const data = await r.json();
+
+  let r, data;
+  try {
+    r = await fetch('/api/trade', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({symbol, side, qty, notes, source:'manual'})
+    });
+    data = await r.json();
+  } catch (e) {
+    showToast('Trade failed — no response from server', 'error');
+    return;
+  }
+
   if (r.ok) {
-    showToast(`${side.toUpperCase()} ${qty} ${symbol} — ${data.status}`);
+    if (data.booked_for_next_open) {
+      const when = data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open';
+      showToast(`${side.toUpperCase()} ${qty} ${symbol} booked — will execute at ${when}`);
+    } else {
+      showToast(`${side.toUpperCase()} ${qty} ${symbol} — ${data.status}`);
+    }
     closeModal();
     loadTrades(); loadPositions(); loadAccount();
-  } else showToast(data.detail || 'Error', 'error');
+  } else {
+    showToast(data.detail || 'Error', 'error');
+  }
 }
 
+
+async function advisorApprove(symbol, side, qty) {
+  let r, data;
+  try {
+    r = await fetch('/api/trade', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({symbol, side, qty, source:'advisor_stop_loss'})
+    });
+    data = await r.json();
+  } catch (e) {
+    showToast('Trade failed — no response from server', 'error');
+    return;
+  }
+  if (r.ok) {
+    if (data.booked_for_next_open) {
+      const when = data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open';
+      showToast(`${side.toUpperCase()} ${qty} ${symbol} booked — will execute at ${when}`);
+    } else {
+      showToast(`${side.toUpperCase()} ${qty} ${symbol} — ${data.status}`);
+    }
+    loadAdvisor(); loadPositions(); loadAccount(); loadTrades();
+  } else {
+    showToast(data.detail || 'Error', 'error');
+  }
+}
 
 // ── Portfolio Advisor ──────────────────────────────────────────────
 async function loadAdvisor() {
@@ -837,9 +925,12 @@ async function loadAdvisor() {
     document.getElementById('adv-headline').textContent = adv.headline;
 
     const typeIcon = {info:'info', opportunity:'opportunity', caution:'caution', alert:'alert'};
-    document.getElementById('adv-bullets').innerHTML = adv.bullets.map(b =>
-      `<li class="${typeIcon[b.type] || 'info'}">${b.text}</li>`
-    ).join('');
+    document.getElementById('adv-bullets').innerHTML = adv.bullets.map(b => {
+      const action = b.action
+        ? `<button class="btn-sm btn-sell" style="margin-left:8px" onclick="advisorApprove('${b.action.symbol}','${b.action.side}',${b.action.qty})">Approve</button>`
+        : '';
+      return `<li class="${typeIcon[b.type] || 'info'}">${b.text}${action}</li>`;
+    }).join('');
 
     const mb = adv.market_breadth;
     document.getElementById('adv-breadth-bar').innerHTML =
@@ -935,46 +1026,55 @@ async function loadPortfolioChart(range, btn) {
     const fmtLabel = ts => new Date(ts).toLocaleDateString('en-US',
       wide ? {month: 'short', year: '2-digit'} : {month: 'short', day: 'numeric'});
 
-    const labels = data.snapshots.map(r => fmtLabel(r.snapshot_at));
+    // x-axis spans the full REQUESTED window (range_days, from the server —
+    // same day-count used to build the SQL query), not just however much
+    // data happens to exist. Using array-index positions for x previously
+    // made the axis always exactly match the available row count, so 6M/1Y/
+    // 3Y/5Y all looked identical to 1M whenever real history (tracking only
+    // started ~2 weeks ago) was shorter than the requested window — the
+    // "6M" button showed 2 weeks of data stretched to fill "6 months" of
+    // ticks, which also collapsed every tick to the same month/year label.
+    // Real epoch-ms timestamps as x fixes both: the axis genuinely spans the
+    // requested range (leaving blank space before data starts, as expected
+    // for a short-lived account), and every point/marker lands at its exact
+    // real time — no more index-matching indirection needed at all.
+    const xMax = Date.now();
+    const xMin = xMax - data.range_days * 86400000;
+
     const values = data.snapshots.map(r => parseFloat(r.portfolio_value));
-    const spyValues = data.snapshots.map(r => r.spy_value != null ? parseFloat(r.spy_value) : null);
-    const snapTimes = data.snapshots.map(r => new Date(r.snapshot_at).getTime());
     const color = values.length > 1 && values[values.length - 1] >= values[0] ? '#3ecf6e' : '#f75f5f';
 
-    // Position markers by snapshot INDEX (nearest snapshot at-or-before the
-    // trade), not by label text — with hourly snapshots, many rows share the
-    // same day label, and Chart.js's category scale resolves a string x to
-    // its *first* matching label, which pins every same-day trade to that
-    // day's leftmost point. Index-based x is unambiguous and reads the
-    // y-value straight off that same point, so markers always land on the line.
-    function nearestSnapshotIndex(tradeTime) {
+    const snapTimes = data.snapshots.map(r => new Date(r.snapshot_at).getTime());
+    function nearestSnapshotValue(tradeTime) {
       if (!snapTimes.length) return null;
       let idx = 0;
       for (let i = 0; i < snapTimes.length; i++) {
         if (snapTimes[i] <= tradeTime) idx = i; else break;
       }
-      return idx;
+      return values[idx];
     }
 
     const buyPoints = [], sellPoints = [], buyLabels = [], sellLabels = [];
     data.trades.forEach(t => {
-      const idx = nearestSnapshotIndex(new Date(t.traded_at).getTime());
-      if (idx === null) return;
-      const y = values[idx];
+      const x = new Date(t.traded_at).getTime();
+      const y = nearestSnapshotValue(x);
+      if (y == null) return;
       const dt = new Date(t.traded_at).toLocaleString('en-US', {month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'});
       const desc = `${t.symbol} · ${t.qty} @ $${parseFloat(t.price).toFixed(2)}  ·  ${dt}`;
-      if (t.side === 'buy') { buyPoints.push({x: idx, y}); buyLabels.push(`▲ Bought ${desc}`); }
-      else                  { sellPoints.push({x: idx, y}); sellLabels.push(`▼ Sold ${desc}`); }
+      if (t.side === 'buy') { buyPoints.push({x, y}); buyLabels.push(`▲ Bought ${desc}`); }
+      else                  { sellPoints.push({x, y}); sellLabels.push(`▼ Sold ${desc}`); }
     });
+
+    const linePoints = data.snapshots.map(r => ({x: new Date(r.snapshot_at).getTime(), y: parseFloat(r.portfolio_value)}));
+    const spyPoints = data.snapshots.map(r => ({x: new Date(r.snapshot_at).getTime(), y: r.spy_value != null ? parseFloat(r.spy_value) : null}));
 
     if (portfolioChart) portfolioChart.destroy();
     portfolioChart = new Chart(document.getElementById('portfolio-chart'), {
       type: 'line',
       data: {
-        labels,
         datasets: [
           {
-            data: values, borderColor: color, borderWidth: 2,
+            data: linePoints, borderColor: color, borderWidth: 2,
             pointRadius: 0, pointHoverRadius: 4, pointHoverBackgroundColor: color, tension: 0.25,
             fill: true, backgroundColor: color + '15',
           },
@@ -991,7 +1091,7 @@ async function loadPortfolioChart(range, btn) {
             tooltipLabels: sellLabels,
           },
           {
-            label: 'SPY (equal investment)', data: spyValues,
+            label: 'SPY (equal investment)', data: spyPoints,
             borderColor: '#888', borderWidth: 1.5, borderDash: [4, 4],
             pointRadius: 0, pointHoverRadius: 3, fill: false, tension: 0.25, spanGaps: true,
           },
@@ -1005,6 +1105,9 @@ async function loadPortfolioChart(range, btn) {
             backgroundColor: '#1a1d27', borderColor: '#2a2d3a', borderWidth: 1,
             titleColor: '#888', bodyColor: '#e8eaf6',
             callbacks: {
+              title: items => items.length
+                ? new Date(items[0].parsed.x).toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'})
+                : '',
               label: ctx => {
                 if (ctx.datasetIndex === 0) return ' $' + ctx.parsed.y.toLocaleString('en-US', {maximumFractionDigits: 0});
                 if (ctx.datasetIndex === 3) return ' SPY: $' + ctx.parsed.y.toLocaleString('en-US', {maximumFractionDigits: 0});
@@ -1015,7 +1118,11 @@ async function loadPortfolioChart(range, btn) {
           }
         },
         scales: {
-          x: { grid: { color: '#1a1d27' }, ticks: { color: '#555', maxTicksLimit: 10 } },
+          x: {
+            type: 'linear', min: xMin, max: xMax,
+            grid: { color: '#1a1d27' },
+            ticks: { color: '#555', maxTicksLimit: 10, callback: v => fmtLabel(v) },
+          },
           y: { grid: { color: '#1a1d27' }, ticks: { color: '#555', callback: v => '$' + v.toLocaleString('en-US', {maximumFractionDigits: 0}) } }
         },
         animation: false,

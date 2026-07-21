@@ -419,19 +419,29 @@ async function submitTrade() {
   if (!qty || isNaN(qty) || qty <= 0) { showToast('Quantity must be at least 1', 'error'); return; }
   const btn = document.getElementById('modal-submit-btn');
   btn.disabled = true; btn.textContent = 'Submitting…';
-  const r = await fetch('/api/trade', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({symbol: SYMBOL, side, qty, source: 'manual'})
-  });
-  const data = await r.json();
+
+  let r, data;
+  try {
+    r = await fetch('/api/trade', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({symbol: SYMBOL, side, qty, source: 'manual'})
+    });
+    data = await r.json();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Submit';
+    showToast('Trade failed — no response from server', 'error');
+    return;
+  }
   btn.disabled = false; btn.textContent = 'Submit';
+
   if (r.ok) {
     document.getElementById('modal-form').style.display = 'none';
     const confirmEl = document.getElementById('modal-confirm');
     confirmEl.style.display = 'block';
-    document.getElementById('modal-confirm-msg').textContent =
-      `${side.toUpperCase()} ${qty} ${SYMBOL} — order received`;
+    document.getElementById('modal-confirm-msg').textContent = data.booked_for_next_open
+      ? `${side.toUpperCase()} ${qty} ${SYMBOL} booked — will execute at ${data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open'}`
+      : `${side.toUpperCase()} ${qty} ${SYMBOL} — order received`;
     setTimeout(() => {
       closeModal();
       document.getElementById('modal-form').style.display = 'block';

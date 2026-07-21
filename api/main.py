@@ -7,6 +7,8 @@ from typing import Optional
 import psycopg2, psycopg2.extras, os, requests as http, secrets, time, bisect
 from datetime import datetime, timezone
 
+from signals import compute_signals
+
 DB_DSN = os.environ["DATABASE_URL"]
 ALPACA_KEY = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.environ.get("ALPACA_API_SECRET", "")
@@ -51,7 +53,12 @@ def db():
 
 def alpaca(method, path, **kwargs):
     r = http.request(method, f"{ALPACA_BASE}{path}", headers=ALPACA_HEADERS, timeout=10, **kwargs)
-    r.raise_for_status()
+    if not r.ok:
+        try:
+            msg = r.json().get("message", r.text)
+        except ValueError:
+            msg = r.text
+        raise HTTPException(r.status_code, f"Alpaca rejected the request: {msg}")
     return r.json()
 
 _YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; invest-agent/1.0)"}
@@ -286,7 +293,7 @@ def get_portfolio_history(range: str = "1m"):
             if spy_close and first_spy_close else None
         )
 
-    return {"range": range.lower(), "snapshots": snapshots, "trades": trades}
+    return {"range": range.lower(), "range_days": days, "snapshots": snapshots, "trades": trades}
 
 @app.get("/api/positions")
 def get_positions():
@@ -318,6 +325,20 @@ def _current_trade_cost_flat(cur):
     cur.execute("SELECT value FROM signal_params WHERE key='trade_cost_flat'")
     row = cur.fetchone()
     return float(row["value"]) if row else 0.0
+
+def _resolve_thesis_id(cur, proposal_id: Optional[int] = None):
+    """trades.thesis_id has been NOT NULL since migration 001 — every INSERT
+    into trades must set it. Proposal-linked trades use the proposal's own
+    thesis_id; a bare manual trade (no proposal_id) has no natural thesis to
+    attribute to, so it defaults to mean_reversion, today's only active one."""
+    if proposal_id:
+        cur.execute("SELECT thesis_id FROM trade_proposals WHERE id=%s", (proposal_id,))
+        row = cur.fetchone()
+        if row and row["thesis_id"]:
+            return row["thesis_id"]
+    cur.execute("SELECT id FROM theses WHERE slug='mean_reversion'")
+    row = cur.fetchone()
+    return row["id"] if row else None
 
 @app.get("/api/account")
 def get_account():
@@ -362,6 +383,48 @@ def get_proposals():
         proposals = cur.fetchall()
 
     return {"buying_power": buying_power, "proposals": proposals}
+
+@app.post("/api/signals/generate")
+def generate_recommendations():
+    """On-demand re-run of the same signal engine invest-ingest runs hourly
+    (compute_signals, shared/signals.py) — for the dashboard's "Generate
+    Recommendations" button when the proposals list is empty. Reuses the
+    exact production function rather than a second implementation, so this
+    can't drift from what the hourly loop actually does. Scores against
+    whatever's already in price_history/market_context (as fresh as the
+    last hourly ingest cycle) rather than triggering a fresh Yahoo pull
+    first — fetch_closes() inside compute_signals still hits Yahoo live per
+    symbol, so scoring itself uses current prices; only the regime/earnings
+    context could be up to an hour stale."""
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT symbol FROM watchlist")
+        symbols = [r["symbol"] for r in cur.fetchall()]
+
+    started_at = datetime.now(timezone.utc)
+    # compute_signals (shared/signals.py) was only ever called from
+    # ingest.py's plain psycopg2 connection (default tuple-row cursors) —
+    # it relies on positional row[0]-style access throughout. db()'s
+    # RealDictCursor breaks that (KeyError: 0), so this needs its own plain
+    # connection rather than db()'s dict-cursor one, matching what
+    # ingest.py's get_db() actually uses.
+    with psycopg2.connect(DB_DSN) as conn:
+        compute_signals(conn, symbols)
+
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT tp.*, ph.close AS current_price
+            FROM trade_proposals tp
+            LEFT JOIN LATERAL (
+                SELECT close FROM price_history
+                WHERE symbol = tp.symbol
+                ORDER BY ts DESC LIMIT 1
+            ) ph ON TRUE
+            WHERE tp.proposed_at >= %s
+            ORDER BY tp.proposed_at DESC
+        """, (started_at,))
+        new_proposals = cur.fetchall()
+
+    return {"new_proposals": new_proposals, "checked_symbols": len(symbols)}
 
 @app.get("/api/summary")
 def get_summary():
@@ -438,18 +501,29 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     filled_price = float(order.get("filled_avg_price") or order.get("limit_price") or 0)
     filled_qty = float(order.get("filled_qty") or 0) or req.qty
 
+    # Market orders placed outside trading hours come back "accepted"/"pending_new",
+    # not "filled" — Alpaca queues them for the next open rather than rejecting them.
+    booked_for_next_open = order["status"] not in ("filled", "partially_filled")
+    next_open = None
+    if booked_for_next_open:
+        try:
+            next_open = alpaca("GET", "/v2/clock").get("next_open")
+        except HTTPException:
+            pass
+
     # Log to DB
     with db() as conn, conn.cursor() as cur:
         cost = _current_trade_cost_flat(cur)
+        thesis_id = _resolve_thesis_id(cur, req.proposal_id)
         cur.execute("""
-            INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, notes, source, status, proposal_id, cost)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, notes, source, status, proposal_id, cost, thesis_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             req.symbol.upper(), req.side, filled_qty, filled_price,
             filled_qty * filled_price, order["id"],
             datetime.now(timezone.utc), req.notes, req.source,
-            order["status"], req.proposal_id, cost
+            order["status"], req.proposal_id, cost, thesis_id
         ))
         trade_id = cur.fetchone()["id"]
         conn.commit()
@@ -465,7 +539,10 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     # Market orders fill within seconds — reconcile fill price in the background
     background_tasks.add_task(_reconcile_fill, trade_id, order["id"], filled_qty)
 
-    return {"trade_id": trade_id, "order_id": order["id"], "status": order["status"]}
+    return {
+        "trade_id": trade_id, "order_id": order["id"], "status": order["status"],
+        "booked_for_next_open": booked_for_next_open, "next_open": next_open,
+    }
 
 class ProposalDecision(BaseModel):
     decision: str          # approved | rejected
@@ -488,19 +565,24 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
             if not trade_qty:
                 raise HTTPException(400, "qty required for approval (proposal has no default qty)")
 
-            # For sell orders: verify we hold enough long shares to cover the sale.
-            # Selling more than held would open or deepen a short position, which requires
-            # explicit intent — not a single approve click.
+            # For sell orders: verify we hold enough *available* (i.e. not already
+            # committed to another open order) long shares to cover the sale.
+            # Selling more than available would either open/deepen a short
+            # position or get rejected by Alpaca with an opaque 403 — check
+            # up front so the rejection reason is clear either way.
             if p["side"] == "sell":
                 try:
                     pos = alpaca("GET", f"/v2/positions/{p['symbol']}")
-                    held_qty = float(pos.get("qty", 0))
-                except Exception:
-                    held_qty = 0.0
-                if held_qty <= 0:
-                    raise HTTPException(400, f"No long position in {p['symbol']} — cannot sell. Close any short position manually.")
-                if trade_qty > held_qty:
-                    raise HTTPException(400, f"Sell qty {trade_qty} exceeds held shares {held_qty} for {p['symbol']}. Reduce qty to {held_qty} or less.")
+                    available_qty = float(pos.get("qty_available", pos.get("qty", 0)))
+                except HTTPException as e:
+                    if e.status_code == 404:
+                        available_qty = 0.0
+                    else:
+                        raise HTTPException(502, f"Could not verify {p['symbol']} position with Alpaca: {e.detail}")
+                if available_qty <= 0:
+                    raise HTTPException(400, f"No available long position in {p['symbol']} — either none held or fully committed to another pending order. Cannot sell.")
+                if trade_qty > available_qty:
+                    raise HTTPException(400, f"Sell qty {trade_qty} exceeds available shares {available_qty} for {p['symbol']} (some may be tied up in another pending order). Reduce qty to {available_qty} or less.")
 
             order = alpaca("POST", "/v2/orders", json={
                 "symbol": p["symbol"], "qty": str(trade_qty),
@@ -508,14 +590,21 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
             })
             filled_price = float(order.get("filled_avg_price") or 0)
             filled_qty = float(order.get("filled_qty") or 0) or float(p["qty"])
+            booked_for_next_open = order["status"] not in ("filled", "partially_filled")
+            next_open = None
+            if booked_for_next_open:
+                try:
+                    next_open = alpaca("GET", "/v2/clock").get("next_open")
+                except HTTPException:
+                    pass
             cost = _current_trade_cost_flat(cur)
             cur.execute("""
-                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id, cost)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id, cost, thesis_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (p["symbol"], p["side"], filled_qty, filled_price,
                   filled_qty * filled_price, order["id"],
-                  datetime.now(timezone.utc), "model_approved", order["status"], proposal_id, cost))
+                  datetime.now(timezone.utc), "model_approved", order["status"], proposal_id, cost, p["thesis_id"]))
             new_trade_id = cur.fetchone()["id"]
             # update proposal qty if it was null
             cur.execute("UPDATE trade_proposals SET qty=%s WHERE id=%s AND qty IS NULL", (trade_qty, proposal_id))
@@ -529,7 +618,11 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
         """, (body.decision, body.rejection_reason, proposal_id))
         conn.commit()
 
-    return {"status": "ok", "decision": body.decision}
+    result = {"status": "ok", "decision": body.decision}
+    if body.decision == "approved":
+        result["booked_for_next_open"] = booked_for_next_open
+        result["next_open"] = next_open
+    return result
 
 
 # ── Universe / Leaderboard ───────────────────────────────────────────────────
@@ -860,9 +953,15 @@ def get_advisor():
     for p in raw_positions:
         plpc = float(p.get("unrealized_plpc", 0))
         if plpc <= -stop_loss_pct:
+            # qty_available excludes shares already committed to another open
+            # order (e.g. a stop-loss sell already booked after-hours) — a
+            # position can still show the full qty while 0 is actually sellable.
+            qty_available = float(p.get("qty_available", p.get("qty", 0)))
             stop_alerts.append({
                 "symbol": p["symbol"],
                 "plpc": round(plpc * 100, 2),
+                "qty": float(p["qty"]),
+                "qty_available": qty_available,
             })
 
     # --- stance ---
@@ -916,9 +1015,23 @@ def get_advisor():
             bullets.append({"type": "info",
                 "text": "Watchlist for when market cools: " + ", ".join(f"{r['symbol']} (RSI {float(r['rsi']):.0f})" for r in all_cands)})
 
-    # stop-loss alerts
+    # stop-loss alerts — actionable when shares are actually available to
+    # sell; if they're already committed to another open order, say so
+    # instead of offering a redundant (and rejected) approve action.
     for a in stop_alerts:
-        bullets.append({"type": "alert", "text": f"{a['symbol']} is down {a['plpc']}% — at or past stop-loss threshold ({round(stop_loss_pct*100)}%). Consider selling."})
+        base = f"{a['symbol']} is down {a['plpc']}% — at or past stop-loss threshold ({round(stop_loss_pct*100)}%)."
+        if a["qty_available"] > 0:
+            qty_str = f"{a['qty_available']:g}"
+            bullets.append({
+                "type": "alert",
+                "text": f"{base} Sell {qty_str} shares of {a['symbol']}?",
+                "action": {"symbol": a["symbol"], "side": "sell", "qty": a["qty_available"]},
+            })
+        else:
+            bullets.append({
+                "type": "alert",
+                "text": f"{base} Sell already booked for {a['qty']:g} shares — awaiting next market open.",
+            })
 
     # headline
     headlines = {

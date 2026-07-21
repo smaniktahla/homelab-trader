@@ -1,6 +1,8 @@
 services:
   invest-ingest:
-    build: ./ingest
+    build:
+      context: .
+      dockerfile: ingest/Dockerfile
     container_name: invest-ingest
     restart: unless-stopped
     env_file: .env
@@ -8,7 +10,9 @@ services:
       INGEST_INTERVAL: "3600"
 
   invest-api:
-    build: ./api
+    build:
+      context: .
+      dockerfile: api/Dockerfile
     container_name: invest-api
     labels:
       kuma.invest-api.http.name: "Invest API"

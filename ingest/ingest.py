@@ -865,6 +865,53 @@ def get_extra_price_symbols(conn):
     return symbols
 
 
+def check_new_proposal_alerts(conn, cfg):
+    """Immediate WhatsApp+email alert for every newly-created trade_proposals
+    row, buy or sell. Distinct from check_alerts()'s high-score signal alert
+    below, which only queries the `signals` table — exit-driven proposals
+    (thesis_complete/stop_loss/time_stop/regime_deterioration) are inserted
+    straight into trade_proposals by signals.py and never touch `signals` at
+    all, so that older alert can't see them. This is what would have caught
+    the 2026-07-21 incident where three thesis_complete sell proposals sat
+    unnoticed for 8 days. Runs every cycle regardless of market hours (a
+    proposal existing is a DB fact, not a live-market condition) and alerts
+    once per proposal id — a proposal is a discrete event, not a recurring
+    condition like the other alerts, so this doesn't use alert_throttled's
+    hours-based re-arm; the same key is reused permanently."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id, symbol, side, rationale, signal_score, exit_reason
+            FROM trade_proposals
+            WHERE decision IS NULL
+            ORDER BY proposed_at ASC
+        """)
+        proposals = cur.fetchall()
+
+    for p in proposals:
+        pid, sym, side, rationale, score, exit_reason = (
+            p if isinstance(p, (list, tuple)) else
+            (p["id"], p["symbol"], p["side"], p["rationale"], p["signal_score"], p["exit_reason"])
+        )
+        alert_key = f"proposal_{pid}"
+        if alert_throttled(conn, alert_key, hours=24 * 365):
+            continue
+
+        label = "SELL" if side == "sell" else "BUY"
+        reason_tag = f" [{exit_reason}]" if exit_reason else ""
+        subject = f"📋 New Proposal: {label} {sym}{reason_tag}"
+        html = f"""
+        <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:500px">
+          <h2 style="margin:0 0 12px">📋 New Trade Proposal</h2>
+          <p><strong>{label} {sym}</strong>{reason_tag} — score {score}</p>
+          <p style="color:#888;margin-top:12px">{rationale}</p>
+          <p style="margin-top:20px"><a href="http://10.10.10.13:8100" style="color:#4f8ef7">Review &amp; Approve →</a></p>
+        </div>"""
+        whatsapp = f"📋 *New Proposal: {label} {sym}*{reason_tag}\nScore: {score}\n{rationale}\nhttp://10.10.10.13:8100"
+        send_notification(cfg, subject, html, whatsapp, f"new proposal {sym}")
+        mark_alert_sent(conn, alert_key)
+        log.info(f"New-proposal alert sent: {label} {sym}{reason_tag} (proposal id {pid})")
+
+
 def run_once(conn, last_universe_scan):
     symbols = get_watchlist(conn)
     price_symbols = sorted(set(symbols) | get_extra_price_symbols(conn))
@@ -884,6 +931,13 @@ def run_once(conn, last_universe_scan):
     compute_signals(conn, symbols)
     reconcile_orders(conn)
     update_signal_outcomes(conn)
+
+    # Every cycle, regardless of market hours — a proposal existing is a DB
+    # fact, not a live-market condition, unlike the other alerts below.
+    try:
+        check_new_proposal_alerts(conn, get_app_settings(conn))
+    except Exception as e:
+        log.warning(f"New-proposal alert check failed: {e}")
 
     # Universe scan runs on its own slower interval
     now = time.time()
