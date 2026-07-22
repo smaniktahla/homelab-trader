@@ -52,6 +52,21 @@ Parked items — not scheduled, revisit when it makes sense.
     breakout direction, with ADX as a confirmation filter (per the video
     this whole line of work started from). Needs its own significance
     test before touching live scoring, same discipline as everything else.
+- **Regime-blended strategy (the actual "something new" hypothesis).**
+  Experiment 003 (2026-07-22, `backtest_results` id from that run) showed
+  `mean_reversion` is defensive in shape, not a raw-return edge: it beats
+  SPY by a lot in down/choppy windows (e.g. +13.8% excess during a -11.4%
+  SPY window) but loses badly in strong uptrends (e.g. -12.4% excess
+  during a +13.7% SPY window). A BB-squeeze/trend-following thesis (see
+  above) would plausibly have the *opposite* shape — catches breakouts,
+  rides momentum. Rather than treating these as two unrelated theses,
+  the actual hypothesis worth testing: a regime-aware system that leans
+  on mean-reversion when `market_context.overall` is bear/choppy and
+  trend-following when it's trending, using `market_context`'s existing
+  regime detection (already built, currently only used as a score
+  multiplier, not a strategy switch). This is the genuinely novel
+  direction, not just "add a second thesis" — grounded in what was
+  actually measured today, not assumed.
 
 ## Bigger picture
 
