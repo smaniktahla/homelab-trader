@@ -843,6 +843,59 @@ def check_alerts(conn, cfg):
                 mark_alert_sent(conn, "circuit_breaker")
 
 
+def get_global_markets(conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, slug, index_symbol FROM global_markets")
+        rows = cur.fetchall()
+    return [{"id": r[0], "slug": r[1], "index_symbol": r[2]} for r in rows]
+
+
+def ingest_global_market_signals(conn):
+    """Keeps price_history fresh for every global_markets index (via the
+    existing ingest_prices/fetch_prices_yf path -- these are ordinary Yahoo
+    tickers, no separate fetch mechanism needed) and derives one
+    overnight_pct row per market per day into global_market_signals.
+
+    overnight_pct is the simple (latest_close - prior_close) / prior_close
+    return between the two most recent price_history rows for that index --
+    for non-US markets these are separated by ~24h (yesterday's local close
+    to today's local close), which is the "already happened by the time
+    NYSE opens" information the global-markets dashboard is built around.
+    trading_date is stamped as the latest close's date, not "today", so a
+    stale/missing fetch doesn't silently overwrite an older observation
+    with today's date.
+
+    Deliberately NOT read by score_signal() or any thesis yet -- see the
+    schema.sql comment above global_market_signals."""
+    markets = get_global_markets(conn)
+    if not markets:
+        return
+    index_symbols = sorted({m["index_symbol"] for m in markets})
+    ingest_prices(conn, index_symbols)
+
+    with conn.cursor() as cur:
+        for m in markets:
+            cur.execute("""
+                SELECT ts::date AS d, close FROM price_history
+                WHERE symbol=%s ORDER BY ts DESC LIMIT 2
+            """, (m["index_symbol"],))
+            rows = cur.fetchall()
+            if len(rows) < 2:
+                continue
+            (latest_d, latest_close), (_, prior_close) = rows
+            if not latest_close or not prior_close:
+                continue
+            overnight_pct = float(latest_close - prior_close) / float(prior_close) * 100
+            cur.execute("""
+                INSERT INTO global_market_signals (market_id, trading_date, overnight_pct)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (market_id, trading_date) DO UPDATE SET
+                    overnight_pct = EXCLUDED.overnight_pct, computed_at = NOW()
+            """, (m["id"], latest_d, overnight_pct))
+            log.info(f"Global market {m['slug']}: overnight_pct={overnight_pct:.2f}% as of {latest_d}")
+    conn.commit()
+
+
 def get_extra_price_symbols(conn):
     """Symbols that need price_history kept fresh even after falling off the
     watchlist: currently-held positions and symbols with an open (undecided)
@@ -919,6 +972,11 @@ def run_once(conn, last_universe_scan):
     ingest_prices(conn, price_symbols)
     ingest_hourly_prices(conn, price_symbols)
     ingest_news(conn, price_symbols)
+
+    try:
+        ingest_global_market_signals(conn)
+    except Exception as e:
+        log.warning(f"Global market signals ingest failed: {e}")
 
     # Update market regime before running signals so gating is current
     try:

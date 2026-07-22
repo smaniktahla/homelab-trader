@@ -227,3 +227,58 @@ CREATE TABLE IF NOT EXISTS price_history_hourly (
     volume BIGINT,
     UNIQUE (symbol, ts)
 );
+
+-- Leading-indicator international markets for the global-markets dashboard
+-- (see 2026-07-22 DocMost session notes). home_market itself lives in
+-- app_settings (default 'us_nyse'), not here -- every row here is just a
+-- market, the UI decides which one gets the star. index_symbol is a Yahoo
+-- ticker, ingested via the existing ingest_prices()/fetch_prices_yf() path
+-- into price_history like any other symbol -- no separate fetch mechanism.
+-- market_cap_usd_tn is a hand-entered approximate snapshot for marker
+-- sizing on the map, not a live feed -- don't use it for anything that
+-- trades money.
+CREATE TABLE IF NOT EXISTS global_markets (
+    id                    BIGSERIAL PRIMARY KEY,
+    slug                  TEXT NOT NULL UNIQUE,
+    display_name          TEXT NOT NULL,
+    index_symbol          TEXT NOT NULL,
+    lat                   NUMERIC NOT NULL,
+    lon                   NUMERIC NOT NULL,
+    market_cap_usd_tn     NUMERIC,
+    timezone              TEXT NOT NULL,
+    local_open_hour       NUMERIC,
+    local_close_hour      NUMERIC,
+    is_leading_indicator  BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO global_markets (slug, display_name, index_symbol, lat, lon, market_cap_usd_tn, timezone, local_open_hour, local_close_hour, is_leading_indicator) VALUES
+    ('us_nyse',   'United States — NYSE / NASDAQ', 'SPY',       40.7,  -74.0, 55.0, 'America/New_York',  9.5,  16.0,  FALSE),
+    ('tokyo',     'Japan — Nikkei 225',            '^N225',     35.7,  139.7,  6.5, 'Asia/Tokyo',         9.0,  15.0,  TRUE),
+    ('hong_kong', 'Hong Kong — Hang Seng',         '^HSI',      22.3,  114.2,  4.5, 'Asia/Hong_Kong',     9.5,  16.0,  TRUE),
+    ('shanghai',  'China — Shanghai Composite',    '000001.SS', 31.2,  121.5,  7.0, 'Asia/Shanghai',      9.5,  15.0,  TRUE),
+    ('sydney',    'Australia — ASX 200',           '^AXJO',    -33.9,  151.2,  1.7, 'Australia/Sydney',  10.0,  16.0,  TRUE),
+    ('london',    'United Kingdom — FTSE 100',     '^FTSE',     51.5,   -0.1,  3.5, 'Europe/London',      8.0,  16.5,  TRUE),
+    ('frankfurt', 'Germany — DAX',                 '^GDAXI',    50.1,    8.7,  2.2, 'Europe/Berlin',      9.0,  17.5,  TRUE),
+    ('taiwan',    'Taiwan — TWSE',                 '^TWII',     25.0,  121.5,  1.8, 'Asia/Taipei',        9.0,  13.5,  TRUE),
+    ('korea',     'South Korea — KOSPI',           '^KS11',     37.5,  127.0,  1.9, 'Asia/Seoul',         9.0,  15.5,  TRUE),
+    ('mumbai',    'India — Sensex',                '^BSESN',    19.1,   72.9,  5.0, 'Asia/Kolkata',       9.25, 15.5,  TRUE)
+ON CONFLICT (slug) DO NOTHING;
+
+-- Append-only daily time series -- distinct from market_context (single
+-- upserted row, no history -- fine for live scoring, useless for
+-- backtesting whether this composite has any edge). Populated by
+-- ingest_global_market_signals() each cycle. Not read by score_signal() or
+-- any thesis yet -- must clear an Experiment-005-style permutation
+-- significance test first (see backtest_rule_significance.py).
+CREATE TABLE IF NOT EXISTS global_market_signals (
+    id            BIGSERIAL PRIMARY KEY,
+    market_id     BIGINT NOT NULL REFERENCES global_markets(id),
+    trading_date  DATE NOT NULL,
+    overnight_pct NUMERIC,
+    computed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (market_id, trading_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_global_market_signals_trading_date ON global_market_signals (trading_date);
+CREATE INDEX IF NOT EXISTS idx_global_market_signals_market_id ON global_market_signals (market_id);
