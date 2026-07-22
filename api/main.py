@@ -7,7 +7,7 @@ from typing import Optional
 import psycopg2, psycopg2.extras, os, requests as http, secrets, time, bisect
 from datetime import datetime, timezone
 
-from signals import compute_signals
+from signals import compute_signals, compute_bollinger
 
 DB_DSN = os.environ["DATABASE_URL"]
 ALPACA_KEY = os.environ.get("ALPACA_API_KEY", "")
@@ -111,18 +111,38 @@ def get_watchlist():
         return cur.fetchall()
 
 @app.get("/api/prices/{symbol}")
-def get_prices(symbol: str, days: int = 30):
+def get_prices(symbol: str, days: int = 30, include_bb: bool = False):
     symbol = symbol.upper()
     with db() as conn, conn.cursor() as cur:
         _backfill_thin_history(cur, symbol)
         conn.commit()
+
+        bb_period, bb_std = 20, 2.0
+        if include_bb:
+            cur.execute("SELECT key, value FROM signal_params WHERE key IN ('bb_period', 'bb_std')")
+            p = {r["key"]: float(r["value"]) for r in cur.fetchall()}
+            bb_period, bb_std = int(p.get("bb_period", 20)), p.get("bb_std", 2.0)
+
+        # Fetch extra lookback so the FIRST displayed day still has a full
+        # bb_period of trailing closes to compute against -- otherwise the
+        # default 2-week view (14 days, period 20) would show no bands at
+        # all for its entire range.
+        lookback = days + bb_period + 5 if include_bb else days
         cur.execute("""
             SELECT ts, open, high, low, close, volume
             FROM price_history WHERE symbol = %s
             ORDER BY ts DESC LIMIT %s
-        """, (symbol, days))
+        """, (symbol, lookback))
         rows = cur.fetchall()
         rows.reverse()
+
+        if include_bb:
+            closes = [float(r["close"]) for r in rows]
+            for i, r in enumerate(rows):
+                bb_upper, bb_middle, bb_lower, _ = compute_bollinger(closes[:i + 1], bb_period, bb_std)
+                r["bb_upper"], r["bb_middle"], r["bb_lower"] = bb_upper, bb_middle, bb_lower
+            rows = rows[-days:]
+
         return rows
 
 @app.get("/api/news/{symbol}")

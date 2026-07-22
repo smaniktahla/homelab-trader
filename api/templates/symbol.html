@@ -101,11 +101,17 @@
     <div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
         <h2 style="margin:0">Price History</h2>
-        <div class="range-btns">
-          <button class="range-btn active" onclick="loadChart(14,this)">2W</button>
-          <button class="range-btn" onclick="loadChart(30,this)">1M</button>
-          <button class="range-btn" onclick="loadChart(90,this)">3M</button>
-          <button class="range-btn" onclick="loadChart(1825,this)">5Y</button>
+        <div style="display:flex;align-items:center;gap:14px">
+          <label style="display:flex;align-items:center;gap:5px;font-size:.78rem;color:#888;cursor:pointer">
+            <input type="checkbox" id="bb-toggle" checked onchange="loadChart(currentChartDays,null)">
+            Bollinger Bands
+          </label>
+          <div class="range-btns">
+            <button class="range-btn active" onclick="loadChart(14,this)">2W</button>
+            <button class="range-btn" onclick="loadChart(30,this)">1M</button>
+            <button class="range-btn" onclick="loadChart(90,this)">3M</button>
+            <button class="range-btn" onclick="loadChart(1825,this)">5Y</button>
+          </div>
         </div>
       </div>
       <canvas id="price-chart" height="200"></canvas>
@@ -184,6 +190,7 @@ const SYMBOL = '{{ symbol }}';
 const fmt = (n, d=2) => n == null ? '—' : Number(n).toLocaleString('en-US', {minimumFractionDigits:d, maximumFractionDigits:d});
 const fmtUSD = n => n == null ? '—' : '$' + fmt(n);
 let priceChart = null;
+let currentChartDays = 14;
 
 function showToast(msg, type='success') {
   const t = document.getElementById('toast');
@@ -246,11 +253,13 @@ async function loadPosition() {
 }
 
 async function loadChart(days, btn) {
+  currentChartDays = days;
   document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
+  const showBB = document.getElementById('bb-toggle').checked;
   try {
     const [data, allTrades] = await Promise.all([
-      fetch(`/api/prices/${SYMBOL}?days=${days}`).then(r => r.json()),
+      fetch(`/api/prices/${SYMBOL}?days=${days}&include_bb=${showBB}`).then(r => r.json()),
       fetch(`/api/trades`).then(r => r.json()).catch(() => []),
     ]);
     const wide = days > 365;
@@ -311,6 +320,23 @@ async function loadChart(days, btn) {
             pointRadius: 8, pointStyle: 'triangle', rotation: 180, pointHoverRadius: 10,
             tooltipLabels: sellLabels,
           },
+          ...(showBB ? [
+            {
+              label: 'BB upper', data: data.map(r => r.bb_upper),
+              borderColor: '#4f8ef7', borderWidth: 1, borderDash: [4, 3],
+              pointRadius: 0, tension: 0.2, fill: false,
+            },
+            {
+              label: 'BB middle', data: data.map(r => r.bb_middle),
+              borderColor: '#4f8ef7', borderWidth: 1, borderDash: [1, 2],
+              pointRadius: 0, tension: 0.2, fill: false,
+            },
+            {
+              label: 'BB lower', data: data.map(r => r.bb_lower),
+              borderColor: '#4f8ef7', borderWidth: 1, borderDash: [4, 3],
+              pointRadius: 0, tension: 0.2, fill: '-2', backgroundColor: '#4f8ef70c',
+            },
+          ] : []),
         ]
       },
       options: {
@@ -326,6 +352,7 @@ async function loadChart(days, btn) {
             callbacks: {
               label: ctx => {
                 if (ctx.datasetIndex === 0) return ' $' + ctx.parsed.y.toFixed(2);
+                if (ctx.datasetIndex >= 3) return ctx.parsed.y == null ? null : ` ${ctx.dataset.label}: $${ctx.parsed.y.toFixed(2)}`;
                 const labels = ctx.dataset.tooltipLabels || [];
                 return ' ' + (labels[ctx.dataIndex] || (ctx.datasetIndex === 1 ? '▲ Buy' : '▼ Sell'));
               }
