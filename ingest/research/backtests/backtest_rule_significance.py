@@ -53,6 +53,7 @@ from backtest_score_calibration import (
     SWEEP_THRESHOLDS,
 )
 from signals import load_params
+from db_utils import save_backtest_result
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -266,6 +267,14 @@ def main():
     with open("/tmp/backtest_results_005.json", "w") as f:
         json.dump(report, f, indent=2, default=str)
     log.info("Full results written to /tmp/backtest_results_005.json")
+
+    floor = min(report["by_threshold"]) if report["by_threshold"] else None
+    floor_r = report["by_threshold"].get(floor, {}) if floor is not None else {}
+    save_backtest_result(EXPERIMENT_ID, GIT_COMMIT, report,
+                          summary=f"{len(report['by_threshold'])} thresholds tested, universe={report['universe_size']}, "
+                                  f"floor(score>={floor}): p_win_rate={floor_r.get('p_value_win_rate')} "
+                                  f"p_excess_return={floor_r.get('p_value_excess_return')}")
+    log.info("Results also saved to backtest_results table")
 
     print(f"\n=== Experiment {EXPERIMENT_ID} (commit {GIT_COMMIT[:8]}) ===")
     print(f"Universe: {len(symbols)} symbols | {N_PERMUTATIONS} permutations per threshold\n")

@@ -282,3 +282,21 @@ CREATE TABLE IF NOT EXISTS global_market_signals (
 
 CREATE INDEX IF NOT EXISTS idx_global_market_signals_trading_date ON global_market_signals (trading_date);
 CREATE INDEX IF NOT EXISTS idx_global_market_signals_market_id ON global_market_signals (market_id);
+
+-- Durable home for backtest_*.py research script output -- previously each
+-- script only wrote JSON to /tmp inside the container, wiped on every
+-- restart, with zero UI surface. This is what a future "Strategy Health"
+-- dashboard tab reads from. Scripts keep writing their /tmp JSON too (handy
+-- for quick local inspection the same session); this table is the durable
+-- copy. See 2026-07-22 DocMost session notes.
+CREATE TABLE IF NOT EXISTS backtest_results (
+    id            BIGSERIAL PRIMARY KEY,
+    experiment_id TEXT NOT NULL,
+    run_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    git_commit    TEXT,
+    summary       TEXT,
+    results       JSONB NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_results_experiment_id ON backtest_results (experiment_id);
+CREATE INDEX IF NOT EXISTS idx_backtest_results_run_at ON backtest_results (run_at);

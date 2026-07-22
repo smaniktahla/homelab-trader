@@ -80,6 +80,7 @@ from signals import (compute_rsi, compute_bollinger, compute_atr, detect_regime,
                       score_signal, load_params, calc_buy_qty, _sector_cap_block_reason,
                       RS_LOOKBACK_DAYS, ATR_PERIOD)
 from market_regime import _classify_trend, _classify_vix, SMA_FAST, SMA_SLOW, VIX_CALM, VIX_FEAR
+from db_utils import save_backtest_result
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -361,7 +362,18 @@ def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sec
             qty, _sizing_note = calc_buy_qty(price, ledger["cash"], cur_value, 0.0, p_gated)
             if qty is None:
                 continue
-            sector_block = _sector_cap_block_reason(sym, price, qty, sector_map, ledger["positions"], cur_value, p)
+            # _sector_cap_block_reason (signals.py) expects each position to
+            # carry a precomputed market_value, matching the shape
+            # get_positions() returns live from Alpaca. The simulated
+            # ledger only stores qty/avg_entry/entry_date, so shape a view
+            # with today's mark-to-market value rather than changing what
+            # the ledger itself stores (avg_entry/entry_date are read
+            # elsewhere assuming the flat shape).
+            positions_with_mv = {
+                s: {**pos, "market_value": pos["qty"] * (price_of(s, current_date) or 0)}
+                for s, pos in ledger["positions"].items()
+            }
+            sector_block = _sector_cap_block_reason(sym, price, qty, sector_map, positions_with_mv, cur_value, p)
             if sector_block:
                 continue
             execute_buy(ledger, sym, qty, price, current_date, buy_score, buy_rationale, trade_log)
@@ -472,6 +484,11 @@ def main():
     log.info(f"Full results written to {out_path}")
 
     s = report["summary"]
+    save_backtest_result(EXPERIMENT_ID, GIT_COMMIT, report,
+                          summary=f"mean_return={s['mean_return_pct']:+.2f}% vs_spy={s['mean_excess_vs_spy_pct']:+.2f}% "
+                                  f"beat_spy={s['pct_runs_beating_spy']}% max_dd={s['worst_max_drawdown_pct']:.2f}%")
+    log.info("Results also saved to backtest_results table")
+
     print(f"\n=== Experiment {EXPERIMENT_ID} (commit {GIT_COMMIT[:8]}) ===")
     print(f"Universe: {len(symbols)} symbols | Data: {report['data_date_range'][0]} to {report['data_date_range'][1]}")
     print(f"{len(chosen)} runs, {HORIZON_DAYS}-day horizon, ${STARTING_CASH:,.0f} starting cash each")

@@ -62,6 +62,7 @@ import psycopg2
 sys.path.insert(0, "/app")
 from signals import (compute_rsi, compute_bollinger, detect_regime, compute_atr,
                       score_signal, load_params, RS_LOOKBACK_DAYS)
+from db_utils import save_backtest_result
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -369,6 +370,11 @@ def main():
     with open("/tmp/backtest_results_002.json", "w") as f:
         json.dump(report, f, indent=2, default=str)
     log.info("Full results written to /tmp/backtest_results_002.json")
+
+    save_backtest_result(EXPERIMENT_ID, GIT_COMMIT, report,
+                          summary=f"n_observations={report['n_observations']} n_episodes={report['n_episodes']} "
+                                  f"universe={report['universe_size']} split={report['split_date']}")
+    log.info("Results also saved to backtest_results table")
 
     print(f"\n=== Experiment {EXPERIMENT_ID} (commit {GIT_COMMIT[:8]}) ===")
     print(f"Universe: {len(symbols)} symbols | Data: {min_date} to {max_date} | Split at {split_date}")
