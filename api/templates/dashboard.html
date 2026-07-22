@@ -59,6 +59,14 @@
   .lb-controls span { color: #555; font-size: .78rem; margin-left: auto; }
   .tab-btn { padding: 4px 12px; border-radius: 4px; border: 1px solid #2a2d3a; background: transparent; color: #888; font-size: .8rem; cursor: pointer; }
   .tab-btn.active { background: #4f8ef7; color: #fff; border-color: #4f8ef7; }
+
+  /* Page-level tabs (Dashboard / Trade History) -- deliberately a separate
+     class from .tab-btn so the leaderboard's buy/sell filter switcher
+     (setLbSide, which does document.querySelectorAll('.tab-btn')) can't
+     accidentally deactivate these. */
+  .page-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  .page-tab-btn { padding: 6px 16px; border-radius: 6px; border: 1px solid #2a2d3a; background: transparent; color: #888; font-size: .85rem; font-weight: 600; cursor: pointer; }
+  .page-tab-btn.active { background: #1a1d27; color: #e8eaf6; border-color: #4f8ef7; }
   .score-bar { display: inline-block; height: 6px; border-radius: 3px; vertical-align: middle; margin-left: 6px; }
   th.sortable { cursor: pointer; user-select: none; }
   th.sortable:hover { color: #aaa; }
@@ -251,6 +259,13 @@
     </div>
   </div>
 
+  <div class="page-tabs">
+    <button class="page-tab-btn active" id="page-tab-dashboard" onclick="showPageTab('dashboard',this)">Dashboard</button>
+    <button class="page-tab-btn" id="page-tab-history" onclick="showPageTab('history',this)">Trade History</button>
+  </div>
+
+  <div id="page-dashboard">
+
   <!-- Account bar -->
   <div class="account-bar">
     <div class="stat-card"><div class="label">Portfolio Value</div><div class="value" id="portfolio-value">—</div></div>
@@ -412,7 +427,10 @@
     </table>
   </div>
 
+  </div><!-- /page-dashboard -->
+
   <!-- Trade History -->
+  <div id="page-history" style="display:none">
   <h2>Trade History</h2>
   <table>
     <thead><tr>
@@ -421,6 +439,7 @@
     </tr></thead>
     <tbody id="trades-body"><tr><td colspan="9" class="no-data">Loading…</td></tr></tbody>
   </table>
+  </div><!-- /page-history -->
 </div>
 
 <!-- Trade Modal -->
@@ -456,6 +475,13 @@
 const fmt = (n, d=2) => n == null ? '—' : Number(n).toLocaleString('en-US', {minimumFractionDigits:d, maximumFractionDigits:d});
 const fmtUSD = n => n == null ? '—' : '$' + fmt(n);
 const sourceLabel = { manual: '👤 Manual', model_approved: '🤖 Model', auto: '⚡ Auto', advisor_stop_loss: '⚠️ Stop-loss' };
+
+function showPageTab(name, btn) {
+  document.getElementById('page-dashboard').style.display = name === 'dashboard' ? '' : 'none';
+  document.getElementById('page-history').style.display = name === 'history' ? '' : 'none';
+  document.querySelectorAll('.page-tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
 
 function statusBadge(s) {
   const map = {
