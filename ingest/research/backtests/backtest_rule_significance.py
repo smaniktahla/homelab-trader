@@ -167,6 +167,24 @@ def run_permutation_test(real_episodes_by_symbol, symbol_cache, symbol_eligible,
     }
 
 
+def mae_mfe_stats(rows):
+    """MAE/MFE/realized-return/stop-out-rate for a set of episodes, reusing
+    the fields backtest_symbol already attaches via stop_loss_aware_outcome
+    (no re-walk needed). Reconciles cases where win_rate looks great at a
+    threshold but avg_excess_return doesn't confirm it — e.g. more winners
+    that win small alongside losers that run past the stop before exiting."""
+    n = len(rows)
+    if n == 0:
+        return None
+    return {
+        "n": n,
+        "avg_mae": round(sum(r["mae"] for r in rows) / n, 3),
+        "avg_mfe": round(sum(r["mfe"] for r in rows) / n, 3),
+        "avg_realized_return": round(sum(r["realized_return"] for r in rows) / n, 3),
+        "stopped_out_pct": round(100 * sum(1 for r in rows if r["stopped_out"]) / n, 1),
+    }
+
+
 def episodes_at_threshold(flat_results, threshold):
     """Filter to score>=threshold, then redo episode dedup fresh (dedup is
     order/gap-dependent, so it must be recomputed per threshold rather than
@@ -237,9 +255,13 @@ def main():
             log.info(f"score>={threshold}: only {n_episodes} episodes, skipping (too few for a meaningful permutation test)")
             continue
         result = run_permutation_test(by_symbol, symbol_cache, symbol_eligible, N_PERMUTATIONS, RANDOM_SEED + threshold)
+        all_episodes = [r for eps in by_symbol.values() for r in eps]
+        result["mae_mfe"] = mae_mfe_stats(all_episodes)
         report["by_threshold"][threshold] = result
         log.info(f"score>={threshold}: n_episodes={result['observed']['n']} "
-                 f"p(excess_return)={result['p_value_excess_return']} percentile={result['percentile_excess_return']}")
+                 f"p(excess_return)={result['p_value_excess_return']} percentile={result['percentile_excess_return']} "
+                 f"avg_mae={result['mae_mfe']['avg_mae']} avg_mfe={result['mae_mfe']['avg_mfe']} "
+                 f"stopped_out={result['mae_mfe']['stopped_out_pct']}%")
 
     with open("/tmp/backtest_results_005.json", "w") as f:
         json.dump(report, f, indent=2, default=str)
@@ -259,6 +281,18 @@ def main():
     print("\nInterpretation: p_value is the fraction of random-entry-timing permutations (same symbols, same trade")
     print("count per symbol) that matched or beat the real rule's average excess return. p < 0.05 (percentile > 95)")
     print("means the entry rule's edge is unlikely to be random chance at that score threshold.")
+
+    print(f"\n{'score>=':>8}  {'n_ep':>6}  {'avg_mae':>9}  {'avg_mfe':>9}  {'avg_realized':>13}  {'stopped_out':>12}")
+    for threshold, r in report["by_threshold"].items():
+        mm = r["mae_mfe"]
+        print(f"{threshold:>8}  {mm['n']:>6}  {mm['avg_mae']:>+8.2f}%  {mm['avg_mfe']:>+8.2f}%  "
+              f"{mm['avg_realized_return']:>+12.2f}%  {mm['stopped_out_pct']:>11.1f}%")
+
+    print("\nMAE = avg worst intraday drawdown before exit (how far underwater a trade got), MFE = avg best intraday")
+    print("run-up (how much profit was on the table). realized_return is stop-loss-aware (a stopped trade counts at")
+    print("the stop level, not day-20 close). Reconciles win_rate vs avg_excess_return: a threshold can have a high")
+    print("win rate but weak/negative avg_excess_return if winners clip small gains while losers run further before")
+    print("stopping out, or if MFE consistently exceeds what realized_return captures (exits leaving profit on the table).")
 
 
 if __name__ == "__main__":
