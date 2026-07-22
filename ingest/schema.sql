@@ -300,3 +300,12 @@ CREATE TABLE IF NOT EXISTS backtest_results (
 
 CREATE INDEX IF NOT EXISTS idx_backtest_results_experiment_id ON backtest_results (experiment_id);
 CREATE INDEX IF NOT EXISTS idx_backtest_results_run_at ON backtest_results (run_at);
+
+-- Dividend/split-adjusted close, alongside the raw close price_history
+-- already stored. Yahoo's chart API returns this in the same response
+-- (indicators.adjclose, parallel array to indicators.quote[0].close) --
+-- no extra fetch needed, just parsing more of what's already coming back.
+-- NULL for existing rows until re-fetched; used to make the dashboard's
+-- SPY comparison a true total-return benchmark instead of price-only.
+-- See 2026-07-22 session notes.
+ALTER TABLE price_history ADD COLUMN IF NOT EXISTS adjclose NUMERIC;

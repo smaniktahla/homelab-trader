@@ -185,6 +185,10 @@ def fetch_prices_yf(symbol, yf_range="5d"):
     result = data["chart"]["result"][0]
     timestamps = result["timestamp"]
     ohlcv = result["indicators"]["quote"][0]
+    # Same response already carries dividend/split-adjusted close, parallel
+    # to quote[0].close -- not every symbol's chart response includes it
+    # (e.g. some indices), so guard rather than assume the key exists.
+    adjclose_arr = result.get("indicators", {}).get("adjclose", [{}])[0].get("adjclose")
     rows = []
     for i, ts in enumerate(timestamps):
         rows.append({
@@ -194,6 +198,7 @@ def fetch_prices_yf(symbol, yf_range="5d"):
             "low": ohlcv["low"][i],
             "close": ohlcv["close"][i],
             "volume": ohlcv["volume"][i],
+            "adjclose": adjclose_arr[i] if adjclose_arr else None,
         })
     return rows
 
@@ -215,11 +220,12 @@ def ingest_prices(conn, symbols):
                     if None in (row["open"], row["close"]):
                         continue
                     cur.execute("""
-                        INSERT INTO price_history (symbol, ts, open, high, low, close, volume)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (symbol, ts) DO NOTHING
+                        INSERT INTO price_history (symbol, ts, open, high, low, close, volume, adjclose)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (symbol, ts) DO UPDATE SET adjclose = EXCLUDED.adjclose
+                        WHERE price_history.adjclose IS NULL AND EXCLUDED.adjclose IS NOT NULL
                     """, (sym, row["ts"], row["open"], row["high"],
-                          row["low"], row["close"], row["volume"]))
+                          row["low"], row["close"], row["volume"], row["adjclose"]))
                 log.info(f"Prices for {sym}: {len(rows)} rows ({yf_range})")
             except Exception as e:
                 log.warning(f"Price ingest failed for {sym}: {e}")

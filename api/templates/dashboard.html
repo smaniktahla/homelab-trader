@@ -284,7 +284,7 @@
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
       <div style="display:flex;align-items:baseline;gap:10px">
         <h2 style="margin:0">Portfolio Value</h2>
-        <span style="font-size:.75rem;color:#888">- - SPY (equal investment)</span>
+        <span style="font-size:.75rem;color:#888" id="spy-caption" title="Loading SPY comparison assumptions…">- - SPY (equal investment)</span>
         <span style="font-size:.75rem;color:#555" id="portfolio-cost-note"></span>
       </div>
       <div class="range-btns">
@@ -1255,6 +1255,13 @@ async function loadPortfolioChart(range, btn) {
     const linePoints = data.snapshots.map(r => ({x: new Date(r.snapshot_at).getTime(), y: parseFloat(r.portfolio_value)}));
     const spyPoints = data.snapshots.map(r => ({x: new Date(r.snapshot_at).getTime(), y: r.spy_value != null ? parseFloat(r.spy_value) : null}));
 
+    const spyA = data.spy_assumptions || {cost_adjusted: true, dividends_included: true};
+    const spyCaption = document.getElementById('spy-caption');
+    const spyBits = [];
+    if (spyA.dividends_included) spyBits.push('dividends included'); else spyBits.push('price only, no dividends');
+    if (spyA.cost_adjusted) spyBits.push('cost-adjusted'); else spyBits.push('no trade cost modeled');
+    spyCaption.title = `SPY comparison: same starting cash, ${spyBits.join(', ')}. Re-anchored to the start of each range button, not account inception. Change in Settings.`;
+
     if (portfolioChart) portfolioChart.destroy();
     portfolioChart = new Chart(document.getElementById('portfolio-chart'), {
       type: 'line',
@@ -1300,7 +1307,8 @@ async function loadPortfolioChart(range, btn) {
                 if (ctx.datasetIndex === 3) return ' SPY: $' + ctx.parsed.y.toLocaleString('en-US', {maximumFractionDigits: 0});
                 const labels = ctx.dataset.tooltipLabels || [];
                 return ' ' + (labels[ctx.dataIndex] || (ctx.datasetIndex === 1 ? '▲ Buy' : '▼ Sell'));
-              }
+              },
+              afterLabel: ctx => ctx.datasetIndex === 3 ? spyBits.map(b => ' · ' + b) : null,
             }
           }
         },

@@ -288,14 +288,38 @@ def get_portfolio_history(range: str = "1m"):
         # into SPY at the start of the visible range." Re-anchored per range
         # (not to account inception), so each button answers "how would SPY
         # have done over just this window" — matching the portfolio line it
-        # sits next to. Not cost-adjusted: a single lump-sum buy-and-hold
-        # doesn't incur the same per-trade costs the active strategy does.
+        # sits next to.
+        #
+        # Two assumptions, both settings-controlled (default ON, so the
+        # comparison is apples-to-apples out of the box rather than quietly
+        # favoring SPY):
+        #   spy_include_dividends -- use adjclose (dividend/split-adjusted)
+        #     instead of raw close, so this is a true total-return
+        #     benchmark, not price-only.
+        #   spy_cost_adjust -- subtract a single one-time modeled trade cost
+        #     from the whole curve, matching how the portfolio line is
+        #     already cost-adjusted. Only one cost (not per-trade like the
+        #     actively-traded portfolio), since this models a single
+        #     lump-sum buy-and-hold, not repeated trading.
+        settings = get_all_settings()
+        cost_adjust = settings.get("spy_cost_adjust", "true") == "true"
+        include_dividends = settings.get("spy_include_dividends", "true") == "true"
+
+        spy_flat_cost = 0.0
+        if cost_adjust:
+            cur.execute("SELECT value FROM signal_params WHERE key='trade_cost_flat'")
+            row = cur.fetchone()
+            spy_flat_cost = float(row["value"]) if row else 0.0
+
         cur.execute("""
-            SELECT DATE(ts) AS d, close FROM price_history
+            SELECT DATE(ts) AS d, close, adjclose FROM price_history
             WHERE symbol='SPY' AND ts >= NOW() - INTERVAL '%s days'
             ORDER BY ts ASC
         """, (days,))
-        spy_by_date = {r["d"]: float(r["close"]) for r in cur.fetchall()}
+        spy_by_date = {}
+        for r in cur.fetchall():
+            price = float(r["adjclose"]) if (include_dividends and r["adjclose"] is not None) else float(r["close"])
+            spy_by_date[r["d"]] = price
 
     spy_dates_sorted = sorted(spy_by_date)
 
@@ -309,11 +333,14 @@ def get_portfolio_history(range: str = "1m"):
     for s in snapshots:
         spy_close = nearest_spy_close(s["snapshot_at"].date())
         s["spy_value"] = (
-            first_portfolio_value * (spy_close / first_spy_close)
+            first_portfolio_value * (spy_close / first_spy_close) - spy_flat_cost
             if spy_close and first_spy_close else None
         )
 
-    return {"range": range.lower(), "range_days": days, "snapshots": snapshots, "trades": trades}
+    return {
+        "range": range.lower(), "range_days": days, "snapshots": snapshots, "trades": trades,
+        "spy_assumptions": {"cost_adjusted": cost_adjust, "dividends_included": include_dividends},
+    }
 
 @app.get("/api/positions")
 def get_positions():
@@ -776,6 +803,11 @@ _SETTINGS_DEFAULTS = {
     "alert_high_score_min":   "80",
     "alert_circuit_breaker":  "true",
     "home_market":            "us_nyse",  # slug into global_markets (see migration 002) -- which market gets the star on the world map
+    # Portfolio-vs-SPY comparison chart assumptions -- default ON so the
+    # comparison is apples-to-apples out of the box, not misleadingly
+    # favorable to SPY. See 2026-07-22 session notes.
+    "spy_cost_adjust":        "true",  # subtract one-time modeled trade cost from the SPY line, matching how the portfolio line is already cost-adjusted
+    "spy_include_dividends":  "true",  # use dividend-adjusted close (adjclose) instead of price-only close for SPY
 }
 
 def _ensure_settings_table(conn):
@@ -830,6 +862,8 @@ class SettingsUpdate(BaseModel):
     alert_high_score_min: Optional[str] = None
     alert_circuit_breaker: Optional[str] = None
     home_market: Optional[str] = None
+    spy_cost_adjust: Optional[str] = None
+    spy_include_dividends: Optional[str] = None
 
 @app.post("/api/settings")
 def api_save_settings(body: SettingsUpdate):

@@ -106,6 +106,31 @@
     </div>
   </div>
 
+  <!-- Portfolio vs SPY comparison -->
+  <div class="section">
+    <div class="section-title">Portfolio vs SPY Comparison</div>
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Include dividends in SPY</div>
+        <div class="toggle-desc">Use dividend-adjusted close instead of price-only, so SPY is a true total-return benchmark.</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="spy_include_dividends" onchange="markDirty()">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Cost-adjust SPY</div>
+        <div class="toggle-desc">Subtract a one-time modeled trade cost from the SPY line, matching how your portfolio line is already cost-adjusted.</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="spy_cost_adjust" onchange="markDirty()">
+        <span class="slider"></span>
+      </label>
+    </div>
+  </div>
+
   <!-- Notifications -->
   <div class="section">
     <div class="section-title">Notifications</div>
@@ -322,6 +347,8 @@ async function loadSettings() {
   document.getElementById('alert_high_score').checked = s.alert_high_score !== 'false';
   document.getElementById('alert_high_score_min').value = s.alert_high_score_min || 80;
   document.getElementById('home_market').value = s.home_market || 'us_nyse';
+  document.getElementById('spy_include_dividends').checked = s.spy_include_dividends !== 'false';
+  document.getElementById('spy_cost_adjust').checked = s.spy_cost_adjust !== 'false';
 }
 
 async function loadSignalParams() {
@@ -385,6 +412,8 @@ async function saveSettings() {
     alert_high_score:       document.getElementById('alert_high_score').checked ? 'true' : 'false',
     alert_high_score_min:   document.getElementById('alert_high_score_min').value,
     home_market:            document.getElementById('home_market').value,
+    spy_include_dividends:  document.getElementById('spy_include_dividends').checked ? 'true' : 'false',
+    spy_cost_adjust:        document.getElementById('spy_cost_adjust').checked ? 'true' : 'false',
   };
   const r = await fetch('/api/settings', {
     method: 'POST',
