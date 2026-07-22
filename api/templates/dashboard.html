@@ -1163,7 +1163,7 @@ async function loadGlobalMarkets() {
   d3.json('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(world => {
     svg.append('g').selectAll('path')
       .data(topojson.feature(world, world.objects.countries).features).join('path')
-      .attr('d', path).attr('fill', '#1a1d27').attr('stroke', '#0d0f1a').attr('stroke-width', 0.5);
+      .attr('d', path).attr('fill', '#333750').attr('stroke', '#4a4f6e').attr('stroke-width', 0.6);
 
     const g = svg.append('g');
     const sorted = [...markets].sort((a, b) => b.market_cap_usd_tn - a.market_cap_usd_tn);
