@@ -669,6 +669,40 @@ def get_market_context():
         "updated_at": None,
     }
 
+@app.get("/api/global-markets")
+def get_global_markets():
+    """Global-markets world clock/map data: each configured market plus its
+    latest overnight_pct observation. regime is a simple display-only
+    +/-0.3% threshold on overnight_pct -- NOT the validated composite the
+    world-clock mockup was designed around. See [[project_homelab_investor]]
+    2026-07-21/22 notes: score_signal() must not read anything from this
+    table until an Experiment-005-style significance test clears it; this
+    threshold exists purely to color the dashboard, not to trade on."""
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT gm.slug, gm.display_name, gm.index_symbol, gm.lat, gm.lon,
+                   gm.market_cap_usd_tn, gm.timezone, gm.local_open_hour, gm.local_close_hour,
+                   gms.overnight_pct, gms.trading_date
+            FROM global_markets gm
+            LEFT JOIN LATERAL (
+                SELECT overnight_pct, trading_date FROM global_market_signals
+                WHERE market_id = gm.id ORDER BY trading_date DESC LIMIT 1
+            ) gms ON TRUE
+            ORDER BY gm.market_cap_usd_tn DESC
+        """)
+        rows = [dict(r) for r in cur.fetchall()]
+
+    settings = get_all_settings()
+    home_market = settings.get("home_market", "us_nyse")
+
+    for r in rows:
+        pct = r["overnight_pct"]
+        r["regime"] = "risk_on" if pct is not None and pct > 0.3 else \
+                      "risk_off" if pct is not None and pct < -0.3 else "neutral"
+        r["is_home"] = r["slug"] == home_market
+
+    return {"home_market": home_market, "markets": rows}
+
 @app.get("/api/universe/stats")
 def get_universe_stats():
     with db() as conn, conn.cursor() as cur:
