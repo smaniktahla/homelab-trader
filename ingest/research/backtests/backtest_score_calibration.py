@@ -45,6 +45,16 @@ signal-level evidence holds up): sector-relative returns, position sizing,
 sector caps, earnings blackout, circuit breaker, slippage/commission
 modeling, full rolling walk-forward.
 
+2026-07-22 fix: excess_return_vs_spy was computed from raw_return_20d, not
+the stop-loss-aware realized_return already sitting right next to it in
+the same outcome dict — a signal that got stopped out before day 20 was
+still credited with its un-stopped raw path when compared against SPY.
+This is what produced Experiment 005's puzzle where win rate was
+significant at every score threshold but excess-return-vs-SPY wasn't at
+60-90: the two metrics weren't measuring the same notion of "return."
+Fixed to use realized_return; backtest_rule_significance.py's permutation
+null distribution updated to match on the same basis.
+
 Not part of the recurring ingest loop. Run manually:
     docker exec invest-ingest python3 research/backtests/backtest_score_calibration.py
 """
@@ -191,7 +201,12 @@ def backtest_symbol(symbol, dates, closes, highs, lows, spy_dates, spy_closes, p
         results.append({
             "symbol": symbol, "date": dates[i], "score": final_score, "raw_score": raw_score,
             "regime": regime, **outcome,
-            "excess_return_vs_spy": (outcome["raw_return_20d"] - spy_fwd) if spy_fwd is not None else None,
+            # stop-loss-aware (realized_return), not raw_return_20d -- a signal that
+            # got stopped out before day 20 should count as stopped for the SPY
+            # comparison too, not silently reward it with the un-stopped raw path.
+            # This was the source of Experiment 005's win-rate-significant-but-
+            # excess-return-not-significant puzzle at score>=60-90 (2026-07-22).
+            "excess_return_vs_spy": (outcome["realized_return"] - spy_fwd) if spy_fwd is not None else None,
         })
     return results
 

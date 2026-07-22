@@ -49,8 +49,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from backtest_score_calibration import (
     get_db, get_universe_symbols, load_series, backtest_symbol,
-    apply_episode_dedup, spy_forward_return, WINDOW, FORWARD_DAYS,
-    SWEEP_THRESHOLDS,
+    apply_episode_dedup, spy_forward_return, stop_loss_aware_outcome,
+    WINDOW, FORWARD_DAYS, SWEEP_THRESHOLDS,
 )
 from signals import load_params
 from db_utils import save_backtest_result
@@ -71,18 +71,29 @@ def eligible_indices(n):
     return list(range(WINDOW, n - FORWARD_DAYS))
 
 
-def precompute_returns(dates, closes, spy_dates, spy_closes, eligible):
-    """raw_return_20d / excess_return_vs_spy for every eligible entry index,
-    computed once per symbol so both the real episodes and every permutation
-    draw are O(1) dict lookups instead of recomputing forward returns."""
+def precompute_returns(dates, closes, highs, lows, spy_dates, spy_closes, eligible, stop_loss_pct):
+    """raw_return_20d / realized_return (stop-loss-aware) / excess_return_vs_spy
+    for every eligible entry index, computed once per symbol so both the real
+    episodes and every permutation draw are O(1) dict lookups instead of
+    recomputing forward returns.
+
+    excess_return_vs_spy is built from realized_return, not raw_return_20d --
+    matching backtest_symbol()'s own fix (2026-07-22, see
+    backtest_score_calibration.py) so the null distribution and the real
+    episodes are measured on the same basis. Before this fix the two used
+    different definitions of "return," which is what produced the puzzle
+    where win rate was significant at every threshold but excess-return
+    wasn't at score>=60-90."""
     cache = {}
     for i in eligible:
-        entry = closes[i]
-        raw = (closes[i + FORWARD_DAYS] - entry) / entry * 100
+        outcome = stop_loss_aware_outcome(i, closes, highs, lows, stop_loss_pct, FORWARD_DAYS)
+        if outcome is None:
+            continue
         spy_fwd = spy_forward_return(i, dates, spy_dates, spy_closes)
         cache[i] = {
-            "raw_return_20d": raw,
-            "excess_return_vs_spy": (raw - spy_fwd) if spy_fwd is not None else None,
+            "raw_return_20d": outcome["raw_return_20d"],
+            "realized_return": outcome["realized_return"],
+            "excess_return_vs_spy": (outcome["realized_return"] - spy_fwd) if spy_fwd is not None else None,
         }
     return cache
 
@@ -229,7 +240,8 @@ def main():
 
         eligible = eligible_indices(len(closes))
         symbol_eligible[sym] = eligible
-        symbol_cache[sym] = precompute_returns(dates, closes, spy_dates, spy_closes, eligible)
+        symbol_cache[sym] = precompute_returns(dates, closes, highs, lows, spy_dates, spy_closes,
+                                                eligible, params["stop_loss_pct"])
         if (idx + 1) % 100 == 0:
             log.info(f"...{idx + 1}/{len(symbols)} symbols prepared")
 
