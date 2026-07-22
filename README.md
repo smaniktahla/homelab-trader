@@ -5,6 +5,8 @@ reversion, gated by market regime (SPY/QQQ trend + VIX), with human
 approval required before any order is placed. Runs against Alpaca's
 paper trading API — no real money moves.
 
+![Dashboard](docs/screenshots/dashboard.png)
+
 ## How it works
 
 - **`invest-ingest`** — background worker (hourly cycle). Pulls price
@@ -12,7 +14,8 @@ paper trading API — no real money moves.
   Bands), gates them against the current market regime, sizes and
   creates trade proposals, checks stop-loss / thesis-complete / time-stop
   exits on open positions, scans the S&P 500 + core ETFs to promote/demote
-  the watchlist, and sends email/WhatsApp digests and alerts.
+  the watchlist, tracks overnight returns for a handful of leading
+  international indices, and sends email/WhatsApp digests and alerts.
 - **`invest-api`** — FastAPI service serving the dashboard and REST API.
   Trades only ever execute through here, and only for proposals a human
   has approved (or a manual trade placed directly).
@@ -21,6 +24,27 @@ paper trading API — no real money moves.
   returns, MAE/MFE) all live here. Schema is idempotent
   (`ingest/schema.sql`) and applied automatically on `invest-ingest`
   startup.
+
+## More screenshots
+
+**Global markets** — leading international indices as a world clock +
+map, a rough "time machine" read on overnight risk sentiment before the
+US market opens. Marker size is market cap, the ring shows which markets
+are currently open. Purely informational for now — not wired into any
+trading decision until it clears its own significance test.
+
+![Global markets](docs/screenshots/global-markets.png)
+
+**Symbol detail** — price history with a Bollinger Bands overlay (the
+same `compute_bollinger()` the live scoring engine uses, not a
+reimplementation), buy/sell trade markers, and recent signal history.
+
+![Symbol detail](docs/screenshots/symbol.png)
+
+**Trade history** — kept on its own tab, separate from the at-a-glance
+dashboard.
+
+![Trade history](docs/screenshots/trade-history.png)
 
 ## Stack
 
@@ -40,6 +64,11 @@ ingest/
   scanner.py              S&P 500 + ETF universe scan, watchlist promote/demote
   outcomes.py             Signal outcome backfill (forward returns, MAE/MFE)
   schema.sql              Idempotent DB schema, applied on startup
+  research/backtests/    Offline validation scripts, run manually (not part
+                           of the recurring loop) -- score calibration,
+                           entry-rule significance testing, portfolio-level
+                           Monte Carlo. Results persist to backtest_results.
+docs/screenshots/        README images
 docker-compose.yml
 ```
 
