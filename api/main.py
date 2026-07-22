@@ -721,6 +721,7 @@ _SETTINGS_DEFAULTS = {
     "alert_high_score":       "true",
     "alert_high_score_min":   "80",
     "alert_circuit_breaker":  "true",
+    "home_market":            "us_nyse",  # slug into global_markets (see migration 002) -- which market gets the star on the world map
 }
 
 def _ensure_settings_table(conn):
@@ -774,6 +775,7 @@ class SettingsUpdate(BaseModel):
     alert_high_score: Optional[str] = None
     alert_high_score_min: Optional[str] = None
     alert_circuit_breaker: Optional[str] = None
+    home_market: Optional[str] = None
 
 @app.post("/api/settings")
 def api_save_settings(body: SettingsUpdate):

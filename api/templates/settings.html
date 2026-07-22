@@ -82,6 +82,30 @@
   <h1>Settings</h1>
   <p class="breadcrumb"><a href="/">← Dashboard</a></p>
 
+  <!-- Markets -->
+  <div class="section">
+    <div class="section-title">Markets</div>
+    <div class="field">
+      <label>Home market
+        <span class="tip"><span class="tip-icon" tabindex="0">?</span>
+          <span class="tip-text">Marked with a star on the global markets map. Every other market's overnight move is read as a leading indicator relative to this one.</span>
+        </span>
+      </label>
+      <select id="home_market" onchange="markDirty()">
+        <option value="us_nyse">United States — NYSE / NASDAQ</option>
+        <option value="tokyo">Japan — Tokyo (Nikkei 225)</option>
+        <option value="hong_kong">Hong Kong — Hang Seng</option>
+        <option value="shanghai">China — Shanghai Composite</option>
+        <option value="sydney">Australia — ASX 200</option>
+        <option value="london">United Kingdom — FTSE 100</option>
+        <option value="frankfurt">Germany — DAX</option>
+        <option value="taiwan">Taiwan — TWSE</option>
+        <option value="korea">South Korea — KOSPI</option>
+        <option value="mumbai">India — Sensex</option>
+      </select>
+    </div>
+  </div>
+
   <!-- Notifications -->
   <div class="section">
     <div class="section-title">Notifications</div>
@@ -297,6 +321,7 @@ async function loadSettings() {
   document.getElementById('alert_portfolio_drop_pct').value = s.alert_portfolio_drop_pct || 3.0;
   document.getElementById('alert_high_score').checked = s.alert_high_score !== 'false';
   document.getElementById('alert_high_score_min').value = s.alert_high_score_min || 80;
+  document.getElementById('home_market').value = s.home_market || 'us_nyse';
 }
 
 async function loadSignalParams() {
@@ -359,6 +384,7 @@ async function saveSettings() {
     alert_portfolio_drop_pct: document.getElementById('alert_portfolio_drop_pct').value,
     alert_high_score:       document.getElementById('alert_high_score').checked ? 'true' : 'false',
     alert_high_score_min:   document.getElementById('alert_high_score_min').value,
+    home_market:            document.getElementById('home_market').value,
   };
   const r = await fetch('/api/settings', {
     method: 'POST',
