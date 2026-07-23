@@ -386,6 +386,7 @@
       <span style="margin-left:auto" id="adv-slots-meta"></span>
     </div>
     <div class="cand-badges" id="adv-candidates" style="display:none"></div>
+    <div id="adv-candidates-note" style="display:none;font-size:.7rem;color:#555;margin-top:6px">Based on a fast RSI-only universe screen, not the real signal score — check a symbol's page before acting.</div>
   </div>
 
   <!-- Positions -->
@@ -422,7 +423,10 @@
   </div>
 
   <!-- Signal Leaderboard -->
-  <h2>Signal Leaderboard</h2>
+  <h2 style="margin-bottom:2px">Signal Leaderboard</h2>
+  <div style="font-size:.75rem;color:#555;margin-bottom:12px">
+    Fast RSI-only screen across the whole scannable universe — not the same score used to generate real trade signals/proposals, which also factors in Bollinger Bands, regime, and ATR. See a symbol's page for its real signal history.
+  </div>
   <div class="leaderboard-wrap">
     <div class="lb-controls">
       <button class="tab-btn active" onclick="setLbSide('both',this)">All</button>
@@ -436,8 +440,8 @@
         <th class="sortable" onclick="sortLeaderboard('company_name')">Company<span class="sort-arrow" id="arrow-company_name"></span></th>
         <th class="sortable" onclick="sortLeaderboard('price')">Price<span class="sort-arrow" id="arrow-price"></span></th>
         <th class="sortable" onclick="sortLeaderboard('rsi')">RSI<span class="sort-arrow" id="arrow-rsi"></span></th>
-        <th class="sortable" onclick="sortLeaderboard('buy_score')">Buy Score<span class="sort-arrow" id="arrow-buy_score"></span></th>
-        <th class="sortable" onclick="sortLeaderboard('sell_score')">Sell Score<span class="sort-arrow" id="arrow-sell_score"></span></th>
+        <th class="sortable" onclick="sortLeaderboard('buy_score')" title="Fast RSI-only universe scan score, not the real signal score">Buy Scan<span class="sort-arrow" id="arrow-buy_score"></span></th>
+        <th class="sortable" onclick="sortLeaderboard('sell_score')" title="Fast RSI-only universe scan score, not the real signal score">Sell Scan<span class="sort-arrow" id="arrow-sell_score"></span></th>
         <th class="sortable" onclick="sortLeaderboard('on_watchlist')">Watchlist<span class="sort-arrow" id="arrow-on_watchlist"></span></th>
         <th class="sortable" onclick="sortLeaderboard('scanned_at')">Scanned<span class="sort-arrow" id="arrow-scanned_at"></span></th>
         <th></th>
@@ -990,8 +994,10 @@ async function loadAdvisor() {
 
     // Candidate badges
     const candWrap = document.getElementById('adv-candidates');
+    const candNote = document.getElementById('adv-candidates-note');
     if (adv.candidates && adv.candidates.length) {
       candWrap.style.display = 'flex';
+      candNote.style.display = 'block';
       candWrap.innerHTML = adv.candidates.map(c => {
         const sharesLine = c.suggested_shares
           ? `<span style="opacity:.55;font-size:.68rem">${c.suggested_shares} sh · $${c.suggested_notional?.toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0})}</span>`
@@ -1007,6 +1013,7 @@ async function loadAdvisor() {
       }).join('');
     } else {
       candWrap.style.display = 'none';
+      candNote.style.display = 'none';
     }
   } catch(e) { console.error('advisor:', e); }
 }

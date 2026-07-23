@@ -711,6 +711,21 @@ def check_alerts(conn, cfg):
                        ), 1) AS avg_volume
                 FROM signals s
                 WHERE s.score >= %s AND s.generated_at > NOW() - INTERVAL '2 hours'
+                  -- A sell signal scores and logs unconditionally in
+                  -- compute_signals() even for symbols not held -- there's
+                  -- nothing to actually sell, so it can never become a
+                  -- proposal (signals.py blocks it with reason
+                  -- 'no_position_held', recorded in signal_outcomes right
+                  -- next to it). Alerting on those anyway is what made the
+                  -- 2026-07-23 RTX email look like a bug: "high-confidence
+                  -- signal" for something with zero path to the dashboard.
+                  -- Reuses signals.py's own gating decision rather than
+                  -- re-deriving "is this held" from Alpaca here, so this
+                  -- can't drift from what actually blocked the proposal.
+                  AND NOT EXISTS (
+                      SELECT 1 FROM signal_outcomes so
+                      WHERE so.signal_id = s.id AND so.block_reason = 'no_position_held'
+                  )
                 ORDER BY s.score DESC,
                          LEAST(4.0,
                            COALESCE((SELECT ph2.volume FROM price_history ph2 WHERE ph2.symbol = s.symbol ORDER BY ph2.ts DESC LIMIT 1), 0)::FLOAT
