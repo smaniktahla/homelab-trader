@@ -309,3 +309,11 @@ CREATE INDEX IF NOT EXISTS idx_backtest_results_run_at ON backtest_results (run_
 -- SPY comparison a true total-return benchmark instead of price-only.
 -- See 2026-07-22 session notes.
 ALTER TABLE price_history ADD COLUMN IF NOT EXISTS adjclose NUMERIC;
+
+-- Buy Cooldown. The RSI/BB oversold condition that triggers a BUY signal can
+-- stay true for several consecutive scan cycles — without this, the scanner
+-- re-proposes (and the user can re-approve) the same BUY every cycle even
+-- though the position was already sized for that signal the first time.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('buy_cooldown_days', 2, 'Skip new BUY proposals for a symbol within N days of its last filled BUY trade')
+ON CONFLICT (key) DO NOTHING;

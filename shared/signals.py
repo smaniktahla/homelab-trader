@@ -44,6 +44,7 @@ DEFAULTS = {
     "sector_max_pct": 0.30,
     "earnings_blackout_days": 3,
     "circuit_breaker_drawdown_pct": 0.15,
+    "buy_cooldown_days": 2,
 }
 
 # Relative strength vs SPY and ATR-normalized move: score modifiers layered
@@ -347,6 +348,26 @@ def score_signal(rsi, price, bb_upper, bb_lower, band_std, bb_middle, regime, si
         score = _apply_atr_modifier(score, price, bb_middle, atr, parts)
 
     return int(score), "; ".join(parts)
+
+
+def recent_buy_block_reason(conn, symbol, cooldown_days):
+    """Return a block reason string if `symbol` had a filled BUY trade within
+    cooldown_days, else None. Prevents the scanner from re-proposing (and the
+    user re-approving) the same BUY on consecutive cycles just because the
+    underlying RSI/BB oversold condition hasn't resolved yet — the position
+    was already sized for that signal; a still-oversold RSI the next cycle
+    isn't a new opportunity."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT traded_at FROM trades
+            WHERE symbol=%s AND side='buy'
+              AND traded_at > NOW() - %s * INTERVAL '1 day'
+            ORDER BY traded_at DESC LIMIT 1
+        """, (symbol, int(cooldown_days)))
+        row = cur.fetchone()
+    if row:
+        return f"buy_cooldown:last_buy_{row[0].date().isoformat()}"
+    return None
 
 
 def calc_buy_qty(price, cash, portfolio_value, existing_market_value, p):
@@ -723,6 +744,11 @@ def compute_signals(conn, symbols):
                     if eb_block:
                         log.info(f"Skipping buy proposal for {sym}: {eb_block}")
                         _block_outcome(conn, outcome_id, eb_block)
+                        continue
+                    cd_block = recent_buy_block_reason(conn, sym, p["buy_cooldown_days"])
+                    if cd_block:
+                        log.info(f"Skipping buy proposal for {sym}: {cd_block}")
+                        _block_outcome(conn, outcome_id, cd_block)
                         continue
                     existing_mv = positions.get(sym, {}).get("market_value", 0.0)
                     qty, sizing_note = calc_buy_qty(price, cash, portfolio_value, existing_mv, p_gated)
