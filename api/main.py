@@ -223,13 +223,47 @@ def get_strategy_reviews(limit: int = 20):
         """, (limit,))
         return cur.fetchall()
 
+def _realized_pnl_by_trade_id(cur):
+    """Running average-cost basis per symbol (matches positions.avg_entry_price
+    convention) over the *entire* filled trade history, so a sell's realized
+    P&L is correct even when its matching buy falls outside a limited window.
+    Returns {trade_id: (realized_pnl, realized_pnl_pct)} for sell trades only."""
+    cur.execute("""
+        SELECT id, symbol, side, qty, price FROM trades
+        WHERE status='filled' AND price IS NOT NULL
+        ORDER BY traded_at ASC, id ASC
+    """)
+    basis = {}  # symbol -> {qty, total_cost}
+    pnl = {}
+    for t in cur.fetchall():
+        pos = basis.setdefault(t["symbol"], {"qty": 0.0, "total_cost": 0.0})
+        qty, price = float(t["qty"]), float(t["price"])
+        if t["side"] == "buy":
+            pos["qty"] += qty
+            pos["total_cost"] += qty * price
+        elif t["side"] == "sell" and pos["qty"] > 0:
+            avg_cost = pos["total_cost"] / pos["qty"]
+            sell_qty = min(qty, pos["qty"])  # guard against oversell/data gaps
+            realized = sell_qty * (price - avg_cost)
+            pnl[t["id"]] = (round(realized, 2), round((price - avg_cost) / avg_cost * 100, 2))
+            pos["qty"] -= sell_qty
+            pos["total_cost"] -= sell_qty * avg_cost
+    return pnl
+
+
 @app.get("/api/trades")
 def get_trades(limit: int = 200):
     with db() as conn, conn.cursor() as cur:
+        pnl_by_id = _realized_pnl_by_trade_id(cur)
         cur.execute("""
             SELECT * FROM trades ORDER BY traded_at DESC LIMIT %s
         """, (limit,))
-        return cur.fetchall()
+        trades = cur.fetchall()
+        for t in trades:
+            realized = pnl_by_id.get(t["id"])
+            t["realized_pnl"] = realized[0] if realized else None
+            t["realized_pnl_pct"] = realized[1] if realized else None
+        return trades
 
 _PORTFOLIO_HISTORY_RANGE_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365, "3y": 1095, "5y": 1825}
 

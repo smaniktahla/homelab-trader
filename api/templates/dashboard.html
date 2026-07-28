@@ -80,6 +80,13 @@
   .badge-pending { background: #1a1a2a; color: #888; }
   .badge-partial { background: #2a1a00; color: #f0a500; }
   .badge-canceled { background: #2a1a1a; color: #f75f5f; }
+  .badge-win { background: #1a3a2a; color: #3ecf6e; }
+  .badge-loss { background: #3a1a1a; color: #f75f5f; }
+
+  /* Trade History symbol grouping */
+  tr.trade-group-alt { background: #12141d; }
+  tr.trade-group-mid td { border-bottom: 1px dashed #20232f; }
+  tr.trade-group-last td { border-bottom: 1px solid #2a2d3a; }
 
   /* Modal */
   .modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:100; align-items:center; justify-content:center; }
@@ -881,24 +888,56 @@ async function loadLeaderboard() {
 }
 
 // ── Trade History ──────────────────────────────────────────────────
+// Groups all trades for a symbol together (oldest first within the group,
+// so a buy always sits above a later sell of the same symbol) rather than
+// one flat time-ordered list. Groups themselves stay ordered by their most
+// recent trade so the log still reads newest-activity-first overall.
+function _groupTradesBySymbol(trades) {
+  const bySymbol = new Map();
+  for (const t of trades) {
+    if (!bySymbol.has(t.symbol)) bySymbol.set(t.symbol, []);
+    bySymbol.get(t.symbol).push(t);
+  }
+  const groups = Array.from(bySymbol.values()).map(g => {
+    g.sort((a, b) => new Date(a.traded_at) - new Date(b.traded_at));
+    return { trades: g, latest: new Date(g[g.length - 1].traded_at).getTime() };
+  });
+  groups.sort((a, b) => b.latest - a.latest);
+  return groups;
+}
+
 async function loadTrades() {
   const tbody = document.getElementById('trades-body');
   try {
     const trades = await fetch('/api/trades?limit=50').then(r => r.json());
     if (!trades.length) { tbody.innerHTML = '<tr><td colspan="9" class="no-data">No trades yet.</td></tr>'; return; }
-    tbody.innerHTML = trades.map(t => {
-      const dir = t.side === 'buy' ? 'up' : 'down';
-      return `<tr>
-        <td style="color:#555">${new Date(t.traded_at).toLocaleString()}</td>
-        <td><a href="/symbol/${t.symbol}">${t.symbol}</a></td>
-        <td class="${dir}" style="font-weight:600">${t.side.toUpperCase()}</td>
-        <td style="font-size:.8rem">${statusBadge(t.status)}</td>
-        <td>${fmt(t.qty, t.qty % 1 === 0 ? 0 : 4)}</td>
-        <td>${t.price ? fmtUSD(t.price) : '—'}</td>
-        <td>${t.notional ? fmtUSD(t.notional) : '—'}</td>
-        <td style="color:#666;font-size:.8rem">${sourceLabel[t.source] || t.source}</td>
-        <td style="color:#555;font-size:.8rem">${t.notes || ''}</td>
-      </tr>`;
+
+    const groups = _groupTradesBySymbol(trades);
+    tbody.innerHTML = groups.map((g, gi) => {
+      const alt = gi % 2 === 1 ? ' trade-group-alt' : '';
+      return g.trades.map((t, i) => {
+        const dir = t.side === 'buy' ? 'up' : 'down';
+        const grouped = g.trades.length > 1;
+        const isLast = i === g.trades.length - 1;
+        const rowClass = grouped ? `${alt} ${isLast ? 'trade-group-last' : 'trade-group-mid'}` : alt;
+        const symbolCell = (grouped && i > 0)
+          ? `<span style="color:#444">↳</span> <a href="/symbol/${t.symbol}">${t.symbol}</a>`
+          : `<a href="/symbol/${t.symbol}">${t.symbol}</a>`;
+        const pnlBadge = (t.side === 'sell' && t.realized_pnl != null)
+          ? ` <span class="badge ${t.realized_pnl > 0 ? 'badge-win' : 'badge-loss'}">${t.realized_pnl > 0 ? 'WIN' : 'LOSS'} ${t.realized_pnl >= 0 ? '+' : ''}${fmtUSD(t.realized_pnl)} (${t.realized_pnl_pct >= 0 ? '+' : ''}${t.realized_pnl_pct}%)</span>`
+          : '';
+        return `<tr class="${rowClass}">
+          <td style="color:#555">${new Date(t.traded_at).toLocaleString()}</td>
+          <td>${symbolCell}</td>
+          <td class="${dir}" style="font-weight:600">${t.side.toUpperCase()}</td>
+          <td style="font-size:.8rem">${statusBadge(t.status)}${pnlBadge}</td>
+          <td>${fmt(t.qty, t.qty % 1 === 0 ? 0 : 4)}</td>
+          <td>${t.price ? fmtUSD(t.price) : '—'}</td>
+          <td>${t.notional ? fmtUSD(t.notional) : '—'}</td>
+          <td style="color:#666;font-size:.8rem">${sourceLabel[t.source] || t.source}</td>
+          <td style="color:#555;font-size:.8rem">${t.notes || ''}</td>
+        </tr>`;
+      }).join('');
     }).join('');
   } catch(e) { tbody.innerHTML = `<tr><td colspan="9" class="no-data">${e.message}</td></tr>`; }
 }
