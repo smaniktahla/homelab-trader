@@ -1028,8 +1028,17 @@ def run_once(conn, last_universe_scan):
         promote_demote(conn, positions, candidates)
         newly_promoted = set(get_watchlist(conn)) - watchlist_before
         if newly_promoted:
+            # ingest_prices() already ran earlier this cycle against the
+            # pre-promotion watchlist snapshot, so a symbol promoted right
+            # here has whatever price_history happened to exist from
+            # before it was ever tracked -- potentially weeks stale (seen
+            # live 2026-07-28: CARR scored/proposed off an 18-day-old
+            # close while trading materially higher). Fetch fresh prices
+            # for exactly these symbols before scoring them.
+            newly_promoted = list(newly_promoted)
+            ingest_prices(conn, newly_promoted)
             log.info(f"Running signals on {len(newly_promoted)} newly promoted: {sorted(newly_promoted)}")
-            compute_signals(conn, list(newly_promoted))
+            compute_signals(conn, newly_promoted)
         return now
     return last_universe_scan
 
