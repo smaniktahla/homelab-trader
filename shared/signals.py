@@ -347,6 +347,13 @@ def score_signal(rsi, price, bb_upper, bb_lower, band_std, bb_middle, regime, si
 
         score = _apply_atr_modifier(score, price, bb_middle, atr, parts)
 
+    # Regime's min(score*1.15, 100) cap only bounds the score at that one
+    # step -- the ATR modifier runs afterward and can multiply a
+    # near-100 score past 100 with nothing downstream to catch it (seen
+    # live 2026-07-23: ITW scored 110). Docstring promises 0-100; enforce
+    # it for real, once, at the end, rather than threading a cap through
+    # every intermediate step.
+    score = max(0.0, min(100.0, score))
     return int(score), "; ".join(parts)
 
 
