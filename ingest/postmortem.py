@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 WINDOW_DAYS = 180          # how far back to look for resolved outcomes
 MIN_BUCKET_N = 15          # minimum observations before a bucket is trusted
-MIN_GAP_PP = 15.0          # min win-rate gap (percentage points) to propose a change
+MIN_RETURN_GAP_PCT = 2.0   # min avg forward-return gap (pct) to propose a change
 
 SCORE_BUCKETS = [
     ("30-49", 30, 50),
@@ -27,18 +27,25 @@ SCORE_BUCKETS = [
 
 
 def _bucket_stats(rows):
-    """rows: list of (bucket_key, forward_return_20d). Returns {bucket: {n, win_rate, avg_return}}."""
+    """rows: list of (bucket_key, forward_return_20d).
+    Returns {bucket: {n, win_rate, avg_return, avg_win, avg_loss}}.
+    avg_win/avg_loss are None when a bucket has no observations on that side —
+    win_rate alone can hide a bucket that wins often but small and loses rarely but big.
+    """
     buckets = {}
     for bucket, ret in rows:
         buckets.setdefault(bucket, []).append(ret)
     out = {}
     for bucket, rets in buckets.items():
         n = len(rets)
-        wins = sum(1 for r in rets if r > 0)
+        wins = [r for r in rets if r > 0]
+        losses = [r for r in rets if r <= 0]
         out[bucket] = {
             "n": n,
-            "win_rate": round(100 * wins / n, 1),
+            "win_rate": round(100 * len(wins) / n, 1),
             "avg_return": round(sum(rets) / n, 2),
+            "avg_win": round(sum(wins) / len(wins), 2) if wins else None,
+            "avg_loss": round(sum(losses) / len(losses), 2) if losses else None,
         }
     return out
 
@@ -67,19 +74,25 @@ def _score_bucket(score):
 
 def _propose_score_threshold_change(conn, score_stats):
     """If low score buckets clearly underperform high buckets with enough N,
-    propose raising score_proposal_min to the boundary of the better bucket."""
+    propose raising score_proposal_min to the boundary of the better bucket.
+
+    Ranks buckets by avg_return (expectancy), not win_rate: a bucket can win
+    often on small moves and lose rarely on big ones and still be the worse
+    bucket to hold. win_rate alone would pick that bucket as "best" and raise
+    the threshold in the wrong direction.
+    """
     ordered = [(label, lo, hi) for label, lo, hi in SCORE_BUCKETS if label in score_stats]
     trusted = [(label, lo, hi) for label, lo, hi in ordered if score_stats[label]["n"] >= MIN_BUCKET_N]
     if len(trusted) < 2:
         return None
 
     worst_label, worst_lo, _ = trusted[0]
-    best_label, best_lo, _ = max(trusted, key=lambda t: score_stats[t[0]]["win_rate"])
+    best_label, best_lo, _ = max(trusted, key=lambda t: score_stats[t[0]]["avg_return"])
     if best_lo <= worst_lo:
         return None  # already proposing the floor, nothing to raise
 
-    gap = score_stats[best_label]["win_rate"] - score_stats[worst_label]["win_rate"]
-    if gap < MIN_GAP_PP:
+    gap = score_stats[best_label]["avg_return"] - score_stats[worst_label]["avg_return"]
+    if gap < MIN_RETURN_GAP_PCT:
         return None
 
     with conn.cursor() as cur:
@@ -89,15 +102,17 @@ def _propose_score_threshold_change(conn, score_stats):
     if current >= best_lo:
         return None  # threshold already at/above the proposed floor
 
+    worst, best = score_stats[worst_label], score_stats[best_label]
     return {
         "proposed_param": "score_proposal_min",
         "current_value": current,
         "proposed_value": float(best_lo),
         "reason": (
-            f"score bucket {worst_label} won {score_stats[worst_label]['win_rate']}% "
-            f"(N={score_stats[worst_label]['n']}) vs {best_label} at "
-            f"{score_stats[best_label]['win_rate']}% (N={score_stats[best_label]['n']}), "
-            f"a {gap:.1f}pp gap over the {MIN_GAP_PP}pp threshold"
+            f"score bucket {worst_label} avg_return {worst['avg_return']}% "
+            f"(win_rate {worst['win_rate']}%, avg_win {worst['avg_win']}, avg_loss {worst['avg_loss']}, "
+            f"N={worst['n']}) vs {best_label} at {best['avg_return']}% "
+            f"(win_rate {best['win_rate']}%, avg_win {best['avg_win']}, avg_loss {best['avg_loss']}, "
+            f"N={best['n']}), a {gap:.1f}pp avg-return gap over the {MIN_RETURN_GAP_PCT}pp threshold"
         ),
     }
 
