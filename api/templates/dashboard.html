@@ -264,6 +264,7 @@
   <div class="page-tabs">
     <button class="page-tab-btn active" id="page-tab-dashboard" onclick="showPageTab('dashboard',this)">Dashboard</button>
     <button class="page-tab-btn" id="page-tab-history" onclick="showPageTab('history',this)">Trade History</button>
+    <button class="page-tab-btn" id="page-tab-reviews" onclick="showPageTab('reviews',this)">Strategy Review</button>
   </div>
 
   <div id="page-dashboard">
@@ -463,6 +464,16 @@
     <tbody id="trades-body"><tr><td colspan="9" class="no-data">Loading…</td></tr></tbody>
   </table>
   </div><!-- /page-history -->
+
+  <!-- Strategy Review -->
+  <div id="page-reviews" style="display:none">
+  <h2>Strategy Review</h2>
+  <div style="color:#666;font-size:.82rem;margin:-6px 0 14px">
+    Weekly calibration check over resolved signals. Advisory only — apply a proposed change yourself via
+    <code style="color:#888">PATCH /api/signal-params/&#123;key&#125;</code> if you agree with it.
+  </div>
+  <div id="reviews-list"><div class="no-data">Loading…</div></div>
+  </div><!-- /page-reviews -->
 </div>
 
 <!-- Trade Modal -->
@@ -502,6 +513,7 @@ const sourceLabel = { manual: '👤 Manual', model_approved: '🤖 Model', auto:
 function showPageTab(name, btn) {
   document.getElementById('page-dashboard').style.display = name === 'dashboard' ? '' : 'none';
   document.getElementById('page-history').style.display = name === 'history' ? '' : 'none';
+  document.getElementById('page-reviews').style.display = name === 'reviews' ? '' : 'none';
   document.querySelectorAll('.page-tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
 }
@@ -889,6 +901,60 @@ async function loadTrades() {
       </tr>`;
     }).join('');
   } catch(e) { tbody.innerHTML = `<tr><td colspan="9" class="no-data">${e.message}</td></tr>`; }
+}
+
+// ── Strategy Review ───────────────────────────────────────────────
+const BUCKET_GROUP_LABEL = { score_buckets: 'Score', symbol_regime: 'Regime', approval_status: 'Approval' };
+
+function _reviewBucketTable(metricSummary) {
+  const groups = Object.entries(metricSummary || {}).filter(([, buckets]) => buckets && Object.keys(buckets).length);
+  if (!groups.length) return '';
+  return groups.map(([group, buckets]) => {
+    const rows = Object.entries(buckets).map(([label, s]) => `
+      <tr>
+        <td style="color:#888">${BUCKET_GROUP_LABEL[group] || group}: ${label}</td>
+        <td>${s.n}</td>
+        <td>${s.win_rate}%</td>
+        <td class="${s.avg_return >= 0 ? 'up' : 'down'}">${s.avg_return}%</td>
+        <td class="up">${s.avg_win ?? '—'}</td>
+        <td class="down">${s.avg_loss ?? '—'}</td>
+      </tr>`).join('');
+    return rows;
+  }).join('');
+}
+
+async function loadReviews() {
+  const wrap = document.getElementById('reviews-list');
+  try {
+    const reviews = await fetch('/api/reviews?limit=20').then(r => r.json());
+    if (!reviews.length) { wrap.innerHTML = '<div class="no-data">No postmortem runs yet.</div>'; return; }
+
+    wrap.innerHTML = reviews.map(r => {
+      const proposalLine = r.proposed_param
+        ? `<div style="margin-top:8px;padding:8px 10px;background:#1a2a3a;border:1px solid #2a4a6a;border-radius:6px;font-size:.82rem">
+             <strong style="color:#4f8ef7">Proposed:</strong> raise <code>${r.proposed_param}</code>
+             from ${r.current_value} to ${r.proposed_value}
+           </div>`
+        : '';
+      const bucketRows = _reviewBucketTable(r.metric_summary);
+      const bucketTable = bucketRows
+        ? `<table style="margin-top:10px">
+             <thead><tr><th>Bucket</th><th>N</th><th>Win Rate</th><th>Avg Return</th><th>Avg Win</th><th>Avg Loss</th></tr></thead>
+             <tbody>${bucketRows}</tbody>
+           </table>`
+        : '';
+      return `
+      <div class="proposal-row" style="flex-direction:column;align-items:stretch">
+        <div class="prop-info">
+          <strong>${new Date(r.created_at).toLocaleDateString()}</strong>
+          <span style="color:#666;font-size:.8rem;margin-left:8px">N=${r.n_resolved} resolved · window ${new Date(r.window_start).toLocaleDateString()}–${new Date(r.window_end).toLocaleDateString()}</span>
+          <div class="prop-meta">${r.finding}</div>
+          ${proposalLine}
+          ${bucketTable}
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { wrap.innerHTML = `<div class="no-data">${e.message}</div>`; }
 }
 
 // ── Modal ──────────────────────────────────────────────────────────
@@ -1344,6 +1410,7 @@ loadAdvisor();
 loadProposals();
 loadLeaderboard();
 loadTrades();
+loadReviews();
 loadMarketContext();
 loadGlobalMarkets();
 loadPortfolioChart('1m');
