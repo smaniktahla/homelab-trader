@@ -450,7 +450,7 @@
         <th class="sortable" onclick="sortLeaderboard('rsi')">RSI<span class="sort-arrow" id="arrow-rsi"></span></th>
         <th class="sortable" onclick="sortLeaderboard('buy_score')" title="Fast RSI-only universe scan score, not the real signal score">Buy Scan<span class="sort-arrow" id="arrow-buy_score"></span></th>
         <th class="sortable" onclick="sortLeaderboard('sell_score')" title="Fast RSI-only universe scan score, not the real signal score">Sell Scan<span class="sort-arrow" id="arrow-sell_score"></span></th>
-        <th class="sortable" onclick="sortLeaderboard('on_watchlist')">Watchlist<span class="sort-arrow" id="arrow-on_watchlist"></span></th>
+        <th class="sortable" onclick="sortLeaderboard('on_watchlist')">Position<span class="sort-arrow" id="arrow-on_watchlist"></span></th>
         <th class="sortable" onclick="sortLeaderboard('scanned_at')">Scanned<span class="sort-arrow" id="arrow-scanned_at"></span></th>
         <th></th>
       </tr></thead>
@@ -859,7 +859,7 @@ function renderLeaderboard() {
     <td style="color:${r.rsi < 35 ? '#3ecf6e' : r.rsi > 65 ? '#f75f5f' : '#ccc'}">${r.rsi ? fmt(r.rsi, 1) : '—'}</td>
     <td class="up">${r.buy_score > 0 ? scoreBar(r.buy_score, '#3ecf6e') : '—'}</td>
     <td class="down">${r.sell_score > 0 ? scoreBar(r.sell_score, '#f75f5f') : '—'}${heldSell ? ' <span style="color:#f75f5f;font-size:.7rem;font-weight:600">· HELD</span>' : ''}</td>
-    <td>${r.on_watchlist ? (r.pinned ? '📌 Pinned' : '✓ Watching') : ''}</td>
+    <td>${r.is_held ? `<strong>${fmt(r.held_qty, r.held_qty % 1 === 0 ? 0 : 4)} sh owned</strong>` : (r.on_watchlist ? (r.pinned ? '📌 Pinned' : '✓ Watching') : '')}</td>
     <td style="color:#555;font-size:.78rem">${r.scanned_at ? new Date(r.scanned_at).toLocaleTimeString() : '—'}</td>
     <td><button class="btn-sm btn-buy" onclick="openModal('${r.symbol}','buy')">Trade</button></td>
   </tr>`;
