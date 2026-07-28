@@ -676,6 +676,15 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
 
 @app.get("/api/leaderboard")
 def get_leaderboard(limit: int = 30, side: str = "both"):
+    # is_held flags rows where a sell-scan score is actually actionable --
+    # a sell signal for a symbol you don't hold can never become a real
+    # proposal (see check_alerts' no_position_held gate), so surfacing
+    # which sell rows correspond to real positions is what makes this list
+    # useful at a glance rather than just noise across the whole universe.
+    try:
+        held_symbols = {p["symbol"] for p in get_positions()}
+    except Exception as e:
+        held_symbols = set()
     with db() as conn, conn.cursor() as cur:
         if side == "buy":
             order_col = "buy_score"
@@ -695,7 +704,10 @@ def get_leaderboard(limit: int = 30, side: str = "both"):
             ORDER BY {order_col} DESC
             LIMIT %s
         """, (limit,))
-        return cur.fetchall()
+        rows = cur.fetchall()
+    for r in rows:
+        r["is_held"] = r["symbol"] in held_symbols
+    return rows
 
 @app.get("/api/market-context")
 def get_market_context():

@@ -830,17 +830,21 @@ function renderLeaderboard() {
     tbody.innerHTML = '<tr><td colspan="9" class="no-data">No signals yet — universe scan pending.</td></tr>';
     return;
   }
-  tbody.innerHTML = rows.map(r => `<tr>
+  tbody.innerHTML = rows.map(r => {
+    const heldSell = r.is_held && r.sell_score > 0;
+    const rowStyle = heldSell ? 'background:#2a1414;border-left:3px solid #f75f5f' : '';
+    return `<tr style="${rowStyle}">
     <td><a href="/symbol/${r.symbol}">${r.symbol}</a></td>
     <td style="color:#888;font-size:.8rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.company_name || ''}">${r.company_name || '—'}</td>
     <td>${fmtUSD(r.price)}</td>
     <td style="color:${r.rsi < 35 ? '#3ecf6e' : r.rsi > 65 ? '#f75f5f' : '#ccc'}">${r.rsi ? fmt(r.rsi, 1) : '—'}</td>
     <td class="up">${r.buy_score > 0 ? scoreBar(r.buy_score, '#3ecf6e') : '—'}</td>
-    <td class="down">${r.sell_score > 0 ? scoreBar(r.sell_score, '#f75f5f') : '—'}</td>
+    <td class="down">${r.sell_score > 0 ? scoreBar(r.sell_score, '#f75f5f') : '—'}${heldSell ? ' <span style="color:#f75f5f;font-size:.7rem;font-weight:600">· HELD</span>' : ''}</td>
     <td>${r.on_watchlist ? (r.pinned ? '📌 Pinned' : '✓ Watching') : ''}</td>
     <td style="color:#555;font-size:.78rem">${r.scanned_at ? new Date(r.scanned_at).toLocaleTimeString() : '—'}</td>
     <td><button class="btn-sm btn-buy" onclick="openModal('${r.symbol}','buy')">Trade</button></td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
 }
 
 async function loadLeaderboard() {
