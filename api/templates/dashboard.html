@@ -923,8 +923,11 @@ async function loadTrades() {
         const symbolCell = (grouped && i > 0)
           ? `<span style="color:#444">↳</span> <a href="/symbol/${t.symbol}">${t.symbol}</a>`
           : `<a href="/symbol/${t.symbol}">${t.symbol}</a>`;
+        const partialNote = (t.realized_qty != null && t.realized_qty < t.qty)
+          ? ` on ${fmt(t.realized_qty, t.realized_qty % 1 === 0 ? 0 : 4)}/${fmt(t.qty, t.qty % 1 === 0 ? 0 : 4)} sh*`
+          : '';
         const pnlBadge = (t.side === 'sell' && t.realized_pnl != null)
-          ? ` <span class="badge ${t.realized_pnl > 0 ? 'badge-win' : 'badge-loss'}">${t.realized_pnl > 0 ? 'WIN' : 'LOSS'} ${t.realized_pnl >= 0 ? '+' : ''}${fmtUSD(t.realized_pnl)} (${t.realized_pnl_pct >= 0 ? '+' : ''}${t.realized_pnl_pct}%)</span>`
+          ? ` <span class="badge ${t.realized_pnl > 0 ? 'badge-win' : 'badge-loss'}" ${partialNote ? `title="Cost basis only known for ${fmt(t.realized_qty,0)} of the ${fmt(t.qty,0)} shares sold — the rest were likely held before trade logging started"` : ''}>${t.realized_pnl > 0 ? 'WIN' : 'LOSS'} ${t.realized_pnl >= 0 ? '+' : ''}${fmtUSD(t.realized_pnl)} (${t.realized_pnl_pct >= 0 ? '+' : ''}${t.realized_pnl_pct}%)${partialNote}</span>`
           : '';
         return `<tr class="${rowClass}">
           <td style="color:#555">${new Date(t.traded_at).toLocaleString()}</td>

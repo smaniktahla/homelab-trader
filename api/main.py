@@ -245,7 +245,7 @@ def _realized_pnl_by_trade_id(cur):
             avg_cost = pos["total_cost"] / pos["qty"]
             sell_qty = min(qty, pos["qty"])  # guard against oversell/data gaps
             realized = sell_qty * (price - avg_cost)
-            pnl[t["id"]] = (round(realized, 2), round((price - avg_cost) / avg_cost * 100, 2))
+            pnl[t["id"]] = (round(realized, 2), round((price - avg_cost) / avg_cost * 100, 2), sell_qty)
             pos["qty"] -= sell_qty
             pos["total_cost"] -= sell_qty * avg_cost
     return pnl
@@ -263,6 +263,9 @@ def get_trades(limit: int = 200):
             realized = pnl_by_id.get(t["id"])
             t["realized_pnl"] = realized[0] if realized else None
             t["realized_pnl_pct"] = realized[1] if realized else None
+            # Cost basis is only known for part of the sale (e.g. shares held
+            # before trade logging started) when this is less than t["qty"].
+            t["realized_qty"] = realized[2] if realized else None
         return trades
 
 _PORTFOLIO_HISTORY_RANGE_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365, "3y": 1095, "5y": 1825}
