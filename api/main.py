@@ -803,6 +803,31 @@ def get_global_markets():
 
     return {"home_market": home_market, "markets": rows}
 
+@app.get("/api/search")
+def search_symbols(q: str = "", limit: int = 10):
+    """Symbol/company-name search for the dashboard search bar. Searches the
+    full universe table (~12k symbols, same one the leaderboard/universe
+    scanner already covers) rather than just the watchlist -- /symbol/{sym}
+    already works for any symbol via _backfill_thin_history, so search
+    shouldn't be artificially narrower than what's actually viewable."""
+    q = q.strip()
+    if not q:
+        return []
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT symbol, name, exchange, scannable,
+                   CASE
+                       WHEN symbol = UPPER(%(q)s) THEN 0
+                       WHEN symbol ILIKE %(prefix)s THEN 1
+                       ELSE 2
+                   END AS rank
+            FROM universe
+            WHERE symbol ILIKE %(prefix)s OR name ILIKE %(contains)s
+            ORDER BY rank, scannable DESC, symbol
+            LIMIT %(limit)s
+        """, {"q": q, "prefix": f"{q}%", "contains": f"%{q}%", "limit": limit})
+        return cur.fetchall()
+
 @app.get("/api/universe/stats")
 def get_universe_stats():
     with db() as conn, conn.cursor() as cur:

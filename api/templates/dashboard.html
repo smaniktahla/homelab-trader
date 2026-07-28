@@ -56,6 +56,7 @@
   .prop-actions { display: flex; gap: 8px; }
 
   /* Leaderboard */
+  .symbol-search-row:hover { background: #2a2d3a; }
   .leaderboard-wrap { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; overflow: hidden; }
   .lb-controls { display: flex; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #2a2d3a; align-items: center; }
   .lb-controls span { color: #555; font-size: .78rem; margin-left: auto; }
@@ -260,9 +261,15 @@
 </head>
 <body>
 <div class="wrap">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-    <h1>Invest Dashboard</h1>
-    <div style="display:flex;gap:8px;align-items:center">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;gap:20px">
+    <h1 style="white-space:nowrap">Invest Dashboard</h1>
+    <div id="symbol-search-wrap" style="position:relative;flex:1;max-width:360px">
+      <input id="symbol-search" type="text" placeholder="Search symbol or company…" autocomplete="off"
+        style="width:100%;background:#1a1d27;border:1px solid #2a2d3a;border-radius:6px;color:#e8eaf6;font-size:.85rem;padding:7px 12px;outline:none"
+        oninput="onSymbolSearchInput()" onkeydown="onSymbolSearchKeydown(event)" onfocus="if(symbolSearchResults.length) renderSymbolSearchResults()">
+      <div id="symbol-search-results" style="display:none;position:absolute;top:100%;left:0;right:0;margin-top:4px;background:#1a1d27;border:1px solid #2a2d3a;border-radius:6px;max-height:320px;overflow-y:auto;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,.4)"></div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;white-space:nowrap">
       <button onclick="resetProfile()" style="background:none;border:none;color:#444;font-size:.78rem;cursor:pointer;padding:4px 8px;border-radius:4px;" onmouseover="this.style.color='#888'" onmouseout="this.style.color='#444'">⚙ Reconfigure</button>
       <a href="/settings" style="color:#444;font-size:.78rem;text-decoration:none;padding:4px 8px;border-radius:4px;" onmouseover="this.style.color='#888'" onmouseout="this.style.color='#444'">⚙ Settings</a>
     </div>
@@ -1317,6 +1324,75 @@ async function loadGlobalMarkets() {
 }
 
 // ── Portfolio value chart ─────────────────────────────────────────
+// ── Symbol search ────────────────────────────────────────────────
+let symbolSearchResults = [];
+let symbolSearchActiveIdx = -1;
+let symbolSearchDebounce = null;
+
+function onSymbolSearchInput() {
+  const q = document.getElementById('symbol-search').value.trim();
+  clearTimeout(symbolSearchDebounce);
+  if (!q) { symbolSearchResults = []; renderSymbolSearchResults(); return; }
+  symbolSearchDebounce = setTimeout(async () => {
+    try {
+      symbolSearchResults = await fetch(`/api/search?q=${encodeURIComponent(q)}`).then(r => r.json());
+    } catch (e) { symbolSearchResults = []; }
+    symbolSearchActiveIdx = -1;
+    renderSymbolSearchResults();
+  }, 200);
+}
+
+function renderSymbolSearchResults() {
+  const box = document.getElementById('symbol-search-results');
+  if (!symbolSearchResults.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  // Hover highlighting uses CSS :hover (.symbol-search-row below), not a
+  // JS re-render on mouseenter -- re-rendering box.innerHTML on hover
+  // replaces the DOM node the mouse is over mid-interaction, which
+  // cancels the click (mousedown lands on one element, the swap happens
+  // before mouseup fires on it, so no click event ever completes).
+  // Keyboard nav still re-renders (only on keydown, not per-hover), so
+  // arrow-key highlighting is unaffected.
+  box.innerHTML = symbolSearchResults.map((r, i) => `
+    <div class="symbol-search-row" data-idx="${i}" onclick="goToSymbol('${r.symbol}')"
+      style="padding:8px 12px;cursor:pointer;display:flex;justify-content:space-between;gap:10px;align-items:center;${i === symbolSearchActiveIdx ? 'background:#2a2d3a' : ''}">
+      <span style="font-weight:600;color:#4f8ef7">${r.symbol}</span>
+      <span style="color:#888;font-size:.78rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;text-align:right">${r.name || ''}</span>
+    </div>`).join('');
+  box.style.display = 'block';
+}
+
+function onSymbolSearchKeydown(e) {
+  if (!symbolSearchResults.length) return;
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    symbolSearchActiveIdx = Math.min(symbolSearchActiveIdx + 1, symbolSearchResults.length - 1);
+    renderSymbolSearchResults();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    symbolSearchActiveIdx = Math.max(symbolSearchActiveIdx - 1, 0);
+    renderSymbolSearchResults();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const pick = symbolSearchResults[symbolSearchActiveIdx >= 0 ? symbolSearchActiveIdx : 0];
+    if (pick) goToSymbol(pick.symbol);
+  } else if (e.key === 'Escape') {
+    symbolSearchResults = [];
+    renderSymbolSearchResults();
+    document.getElementById('symbol-search').blur();
+  }
+}
+
+function goToSymbol(symbol) {
+  window.location.href = `/symbol/${symbol}`;
+}
+
+document.addEventListener('click', e => {
+  if (!document.getElementById('symbol-search-wrap').contains(e.target)) {
+    symbolSearchResults = [];
+    renderSymbolSearchResults();
+  }
+});
+
 let portfolioChart = null;
 let portfolioChartRange = '1m';
 
