@@ -622,8 +622,12 @@ function renderPositions() {
     const scoreBar = p.sellScore > 0
       ? `<div style="display:inline-block;width:${Math.round(p.sellScore * 0.6)}px;height:6px;background:#f75f5f;border-radius:3px;vertical-align:middle;margin-left:4px"></div>`
       : '—';
+    const pending = p.pending_orders && p.pending_orders.length ? p.pending_orders[0] : null;
+    const pendingBadge = pending
+      ? ` <span class="badge badge-pending" style="font-size:.68rem" title="${pending.qty}sh ${pending.side} order, status: ${pending.status} — placed ${pending.submitted_at ? new Date(pending.submitted_at).toLocaleString() : 'unknown'}">⏳ ${pending.side} pending</span>`
+      : '';
     return `<tr>
-      <td><a href="/symbol/${p.symbol}">${p.symbol}</a></td>
+      <td><a href="/symbol/${p.symbol}">${p.symbol}</a>${pendingBadge}</td>
       <td style="color:#888;font-size:.8rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.company_name || ''}">${p.company_name || '—'}</td>
       <td>${fmt(p.qty, p.qty % 1 === 0 ? 0 : 4)}</td>
       <td>${fmtUSD(p.avg_entry_price)}</td>

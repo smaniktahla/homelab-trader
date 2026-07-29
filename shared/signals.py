@@ -476,11 +476,31 @@ def _sector_cap_block_reason(sym, price, qty, sector_map, positions, portfolio_v
 
 
 def _open_sell_exists(conn, sym):
-    """Return True if an undecided sell proposal already exists for this symbol."""
+    """Return True if an undecided sell proposal already exists for this
+    symbol, OR an already-approved sell hasn't actually settled yet.
+
+    The second check matters: an approved proposal's resulting order can sit
+    unfilled at the broker for hours (e.g. submitted after-hours, queued for
+    next open) with decision='approved' the whole time -- not "undecided,"
+    so the first check alone misses it. Without this, check_symbol_exits
+    re-evaluates the same still-true thesis_complete/time_stop condition
+    every cycle and creates a fresh duplicate sell proposal for shares that
+    are already committed to an in-flight order (seen live 2026-07-29: HAS
+    got a second thesis_complete proposal while its first approved sell was
+    still sitting unfilled, and approving the duplicate failed against
+    Alpaca's qty_available with a confusing error since the position genuinely
+    is real, just already spoken for)."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT id FROM trade_proposals
             WHERE symbol=%s AND side='sell' AND decision IS NULL
+        """, (sym,))
+        if cur.fetchone() is not None:
+            return True
+        cur.execute("""
+            SELECT id FROM trades
+            WHERE symbol=%s AND side='sell'
+              AND status NOT IN ('filled', 'canceled', 'expired', 'rejected')
         """, (sym,))
         return cur.fetchone() is not None
 

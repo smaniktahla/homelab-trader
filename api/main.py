@@ -388,6 +388,23 @@ def get_positions():
         with db() as conn, conn.cursor() as cur:
             cur.execute("SELECT symbol, name FROM universe WHERE symbol = ANY(%s)", (symbols,))
             names = {r["symbol"]: r["name"] for r in cur.fetchall()}
+    # Alpaca's own open orders -- status=open covers everything non-terminal
+    # (new/accepted/pending_new/partially_filled/replaced). Surfaced per
+    # position so the UI can show "order pending" instead of silently
+    # letting a duplicate proposal fail against qty_available with a
+    # confusing error (see 2026-07-29 HAS incident: a thesis_complete sell
+    # sat unfilled for 12+ hours after-hours-queued, and nothing in the UI
+    # showed that until approving a second, duplicate proposal errored out).
+    try:
+        open_orders = alpaca("GET", "/v2/orders", params={"status": "open"})
+    except Exception:
+        open_orders = []
+    pending_by_symbol = {}
+    for o in open_orders:
+        pending_by_symbol.setdefault(o["symbol"], []).append({
+            "side": o["side"], "qty": float(o["qty"]), "status": o["status"],
+            "submitted_at": o.get("submitted_at"),
+        })
     return [{
         "symbol": p["symbol"],
         "company_name": names.get(p["symbol"]) or None,
@@ -399,6 +416,7 @@ def get_positions():
         "unrealized_pl": float(p["unrealized_pl"]),
         "unrealized_plpc": round(float(p["unrealized_plpc"]) * 100, 2),
         "side": p["side"],
+        "pending_orders": pending_by_symbol.get(p["symbol"], []),
     } for p in positions]
 
 def _total_trade_cost(cur):
