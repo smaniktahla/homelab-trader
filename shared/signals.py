@@ -813,3 +813,15 @@ def compute_signals(conn, symbols):
 
         except Exception as e:
             log.warning(f"Signals failed for {sym}: {e}")
+            # A DB constraint violation (or any error mid-transaction)
+            # poisons this connection until rolled back -- every subsequent
+            # statement on it fails with "current transaction is aborted,"
+            # silently breaking every symbol processed after this one in
+            # the same cycle. This is the exact mechanism behind the
+            # 2026-07-21 8-day silent outage (thesis_id NOT NULL
+            # violation). The per-symbol try/except looked like isolation
+            # but wasn't, since nothing ever cleared the poisoned state.
+            try:
+                conn.rollback()
+            except Exception:
+                pass

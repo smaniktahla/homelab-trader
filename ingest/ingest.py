@@ -1116,6 +1116,32 @@ if __name__ == "__main__":
 
         except Exception as e:
             log.error(f"Ingest cycle failed: {e}")
+            # Previously log-only -- the 2026-07-21 8-day outage was found
+            # by noticing the digest hadn't arrived, not by any alert. A
+            # fatal, unhandled cycle failure is exactly the case that
+            # deserves a push, not just a log line nobody is watching.
+            # Uses its own fresh connection (the one this cycle was using
+            # may be mid-poisoned-transaction) and throttles to once per 4h
+            # so a persistent failure doesn't spam every single cycle.
+            try:
+                alert_conn = get_db()
+                try:
+                    if not alert_throttled(alert_conn, "ingest_cycle_failed", hours=4):
+                        alert_cfg = get_app_settings(alert_conn)
+                        subject = "🔴 Ingest Cycle Failed"
+                        html = f"""
+                        <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:500px">
+                          <h2 style="color:#e74c3c;margin:0 0 12px">🔴 Ingest Cycle Failed</h2>
+                          <p>{e}</p>
+                          <p style="color:#888;margin-top:12px">Check <code>docker logs invest-ingest</code> on ubuntu-box for the full traceback. Repeated failures are throttled to one alert per 4 hours.</p>
+                        </div>"""
+                        wa_text = f"🔴 *Ingest cycle failed*: {e}\nCheck docker logs invest-ingest on ubuntu-box."
+                        send_notification(alert_cfg, subject, html, wa_text, "ingest cycle failure")
+                        mark_alert_sent(alert_conn, "ingest_cycle_failed")
+                finally:
+                    alert_conn.close()
+            except Exception as alert_e:
+                log.error(f"Failed to send ingest-cycle-failure alert: {alert_e}")
         finally:
             conn.close()
         log.info(f"Sleeping {INTERVAL_SECONDS}s")
