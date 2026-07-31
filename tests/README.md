@@ -20,8 +20,13 @@ truncated before it runs; config/reference tables (`signal_params`,
 `theses`, `app_settings`) are left as `schema.sql` seeded them once per
 session. See `tests/conftest.py` for exactly what's reset.
 
-`test_fixture_equivalence.py` additionally shells out to
-`git show main:shared/signals.py` to load the pre-PR-#1 version of the
-scoring module for comparison — it must be run from a checkout where
-`main` still has the pre-PR-#1 commit reachable (true for this branch;
-would need updating once this PR merges and history moves on).
+`test_fixture_equivalence.py` additionally shells out to `git show` to
+load the pre-PR-#1 version of the scoring module for comparison. It tries
+`main` first, then falls back to `origin/main` — a plain `git clone`
+only ever gets a local branch for whatever ref was checked out, so `main`
+itself is usually just a remote-tracking ref, not a local branch, and
+`git show main:...` fails outright on a fresh clone. Either way it needs
+the pre-PR-#1 commit reachable (true today; would need updating once this
+PR merges and history moves on far enough that `main`'s tip no longer
+predates it — at that point these two tests should be retired in favor of
+whatever the next behavior-preservation baseline is).

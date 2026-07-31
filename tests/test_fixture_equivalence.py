@@ -33,15 +33,37 @@ def _repo_root():
     return REPO_ROOT
 
 
+def _resolve_pre_pr1_ref():
+    """A plain `git clone` (as opposed to a full local dev checkout) only
+    ever gets a local branch for whatever ref was checked out — `main`
+    itself remains a remote-tracking ref (`origin/main`), not a local
+    branch, unless something explicitly checked it out too. `git show
+    main:...` then fails outright. Try both, in order, rather than assume
+    either exists."""
+    for ref in ("main", "origin/main"):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", ref],
+            cwd=_repo_root(), capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return ref
+    raise RuntimeError(
+        "Neither 'main' nor 'origin/main' resolves in this checkout — "
+        "can't locate the pre-PR#1 baseline for shared/signals.py."
+    )
+
+
 def _load_pre_pr1_signals_module():
-    """Exec `main`'s shared/signals.py (before this PR) as an isolated
-    module, distinct from the `signals` module already on sys.path (which
-    is the current, post-PR#1 file on disk). Both resolve their `from
-    earnings import ...` / `from circuit_breaker import ...` against the
-    same already-imported modules on sys.path, since those files are
-    unchanged by this PR — only signals.py itself differs."""
+    """Exec the pre-PR#1 shared/signals.py (from `main`/`origin/main`, see
+    _resolve_pre_pr1_ref) as an isolated module, distinct from the
+    `signals` module already on sys.path (which is the current, post-PR#1
+    file on disk). Both resolve their `from earnings import ...` / `from
+    circuit_breaker import ...` against the same already-imported modules
+    on sys.path, since those files are unchanged by this PR — only
+    signals.py itself differs."""
+    ref = _resolve_pre_pr1_ref()
     src = subprocess.run(
-        ["git", "show", "main:shared/signals.py"],
+        ["git", "show", f"{ref}:shared/signals.py"],
         cwd=_repo_root(), capture_output=True, text=True, check=True,
     ).stdout
     module = types.ModuleType("signals_pre_pr1")
