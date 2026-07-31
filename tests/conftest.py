@@ -9,7 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "shared"))
 
 TEST_DSN = os.environ.get(
-    "TEST_DATABASE_URL", "postgresql://invest:investpass@localhost:15432/invest"
+    "TEST_DATABASE_URL", "postgresql://invest_test:not_a_real_credential@localhost:15432/invest_test"
 )
 
 # Tables whose rows are per-cycle/per-signal state and must be wiped between

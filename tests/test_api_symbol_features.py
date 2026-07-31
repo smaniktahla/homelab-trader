@@ -16,9 +16,9 @@ import pytest
 @pytest.fixture
 def api_client(_schema_ready, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", os.environ.get(
-        "TEST_DATABASE_URL", "postgresql://invest:investpass@localhost:15432/invest"))
-    monkeypatch.setenv("INVEST_USER", "invest")
-    monkeypatch.setenv("INVEST_PASS", "testpass")
+        "TEST_DATABASE_URL", "postgresql://invest_test:not_a_real_credential@localhost:15432/invest_test"))
+    monkeypatch.setenv("INVEST_USER", "test_invest_user")
+    monkeypatch.setenv("INVEST_PASS", "test_invest_pass_not_real")
 
     import pathlib
     api_dir = str(pathlib.Path(__file__).resolve().parent.parent / "api")
@@ -35,7 +35,7 @@ def api_client(_schema_ready, monkeypatch):
 
 
 def test_symbol_features_no_snapshot_returns_null_sides(api_client, conn):
-    r = api_client.get("/api/symbol-features/AAPL", auth=("invest", "testpass"))
+    r = api_client.get("/api/symbol-features/AAPL", auth=("test_invest_user", "test_invest_pass_not_real"))
     assert r.status_code == 200
     body = r.json()
     assert body == {"symbol": "AAPL", "buy": None, "sell": None}
@@ -52,7 +52,7 @@ def test_symbol_features_live_technical_only(api_client, conn):
         """)
     conn.commit()
 
-    r = api_client.get("/api/symbol-features/AAPL", auth=("invest", "testpass"))
+    r = api_client.get("/api/symbol-features/AAPL", auth=("test_invest_user", "test_invest_pass_not_real"))
     assert r.status_code == 200
     buy = r.json()["buy"]
 

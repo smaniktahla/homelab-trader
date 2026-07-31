@@ -117,6 +117,35 @@ def _reset_dynamic_tables(conn):
     conn.commit()
 
 
+def _set_signal_param(conn, key, value, description=""):
+    """signal_params is config/reference data, not truncated by
+    _reset_dynamic_tables (see tests/conftest.py's RESET_TABLES), so it can
+    leak between tests in the same session. Both fixture tests below set
+    every key they depend on explicitly, rather than relying on whatever a
+    previous test happened to leave behind — this makes them order-
+    independent regardless of pytest's collection/execution order."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO signal_params (key, value, description) VALUES (%s, %s, %s)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """, (key, value, description))
+    conn.commit()
+
+
+def _prepare_modules(monkeypatch, alpaca_base):
+    """Load both the pre-PR#1 (from `main`) and post-PR#1 (current on disk)
+    signals modules, pinned to the same fake Alpaca base URL regardless of
+    when each module was first imported in this test session."""
+    monkeypatch.setenv("ALPACA_BASE_URL", alpaca_base)
+    pre = _load_pre_pr1_signals_module()
+    import signals as post  # the current, post-PR#1 module already on sys.path
+
+    for mod in (pre, post):
+        mod.ALPACA_BASE = alpaca_base
+        mod.ALPACA_HEADERS = {"APCA-API-KEY-ID": "", "APCA-API-SECRET-KEY": ""}
+    return pre, post
+
+
 def _mock_http(m, alpaca_base, aapl_closes):
     m.get(f"https://query2.finance.yahoo.com/v8/finance/chart/AAPL",
           json=_make_yahoo_chart_json(aapl_closes))
@@ -157,35 +186,77 @@ def _run_compute_signals(module, conn, alpaca_base, aapl_closes):
         module.compute_signals(conn, ["AAPL"])
 
 
-def test_proposal_behavior_unchanged_by_pr1(conn, monkeypatch):
+def test_blocked_below_threshold_path_unchanged_by_pr1(conn, monkeypatch):
+    """Deterministic BUY signal that clears score_log_min (so it's written
+    to `signals`/`signal_outcomes`) but stays below score_proposal_min (so
+    it's blocked, never reaching trade_proposals). This is the path where
+    feature-snapshot persistence runs and the signal is still blocked
+    immediately after — the scenario your review flagged as needing its own
+    coverage, distinct from the proposed path below, since the new feature
+    persistence commits happen before the existing gate cascade runs
+    either way."""
     alpaca_base = "https://fake-alpaca.test"
-    monkeypatch.setenv("ALPACA_BASE_URL", alpaca_base)
-
     aapl_closes = _aapl_closes()
-
-    pre = _load_pre_pr1_signals_module()
-    import signals as post  # the current, post-PR#1 module already on sys.path
-
-    # Both modules read ALPACA_BASE at *import* time into a module-level
-    # constant; the pre module was just exec'd after the env var was set
-    # above, so it already captured the right value. The post module may
-    # have been imported earlier in the test session (before this env var
-    # was set) by another test module, so pin its constant explicitly to
-    # keep the comparison honest without relying on import order.
-    pre.ALPACA_BASE = alpaca_base
-    post.ALPACA_BASE = alpaca_base
-    pre.ALPACA_HEADERS = {"APCA-API-KEY-ID": "", "APCA-API-SECRET-KEY": ""}
-    post.ALPACA_HEADERS = {"APCA-API-KEY-ID": "", "APCA-API-SECRET-KEY": ""}
+    pre, post = _prepare_modules(monkeypatch, alpaca_base)
 
     _reset_dynamic_tables(conn)
+    _set_signal_param(conn, "score_proposal_min", 65, "default — this scenario must stay blocked")
     _seed_fixture(conn, aapl_closes)
     _run_compute_signals(pre, conn, alpaca_base, aapl_closes)
     pre_state = _snapshot_state(conn)
 
     _reset_dynamic_tables(conn)
+    _set_signal_param(conn, "score_proposal_min", 65, "default — this scenario must stay blocked")
     _seed_fixture(conn, aapl_closes)
     _run_compute_signals(post, conn, alpaca_base, aapl_closes)
     post_state = _snapshot_state(conn)
 
     assert pre_state["signals"], "fixture must actually produce at least one signal to be meaningful"
+    assert not pre_state["proposals"], "this scenario is specifically the blocked path — tighten the fixture if it starts proposing"
+    assert pre_state["outcomes"][0][12] is not None, "expected a block_reason to be set"  # index 12 = block_reason
+    assert pre_state == post_state
+
+
+def test_proposal_and_sizing_path_unchanged_by_pr1(conn, monkeypatch):
+    """Same deterministic BUY signal, but with score_proposal_min lowered
+    in the frozen fixture so it clears the threshold and proceeds through
+    the full gate cascade: duplicate-proposal check, earnings blackout,
+    circuit breaker, buy cooldown, max-open-positions, calc_buy_qty sizing,
+    sector cap, and proposal insertion. No OHLC contortion needed — same
+    price data as the blocked-path test, just a lower bar to clear, which
+    is exactly what score_proposal_min is for."""
+    alpaca_base = "https://fake-alpaca.test"
+    aapl_closes = _aapl_closes()
+    pre, post = _prepare_modules(monkeypatch, alpaca_base)
+
+    def _seed_low_threshold(conn):
+        _seed_fixture(conn, aapl_closes)
+        _set_signal_param(conn, "score_proposal_min", 10, "lowered for this fixture only")
+        # Explicit, deterministic values for every other gate this scenario
+        # must clear — not relying on schema.sql's seeded defaults staying
+        # whatever they happen to be.
+        _set_signal_param(conn, "max_open_positions", 5)
+        _set_signal_param(conn, "trade_allocation_pct", 0.05)
+        _set_signal_param(conn, "max_position_pct", 0.20)
+        _set_signal_param(conn, "buy_cooldown_days", 2)
+        _set_signal_param(conn, "earnings_blackout_days", 3)
+        _set_signal_param(conn, "circuit_breaker_drawdown_pct", 0.15)
+
+    _reset_dynamic_tables(conn)
+    _seed_low_threshold(conn)
+    _run_compute_signals(pre, conn, alpaca_base, aapl_closes)
+    pre_state = _snapshot_state(conn)
+
+    _reset_dynamic_tables(conn)
+    _seed_low_threshold(conn)
+    _run_compute_signals(post, conn, alpaca_base, aapl_closes)
+    post_state = _snapshot_state(conn)
+
+    assert pre_state["signals"], "fixture must actually produce at least one signal to be meaningful"
+    assert pre_state["proposals"], "this scenario is specifically the proposed path — the lowered threshold should let it through"
+    proposal = pre_state["proposals"][0]
+    assert proposal[0:2] == ("AAPL", "buy")   # symbol, side
+    assert proposal[2] > 0                     # qty from calc_buy_qty sizing
+    assert proposal[6] is None                 # decision — still pending human approval
+    assert pre_state["outcomes"][0][11] == "proposed"  # index 11 = proposal_status
     assert pre_state == post_state

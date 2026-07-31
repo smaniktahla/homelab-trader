@@ -6,11 +6,11 @@ code, which is the whole point of it. There's no mocked-DB layer.
 
 ```bash
 docker run -d --name invest_test_pg \
-  -e POSTGRES_USER=invest -e POSTGRES_PASSWORD=investpass -e POSTGRES_DB=invest \
+  -e POSTGRES_USER=invest_test -e POSTGRES_PASSWORD=not_a_real_credential -e POSTGRES_DB=invest_test \
   -p 15432:5432 postgres:16-alpine
 
 pip install -r tests/requirements.txt
-TEST_DATABASE_URL="postgresql://invest:investpass@localhost:15432/invest" \
+TEST_DATABASE_URL="postgresql://invest_test:not_a_real_credential@localhost:15432/invest_test" \
   python3 -m pytest tests/ -q
 ```
 
