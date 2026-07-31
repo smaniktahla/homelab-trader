@@ -1,0 +1,8 @@
+# Test-only dependencies. Not installed in the ingest/api container images —
+# tests run against a disposable Postgres (see tests/README.md), not inside
+# either production Docker image.
+pytest==8.3.4
+psycopg2-binary==2.9.9
+requests-mock==1.12.1
+fastapi==0.115.6
+httpx==0.28.1
