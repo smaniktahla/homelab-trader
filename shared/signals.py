@@ -11,7 +11,8 @@ import requests
 
 from earnings import earnings_blackout_reason
 from circuit_breaker import record_snapshot_and_check
-from feature_store import record_symbol_feature_snapshot, attach_feature_snapshot
+from feature_store import record_symbol_feature_snapshot, attach_feature_snapshot, attach_fundamental_score
+from fundamentals import compute_fundamental_score
 
 log = logging.getLogger(__name__)
 
@@ -747,6 +748,21 @@ def compute_signals(conn, symbols):
                 snap_id = record_symbol_feature_snapshot(conn, sym, side, generated_at, score)
                 if snap_id is not None:
                     attach_feature_snapshot(conn, outcome_id, snap_id, score)
+
+                # Shadow fundamental score (PR #2) — same unconditional,
+                # side-effecting-only placement as the technical snapshot
+                # above. compute_fundamental_score() is a plain DB read
+                # (no network call), but wrapped here anyway rather than
+                # trusted to never raise, so a read failure can't do
+                # anything worse than skip this one component for this one
+                # signal — never alters score/gating/proposal below.
+                try:
+                    fundamental_score = compute_fundamental_score(conn, sym, generated_at)
+                except Exception as e:
+                    log.warning(f"Fundamental score lookup failed for {sym}: {e}")
+                    fundamental_score = None
+                if fundamental_score is not None:
+                    attach_fundamental_score(conn, snap_id, outcome_id, fundamental_score)
 
                 if score < effective_proposal_min:
                     if score_mod > 0:

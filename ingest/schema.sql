@@ -416,3 +416,37 @@ ALTER TABLE signal_outcomes
     ADD COLUMN IF NOT EXISTS model_version      TEXT,
     ADD COLUMN IF NOT EXISTS component_weights  JSONB,
     ADD COLUMN IF NOT EXISTS vetoes             JSONB;
+
+-- Fundamentals (PR #2 of the multi-source signal integration -- see
+-- docs/signal-component-architecture.md and docs/fundamentals-collector.md).
+-- Raw, append-only observations from SEC EDGAR XBRL companyfacts, kept
+-- deliberately separate from the derived fundamental_score written into
+-- symbol_features/signal_outcomes. accepted_at is the timestamp a
+-- point-in-time query must filter on -- a backtest (or a live signal
+-- generated at time T) may only use a fact whose accepted_at <= T,
+-- regardless of which fiscal period the fact describes or when it was
+-- ingested into this table. Never overwrite an existing row: a metric can
+-- be legitimately restated in a later filing, which must show up as a
+-- SECOND row (new accession_number), not a mutation of the first --
+-- history must stay reconstructable exactly as it looked at any past
+-- accepted_at, not just as it looks now.
+CREATE TABLE IF NOT EXISTS fundamental_facts (
+    id                  BIGSERIAL PRIMARY KEY,
+    symbol              TEXT NOT NULL,
+    metric              TEXT NOT NULL,          -- e.g. 'Revenues', 'GrossProfit', 'NetIncomeLoss' (us-gaap XBRL tag name, unmodified)
+    value               NUMERIC,
+    unit                TEXT,                    -- e.g. 'USD'
+    fiscal_period       TEXT,                    -- e.g. 'Q2-2026', 'FY2025'
+    period_start        DATE,
+    period_end          DATE,
+    filed_at            TIMESTAMPTZ,
+    accepted_at         TIMESTAMPTZ,             -- point-in-time filter column -- see comment above
+    form_type           TEXT,                    -- '10-Q' | '10-K' | ...
+    accession_number    TEXT,                    -- SEC's own filing identifier -- part of the natural key
+    source              TEXT NOT NULL DEFAULT 'sec_edgar',
+    ingested_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (symbol, metric, fiscal_period, accession_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fundamental_facts_symbol_metric_accepted
+    ON fundamental_facts (symbol, metric, accepted_at DESC);
