@@ -633,7 +633,11 @@ async function loadPerfSummary() {
       + perfStat('Realized P&amp;L', `<span class="${pnlClass(s.realized_pnl)}">${fmtUSD(s.realized_pnl)}</span>`)
       + perfStat('Unrealized P&amp;L', `<span class="${pnlClass(s.unrealized_pnl)}">${fmtUSD(s.unrealized_pnl)}</span>`)
       + perfStat('Total P&amp;L', `<span class="${pnlClass(s.total_pnl)}">${fmtUSD(s.total_pnl)}</span>`)
-      + perfStat('Capital Deployed', fmtUSD(s.capital_deployed))
+      // "Capital deployed" = sum of every entry trade's notional across this
+      // symbol's whole history, NOT peak concurrent capital or an average —
+      // labeled explicitly so it doesn't read as a denominator for "return
+      // on capital" (total_pnl / capital_deployed would NOT be a valid ROI).
+      + perfStat('Capital Deployed', fmtUSD(s.capital_deployed), 'sum of all entry notionals, not peak/average concurrent capital')
       + `</div></div>`;
 
     html += `<div class="perf-group"><div class="perf-grid">`
@@ -649,15 +653,26 @@ async function loadPerfSummary() {
                   s.worst_trip ? fmtPct(s.worst_trip.return_pct, 2) : '')
       + `</div></div>`;
 
+    // Showing the raw dollar figures alongside each % is deliberate: a bare
+    // "132%" reads as a bug without the arithmetic that produced it.
+    const grossSub = s.portfolio_gross_profit_total
+      ? `${fmtUSD(s.symbol_gross_profit)} / ${fmtUSD(s.portfolio_gross_profit_total)} portfolio gross profit`
+      : 'share of all winning trades\' P&L, portfolio-wide';
+    const netSub = s.portfolio_net_pnl_total
+      ? `${fmtUSD(s.symbol_net_pnl)} / ${fmtUSD(s.portfolio_net_pnl_total)} portfolio net P&L — can exceed 100% or go negative`
+      : 'can exceed 100% or be negative — other symbols\' results shift this';
+
     html += `<div class="perf-group"><div class="perf-grid">`
-      + perfStat('Contribution to Gross Gains', s.contribution_to_gross_gains_pct != null ? `${s.contribution_to_gross_gains_pct}%` : '—',
-                  'share of all winning trades\' P&L, portfolio-wide')
-      + perfStat('Contribution to Net P&amp;L', s.contribution_to_net_pnl_pct != null ? `${s.contribution_to_net_pnl_pct}%` : '—',
-                  'can exceed 100% or be negative — other symbols\' results shift this')
+      + perfStat('Contribution to Gross Gains', s.contribution_to_gross_gains_pct != null ? `${s.contribution_to_gross_gains_pct}%` : '—', grossSub)
+      + perfStat('Contribution to Net P&amp;L', s.contribution_to_net_pnl_pct != null ? `${s.contribution_to_net_pnl_pct}%` : '—', netSub)
       + `</div></div>`;
 
-    if (s.data_quality_note) {
-      html += `<div class="perf-note">⚠ ${s.data_quality_note}</div>`;
+    if (s.methodology_status === 'partial') {
+      html += `<div class="perf-note">⚠ Reconstruction is partial for this symbol: ${s.unmatched_sell_qty} share(s) sold could not be matched to any locally-recorded buy (a pre-ledger broker holding, or a data gap) — realized P&amp;L above reflects only the locally-attributable portion, not the full history.</div>`;
+    }
+
+    if (s.reconciliation && s.reconciliation.status !== 'match') {
+      html += `<div class="perf-note">⚠ ${s.reconciliation.detail} <span style="color:#555">(ledger: ${s.reconciliation.ledger_status}, broker: ${s.reconciliation.broker_status})</span></div>`;
     }
 
     card.innerHTML = html;

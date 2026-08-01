@@ -211,5 +211,125 @@ def test_symbol_summary_flags_qty_mismatch_between_ledger_and_broker():
     live_position = {"qty": "15", "avg_entry_price": "100.0", "current_price": "100.0",
                       "unrealized_pl": "0.0", "market_value": "1500.0"}
     summary = rt.symbol_summary("AAPL", result, totals, live_position=live_position)
-    assert summary["data_quality_note"] is not None
-    assert "15" in summary["data_quality_note"]
+    recon = summary["reconciliation"]
+    assert recon["ledger_status"] == "open"
+    assert recon["broker_status"] == "open"
+    assert recon["status"] == "qty_mismatch"
+    assert recon["detail"] is not None
+    assert "15" in recon["detail"]
+
+
+def test_reconciliation_match_when_both_flat():
+    result = rt.reconstruct([])
+    totals = rt.portfolio_totals(result)
+    summary = rt.symbol_summary("GOOG", result, totals, live_position=None)
+    assert summary["reconciliation"] == {
+        "ledger_status": "flat", "broker_status": "flat", "status": "match", "detail": None,
+    }
+
+
+def test_reconciliation_ledger_only():
+    trades = [_t(1, "AAPL", "buy", 10, 100.0, traded_at=_day(0))]
+    result = rt.reconstruct(trades)
+    totals = rt.portfolio_totals(result)
+    summary = rt.symbol_summary("AAPL", result, totals, live_position=None)
+    recon = summary["reconciliation"]
+    assert recon["ledger_status"] == "open"
+    assert recon["broker_status"] == "flat"
+    assert recon["status"] == "ledger_only"
+
+
+def test_reconciliation_broker_only():
+    result = rt.reconstruct([])  # AAPL never traded locally at all
+    totals = rt.portfolio_totals(result)
+    live_position = {"qty": "10", "avg_entry_price": "100.0", "current_price": "110.0",
+                      "unrealized_pl": "100.0", "market_value": "1100.0"}
+    summary = rt.symbol_summary("AAPL", result, totals, live_position=live_position)
+    recon = summary["reconciliation"]
+    assert recon["ledger_status"] == "flat"
+    assert recon["broker_status"] == "open"
+    assert recon["status"] == "broker_only"
+
+
+def test_unmatched_sell_qty_tracked_and_flags_partial_methodology():
+    trades = [
+        _t(1, "AAPL", "buy", 5, 100.0, traded_at=_day(0)),
+        _t(2, "AAPL", "sell", 25, 110.0, traded_at=_day(3)),  # 5 matched, 20 unmatched
+    ]
+    result = rt.reconstruct(trades)
+    totals = rt.portfolio_totals(result)
+    summary = rt.symbol_summary("AAPL", result, totals, live_position=None)
+    assert summary["unmatched_sell_qty"] == 20.0
+    assert summary["methodology_status"] == "partial"
+
+
+def test_unmatched_sell_qty_zero_when_fully_matched():
+    trades = [
+        _t(1, "AAPL", "buy", 10, 100.0, traded_at=_day(0)),
+        _t(2, "AAPL", "sell", 10, 110.0, traded_at=_day(3)),
+    ]
+    result = rt.reconstruct(trades)
+    totals = rt.portfolio_totals(result)
+    summary = rt.symbol_summary("AAPL", result, totals, live_position=None)
+    assert summary["unmatched_sell_qty"] == 0.0
+    assert summary["methodology_status"] == "complete"
+
+
+def test_sell_with_nothing_open_counts_as_fully_unmatched():
+    trades = [_t(1, "AAPL", "sell", 10, 100.0, traded_at=_day(0))]
+    result = rt.reconstruct(trades)
+    totals = rt.portfolio_totals(result)
+    summary = rt.symbol_summary("AAPL", result, totals, live_position=None)
+    assert summary["unmatched_sell_qty"] == 10.0
+    assert summary["methodology_status"] == "partial"
+
+
+def test_capital_deployed_is_labeled_as_sum_of_entries():
+    trades = [
+        _t(1, "AAPL", "buy", 10, 100.0, traded_at=_day(0)),
+        _t(2, "AAPL", "sell", 10, 90.0, traded_at=_day(3)),
+        _t(3, "AAPL", "buy", 5, 95.0, traded_at=_day(10)),
+    ]
+    result = rt.reconstruct(trades)
+    totals = rt.portfolio_totals(result)
+    summary = rt.symbol_summary("AAPL", result, totals, live_position=None)
+    # sum of entry notionals: 10*100 (closed trip) + 5*95 (still-open episode)
+    assert summary["capital_deployed"] == 1475.0
+    assert summary["capital_deployed_methodology"] == "sum_of_entry_notionals"
+
+
+def test_return_pct_after_pyramiding_uses_total_allocated_entry_cost():
+    """return_pct must be net P&L / total entry notional (sum of qty*price
+    across every buy in the trip), never net P&L / final average price --
+    the latter isn't a coherent denominator once a position has been added
+    to more than once."""
+    trades = [
+        _t(1, "AAPL", "buy", 10, 100.0, traded_at=_day(0)),   # $1000
+        _t(2, "AAPL", "buy", 10, 120.0, traded_at=_day(2)),   # $1200, avg cost now 110
+        _t(3, "AAPL", "sell", 20, 130.0, traded_at=_day(10)), # net pnl = (130-110)*20 = 400
+    ]
+    result = rt.reconstruct(trades)
+    trip = result["AAPL"]["round_trips"][0]
+    total_entry_notional = 1000.0 + 1200.0
+    assert trip.entry_notional == total_entry_notional
+    assert trip.net_pnl == 400.0
+    assert trip.return_pct == round(400.0 / total_entry_notional * 100, 2)
+    # explicitly NOT net_pnl / final avg price (110) or anything price-based
+    wrong_denominator_result = round(400.0 / 110 * 100, 2)
+    assert trip.return_pct != wrong_denominator_result
+
+
+def test_contribution_response_includes_raw_denominators():
+    trades = [
+        _t(1, "AAPL", "buy", 10, 100.0, traded_at=_day(0)),
+        _t(2, "AAPL", "sell", 10, 110.0, traded_at=_day(5)),   # +100
+        _t(3, "MSFT", "buy", 10, 200.0, traded_at=_day(0)),
+        _t(4, "MSFT", "sell", 10, 180.0, traded_at=_day(5)),   # -200
+    ]
+    result = rt.reconstruct(trades)
+    totals = rt.portfolio_totals(result)
+    contrib = rt.symbol_contribution("AAPL", result, totals)
+    assert contrib["symbol_gross_profit"] == 100.0
+    assert contrib["portfolio_gross_profit_total"] == 100.0
+    assert contrib["symbol_net_pnl"] == 100.0
+    assert contrib["portfolio_net_pnl_total"] == -100.0

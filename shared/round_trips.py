@@ -72,9 +72,14 @@ def reconstruct(trade_rows):
     never a limited/paginated slice, so a round trip's entry is never missed
     just because it falls outside whatever window a UI happens to display).
 
-    Returns {symbol: {"round_trips": [RoundTrip, ...], "open_episode": OpenEpisode | None}}.
-    round_trips is oldest -> newest. A symbol with qty back at exactly zero
-    at the end of the ledger has open_episode=None.
+    Returns {symbol: {"round_trips": [RoundTrip, ...], "open_episode": OpenEpisode | None,
+    "unmatched_sell_qty": float}}. round_trips is oldest -> newest. A symbol
+    with qty back at exactly zero at the end of the ledger has
+    open_episode=None. unmatched_sell_qty is the lifetime total of sell
+    quantity this symbol has that could not be matched to any locally-known
+    entry (pre-ledger broker holdings, data gaps) -- nonzero here means
+    realized P&L for that symbol is only the locally-attributable portion,
+    not necessarily complete. See symbol_summary()'s methodology_status.
     """
     state = {}  # symbol -> running walk state
     result = {}
@@ -86,6 +91,10 @@ def reconstruct(trade_rows):
             "opened_at": None, "entry_notional": 0.0, "entry_qty_total": 0.0,
             "entry_cost_total": 0.0, "sold_qty_so_far": 0.0,
             "realized_before_costs": 0.0, "exit_cost_total": 0.0,
+            # Lifetime tally for this symbol, NOT reset when an episode
+            # flushes/restarts (unlike everything else in this dict) --
+            # see the "unmatched sell" comment below.
+            "unmatched_sell_qty": 0.0,
         })
 
     def _prorated_entry_cost(s):
@@ -151,6 +160,9 @@ def reconstruct(trade_rows):
         elif t["side"] == "sell" and s["qty"] > _EPSILON:
             avg_cost = s["total_cost_basis"] / s["qty"]
             sell_qty = min(qty, s["qty"])  # guard against oversell/data gaps, same as _realized_pnl_by_trade_id
+            unmatched = qty - sell_qty     # the part of this sell that exceeds locally-known open qty
+            if unmatched > _EPSILON:
+                s["unmatched_sell_qty"] += unmatched
             realized = sell_qty * (price - avg_cost)
             s["realized_before_costs"] += realized
             s["exit_cost_total"] += cost
@@ -163,15 +175,23 @@ def reconstruct(trade_rows):
                 _flush_round_trip(symbol, s, closed_at=t["traded_at"])
                 s["qty"] = 0.0
                 s["total_cost_basis"] = 0.0
-        # a sell while s["qty"] <= 0 (nothing open locally -- e.g. a
-        # pre-ledger broker holding) is silently ignored by this
-        # methodology; it has no entry to attribute P&L against. This is a
-        # known, documented limitation of average-cost reconstruction, not
-        # a bug -- position_lifecycles' explicit data_quality_flags is the
-        # real fix, not something this stand-in module should approximate.
+
+        elif t["side"] == "sell":
+            # Nothing open locally at all (s["qty"] <= 0) -- e.g. a
+            # pre-ledger broker holding sold in full, or an oversell that
+            # already zeroed the local ledger out. Silently dropping this
+            # (the prior behavior) let realized P&L look complete when it
+            # was only ever the locally-attributable portion -- now
+            # tallied into unmatched_sell_qty so callers can flag it,
+            # rather than skip it invisibly. This is a known, documented
+            # limitation of average-cost reconstruction, not a bug --
+            # position_lifecycles' explicit data_quality_flags is the real
+            # fix, not something this stand-in module should approximate.
+            s["unmatched_sell_qty"] += qty
 
     for symbol, s in state.items():
         result.setdefault(symbol, {"round_trips": [], "open_episode": None})
+        result[symbol]["unmatched_sell_qty"] = round(s["unmatched_sell_qty"], 6)
         if s["qty"] > _EPSILON:
             partial_cost = _prorated_entry_cost(s) + s["exit_cost_total"]
             result[symbol]["open_episode"] = OpenEpisode(
@@ -220,7 +240,12 @@ def symbol_contribution(symbol, reconstruction, totals):
     round trips, as a % of portfolio net_pnl_total. Can legitimately exceed
     100% or be negative -- documented explicitly, not a bug, when other
     symbols' losses (or gains) move the shared denominator. None only when
-    net_pnl_total is exactly 0 (can't express a share of zero)."""
+    net_pnl_total is exactly 0 (can't express a share of zero).
+
+    The raw numerator/denominator dollar figures are included alongside
+    both percentages specifically so a UI can show its work (e.g. "132% =
+    $650 / $493") -- a bare "132%" reads as a bug without the arithmetic
+    next to it."""
     data = reconstruction.get(symbol, {"round_trips": []})
     symbol_gross_profit = sum(rt.net_pnl for rt in data["round_trips"] if rt.net_pnl > 0)
     symbol_net_pnl = sum(rt.net_pnl for rt in data["round_trips"])
@@ -236,6 +261,10 @@ def symbol_contribution(symbol, reconstruction, totals):
     return {
         "contribution_to_gross_gains_pct": contribution_to_gross_gains_pct,
         "contribution_to_net_pnl_pct": contribution_to_net_pnl_pct,
+        "symbol_gross_profit": round(symbol_gross_profit, 2),
+        "portfolio_gross_profit_total": totals["gross_profit_total"],
+        "symbol_net_pnl": round(symbol_net_pnl, 2),
+        "portfolio_net_pnl_total": totals["net_pnl_total"],
     }
 
 
@@ -259,15 +288,22 @@ def symbol_summary(symbol, reconstruction, totals, live_position=None):
     walk would risk a second, potentially-drifting answer to the same
     question.
     """
-    data = reconstruction.get(symbol, {"round_trips": [], "open_episode": None})
+    data = reconstruction.get(symbol, {"round_trips": [], "open_episode": None, "unmatched_sell_qty": 0.0})
     round_trips = data["round_trips"]
     open_episode = data["open_episode"]
+    unmatched_sell_qty = data.get("unmatched_sell_qty", 0.0)
     n = len(round_trips)
 
     wins = [rt for rt in round_trips if rt.net_pnl > 0]
     losses = [rt for rt in round_trips if rt.net_pnl < 0]
     breakeven = [rt for rt in round_trips if rt.net_pnl == 0]
 
+    # return_pct on each RoundTrip is net P&L / total allocated entry cost
+    # (entry_notional -- the sum of qty*price across every buy in that
+    # round trip, pyramided or not), never net P&L / final average price.
+    # The latter isn't a coherent denominator once a position has been
+    # added to more than once; see RoundTrip.return_pct's own definition
+    # in _flush_round_trip above.
     returns = [rt.return_pct for rt in round_trips if rt.return_pct is not None]
     best_trip = max(round_trips, key=lambda rt: rt.net_pnl) if round_trips else None
     worst_trip = min(round_trips, key=lambda rt: rt.net_pnl) if round_trips else None
@@ -278,30 +314,29 @@ def symbol_summary(symbol, reconstruction, totals, live_position=None):
 
     unrealized_pnl = float(live_position["unrealized_pl"]) if live_position else 0.0
 
+    # "Capital deployed" here means the SUM of every entry trade's notional
+    # across this symbol's whole history (completed round trips + the
+    # currently open episode, if any) -- NOT peak concurrent capital,
+    # NOT average capital held over time, and NOT the cost basis of only
+    # the shares that have since been sold. A symbol pyramided into and
+    # traded repeatedly over years will show a capital_deployed figure far
+    # larger than any single day's actual dollar exposure. Do not divide
+    # total_pnl by this figure and call it "return on capital" -- that
+    # would conflate "money that passed through this symbol over time"
+    # with "money actually at risk at any one moment."
     capital_deployed = sum(rt.entry_notional for rt in round_trips)
     capital_deployed += open_episode.entry_notional if open_episode else 0.0
 
     contribution = symbol_contribution(symbol, reconstruction, totals)
+    reconciliation = _reconciliation_status(open_episode, live_position)
 
-    data_quality_note = None
-    if open_episode and live_position:
-        qty_diff = abs(open_episode.reconstructed_qty - float(live_position["qty"]))
-        if qty_diff > 1e-4:
-            data_quality_note = (
-                f"Local ledger reconstruction shows {open_episode.reconstructed_qty} shares open, "
-                f"but the broker reports {live_position['qty']} — some fills (e.g. a pre-ledger "
-                f"broker holding, or a trade placed outside this app) aren't reflected in the "
-                f"round-trip history below."
-            )
-    elif open_episode and not live_position:
-        data_quality_note = (
-            "Local ledger reconstruction believes a position is still open, but the broker reports "
-            "none — likely a manual close outside this app."
-        )
+    methodology_status = "partial" if unmatched_sell_qty > 1e-6 else "complete"
 
     return {
         "symbol": symbol,
         "methodology": METHODOLOGY,
+        "methodology_status": methodology_status,
+        "unmatched_sell_qty": unmatched_sell_qty,
         "completed_round_trips": n,
         "wins": len(wins),
         "losses": len(losses),
@@ -313,13 +348,54 @@ def symbol_summary(symbol, reconstruction, totals, live_position=None):
         "worst_trip": _trip_summary(worst_trip),
         "avg_holding_days": round(mean(holding_days), 1) if holding_days else None,
         "capital_deployed": round(capital_deployed, 2),
+        "capital_deployed_methodology": "sum_of_entry_notionals",  # see comment above -- not peak/average concurrent capital
         "realized_pnl": round(realized_pnl_total, 2),
         "unrealized_pnl": round(unrealized_pnl, 2),
         "total_pnl": round(realized_pnl_total + unrealized_pnl, 2),
         "open_position": open_episode_summary(open_episode, live_position),
-        "data_quality_note": data_quality_note,
+        "reconciliation": reconciliation,
         **contribution,
     }
+
+
+def _reconciliation_status(open_episode, live_position):
+    """Exposes ledger-vs-broker disagreement as structured data rather than
+    silently picking one source or blending them. Becomes especially
+    important once real money is involved -- a human should be told
+    explicitly when the local reconstruction and the broker disagree about
+    whether a position is even open, not just shown whichever number this
+    module happened to prefer."""
+    ledger_status = "open" if open_episode else "flat"
+    broker_status = "open" if live_position else "flat"
+
+    if ledger_status == "flat" and broker_status == "flat":
+        status, detail = "match", None
+    elif ledger_status == "open" and broker_status == "open":
+        qty_diff = abs(open_episode.reconstructed_qty - float(live_position["qty"]))
+        if qty_diff > 1e-4:
+            status = "qty_mismatch"
+            detail = (
+                f"Local ledger reconstruction shows {open_episode.reconstructed_qty} shares open, "
+                f"but the broker reports {live_position['qty']} — some fills (e.g. a pre-ledger "
+                f"broker holding, or a trade placed outside this app) aren't reflected in the "
+                f"round-trip history below."
+            )
+        else:
+            status, detail = "match", None
+    elif ledger_status == "open" and broker_status == "flat":
+        status = "ledger_only"
+        detail = (
+            "Local ledger reconstruction believes a position is still open, but the broker reports "
+            "none — likely a manual close outside this app."
+        )
+    else:  # ledger_status == "flat" and broker_status == "open"
+        status = "broker_only"
+        detail = (
+            "The broker reports an open position, but the local ledger reconstruction sees none — "
+            "likely a pre-ledger broker holding with no locally-recorded buy at all."
+        )
+
+    return {"ledger_status": ledger_status, "broker_status": broker_status, "status": status, "detail": detail}
 
 
 def _trip_summary(rt):

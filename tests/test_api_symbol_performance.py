@@ -88,6 +88,40 @@ def test_symbol_performance_completed_and_open(api_client, conn):
     assert body["total_pnl"] == pytest.approx(173.0)
     assert body["open_position"]["qty"] == 5.0
     assert body["open_position"]["unrealized_pnl"] == 275.0
+    assert body["reconciliation"]["status"] == "match"
+    assert body["methodology_status"] == "complete"
+    assert body["capital_deployed_methodology"] == "sum_of_entry_notionals"
+
+
+def test_symbol_performance_flags_qty_mismatch_end_to_end(api_client, conn):
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    _insert_trade(conn, "AAPL", "buy", 5, 100.0, 0.0, base)
+
+    with requests_mock.Mocker() as m:
+        # Broker reports more shares than the local ledger knows about --
+        # e.g. a pre-ledger holding that was added to locally later.
+        m.get("https://fake-alpaca.test/v2/positions/AAPL", json={
+            "symbol": "AAPL", "qty": "20", "avg_entry_price": "100.0",
+            "current_price": "100.0", "unrealized_pl": "0.0", "market_value": "2000.0",
+        })
+        r = api_client.get("/api/symbol-performance/AAPL", auth=AUTH)
+    body = r.json()
+    assert body["reconciliation"]["status"] == "qty_mismatch"
+    assert body["reconciliation"]["ledger_status"] == "open"
+    assert body["reconciliation"]["broker_status"] == "open"
+
+
+def test_symbol_performance_flags_partial_methodology_on_oversell(api_client, conn):
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    _insert_trade(conn, "AAPL", "buy", 5, 100.0, 0.0, base)
+    _insert_trade(conn, "AAPL", "sell", 25, 110.0, 0.0, base + timedelta(days=3))
+
+    with requests_mock.Mocker() as m:
+        m.get("https://fake-alpaca.test/v2/positions/AAPL", status_code=404, json={"message": "not found"})
+        r = api_client.get("/api/symbol-performance/AAPL", auth=AUTH)
+    body = r.json()
+    assert body["methodology_status"] == "partial"
+    assert body["unmatched_sell_qty"] == 20.0
 
 
 def test_symbol_round_trips_endpoint_distinguishes_open_from_closed(api_client, conn):

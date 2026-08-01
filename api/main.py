@@ -500,7 +500,21 @@ def _all_filled_trades(cur):
     long before whatever window a UI happens to be showing. Separate from
     _realized_pnl_by_trade_id's own query (same filter/ordering, different
     column list) so that function's existing behavior for /api/trades'
-    WIN/LOSS badges is untouched by this addition."""
+    WIN/LOSS badges is untouched by this addition.
+
+    PERFORMANCE NOTE: get_symbol_performance() and get_symbol_round_trips()
+    each call this and re-run the full-ledger reconstruction independently
+    — the symbol page currently fires both as separate requests, so one
+    page load does this walk twice. Harmless at today's trade count
+    (a full scan of the whole ledger is cheap at this scale); worth
+    revisiting once it isn't, via one of:
+      - request-time caching of reconstruct()'s output,
+      - merging the two endpoints into one response so a single page load
+        only reconstructs once,
+      - the eventual switch to position_lifecycles as the data source,
+        which (being already materialized incrementally rather than
+        walked fresh) sidesteps this cost entirely.
+    Not fixed now — no evidence yet that it needs to be."""
     cur.execute("""
         SELECT id, symbol, side, qty, price, cost, traded_at FROM trades
         WHERE status='filled' AND price IS NOT NULL
