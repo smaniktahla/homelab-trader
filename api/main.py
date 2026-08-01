@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from signals import compute_signals, compute_bollinger
 from signal_components import weighted_component_score
+import round_trips
 
 DB_DSN = os.environ["DATABASE_URL"]
 ALPACA_KEY = os.environ.get("ALPACA_API_KEY", "")
@@ -491,6 +492,109 @@ def get_positions():
         "side": p["side"],
         "pending_orders": pending_by_symbol.get(p["symbol"], []),
     } for p in positions]
+
+def _all_filled_trades(cur):
+    """Every filled trade, oldest -> newest, across ALL symbols — the full
+    ledger, never a limited/paginated slice, so shared/round_trips.py's
+    reconstruction can correctly attribute a sell to a buy that happened
+    long before whatever window a UI happens to be showing. Separate from
+    _realized_pnl_by_trade_id's own query (same filter/ordering, different
+    column list) so that function's existing behavior for /api/trades'
+    WIN/LOSS badges is untouched by this addition.
+
+    PERFORMANCE NOTE: get_symbol_performance() and get_symbol_round_trips()
+    each call this and re-run the full-ledger reconstruction independently
+    — the symbol page currently fires both as separate requests, so one
+    page load does this walk twice. Harmless at today's trade count
+    (a full scan of the whole ledger is cheap at this scale); worth
+    revisiting once it isn't, via one of:
+      - request-time caching of reconstruct()'s output,
+      - merging the two endpoints into one response so a single page load
+        only reconstructs once,
+      - the eventual switch to position_lifecycles as the data source,
+        which (being already materialized incrementally rather than
+        walked fresh) sidesteps this cost entirely.
+    Not fixed now — no evidence yet that it needs to be."""
+    cur.execute("""
+        SELECT id, symbol, side, qty, price, cost, traded_at FROM trades
+        WHERE status='filled' AND price IS NOT NULL
+        ORDER BY traded_at ASC, id ASC
+    """)
+    return cur.fetchall()
+
+def _live_position_or_none(symbol: str):
+    try:
+        return alpaca("GET", f"/v2/positions/{symbol}")
+    except HTTPException as e:
+        if e.status_code == 404:
+            return None
+        raise
+
+@app.get("/api/symbol-performance/{symbol}")
+def get_symbol_performance(symbol: str):
+    """Symbol Performance Summary: realized/unrealized/total P&L, completed
+    round trips, win rate, avg/median return, best/worst trade, capital
+    deployed, avg holding period, and this symbol's contribution to
+    portfolio gross gains and net P&L.
+
+    Reporting-only — reads trades/positions that already exist, computes
+    nothing that feeds back into proposal, sizing, or execution logic.
+
+    Uses shared/round_trips.py's average-cost reconstruction (methodology
+    explicitly labeled in the response) — a stand-in for the
+    position_lifecycles work planned but not yet built. Once that lands,
+    this endpoint should be repointed at position_lifecycles as the
+    canonical source; the response shape here is intentionally close to
+    what that will look like so the switch is mostly a data-source swap,
+    not a UI rewrite.
+
+    Completed-trade statistics come exclusively from round_trips.reconstruct()'s
+    completed round trips — the currently open position (if any), sourced
+    live from Alpaca rather than re-derived locally, only ever contributes
+    to the separate unrealized/total P&L fields. See round_trips.symbol_summary's
+    own docstring for why live Alpaca data is preferred over a second local
+    reconstruction of "what's currently held."
+    """
+    symbol = symbol.upper()
+    with db() as conn, conn.cursor() as cur:
+        trades = _all_filled_trades(cur)
+    reconstruction = round_trips.reconstruct(trades)
+    totals = round_trips.portfolio_totals(reconstruction)
+    live_position = _live_position_or_none(symbol)
+    return round_trips.symbol_summary(symbol, reconstruction, totals, live_position=live_position)
+
+@app.get("/api/symbol-performance/{symbol}/round-trips")
+def get_symbol_round_trips(symbol: str):
+    """Full round-trip history for the table below the summary — completed
+    trips oldest-first, plus the open episode (if any) called out
+    separately so the UI can visually distinguish it rather than mixing it
+    into the same rows."""
+    symbol = symbol.upper()
+    with db() as conn, conn.cursor() as cur:
+        trades = _all_filled_trades(cur)
+    reconstruction = round_trips.reconstruct(trades)
+    data = reconstruction.get(symbol, {"round_trips": [], "open_episode": None})
+    live_position = _live_position_or_none(symbol)
+    return {
+        "symbol": symbol,
+        "methodology": round_trips.METHODOLOGY,
+        "round_trips": [
+            {
+                "status": "closed",
+                "entry_trade_ids": t.entry_trade_ids,
+                "exit_trade_ids": t.exit_trade_ids,
+                "opened_at": t.opened_at.isoformat() if t.opened_at else None,
+                "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+                "qty": t.qty,
+                "entry_notional": t.entry_notional,
+                "net_pnl": t.net_pnl,
+                "return_pct": t.return_pct,
+                "holding_days": t.holding_days,
+            }
+            for t in data["round_trips"]
+        ],
+        "open_position": round_trips.open_episode_summary(data["open_episode"], live_position),
+    }
 
 def _total_trade_cost(cur):
     cur.execute("SELECT COALESCE(SUM(cost), 0) AS total FROM trades")

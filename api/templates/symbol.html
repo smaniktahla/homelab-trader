@@ -74,6 +74,19 @@
   .comp-status-tag.stale { color:#f7c94f; }
   .breakdown-meta { font-size:.72rem; color:#555; margin-top:10px; }
   .breakdown-side-btns { display:flex; gap:6px; margin-bottom:12px; }
+  .methodology-tag { font-size:.7rem; color:#666; margin-bottom:14px; display:flex; align-items:center; gap:6px; }
+  .methodology-tag .dot { width:6px; height:6px; border-radius:50%; background:#f7c94f; flex-shrink:0; }
+  .perf-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:14px; margin-bottom:18px; }
+  .perf-group { padding-top:4px; }
+  .perf-group:first-child { padding-top:0; }
+  .perf-stat .label { font-size:.68rem; text-transform:uppercase; letter-spacing:.05em; color:#555; margin-bottom:4px; }
+  .perf-stat .val { font-size:1.15rem; font-weight:700; color:#fff; }
+  .perf-stat .sub { font-size:.72rem; color:#666; margin-top:2px; }
+  .perf-note { font-size:.75rem; color:#888; background:#161822; border:1px solid #2a2d3a; border-radius:6px; padding:8px 12px; margin-top:8px; }
+  .rt-row-open { background:rgba(247,201,79,.06); }
+  .rt-status-badge { font-size:.68rem; padding:2px 8px; border-radius:10px; font-weight:700; letter-spacing:.03em; }
+  .rt-status-open { background:#3a2f14; color:#f7c94f; border:1px solid #5a4a1e; }
+  .rt-status-closed { background:#1a1d27; color:#888; border:1px solid #2a2d3a; }
 </style>
 </head>
 <body>
@@ -155,6 +168,33 @@
       <button class="range-btn" id="breakdown-btn-sell" onclick="loadBreakdown('sell', this)">Sell</button>
     </div>
     <div id="breakdown-body"><div class="no-data">Loading…</div></div>
+  </div>
+
+  <!-- Symbol Performance Summary -->
+  <h2>Symbol Performance Summary</h2>
+  <div class="card" id="perf-summary-card">
+    <div class="no-data">Loading…</div>
+  </div>
+
+  <!-- Round-Trip History -->
+  <h2>Round-Trip History</h2>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table id="rt-table" style="display:none">
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Opened</th>
+          <th>Closed</th>
+          <th style="text-align:right">Qty</th>
+          <th style="text-align:right">Capital Deployed</th>
+          <th style="text-align:right">Net P&amp;L</th>
+          <th style="text-align:right">Return</th>
+          <th style="text-align:right">Holding Period</th>
+        </tr>
+      </thead>
+      <tbody id="rt-body"></tbody>
+    </table>
+    <div id="rt-empty" class="no-data">No round trips yet for this symbol</div>
   </div>
 
   <!-- Trading Actions -->
@@ -558,6 +598,142 @@ async function loadBreakdown(side, btn) {
   }
 }
 
+// fmtUSD/fmt already defined above for the position card / trades table — reused here, not redeclared.
+function fmtPct(v, digits=1) {
+  if (v == null) return '—';
+  return `${v >= 0 ? '+' : ''}${v.toFixed(digits)}%`;
+}
+function pnlClass(v) {
+  if (v == null) return '';
+  return v > 0 ? 'up' : (v < 0 ? 'down' : '');
+}
+function fmtDays(v) {
+  if (v == null) return '—';
+  return v < 1 ? `${Math.round(v * 24)}h` : `${v.toFixed(1)}d`;
+}
+
+function perfStat(label, valHtml, subHtml) {
+  return `<div class="perf-stat"><div class="label">${label}</div><div class="val">${valHtml}</div>${subHtml ? `<div class="sub">${subHtml}</div>` : ''}</div>`;
+}
+
+async function loadPerfSummary() {
+  const card = document.getElementById('perf-summary-card');
+  try {
+    const r = await fetch(`/api/symbol-performance/${SYMBOL}`);
+    if (!r.ok) { card.innerHTML = '<div class="no-data">Could not load performance summary</div>'; return; }
+    const s = await r.json();
+
+    const methodologyLabel = s.methodology === 'average_cost_reconstruction'
+      ? 'Reconstructed from the full trade ledger via weighted-average-cost matching — will switch to lifecycle-based accounting once position_lifecycles ships.'
+      : s.methodology;
+
+    let html = `<div class="methodology-tag"><span class="dot"></span>${methodologyLabel}</div>`;
+
+    html += `<div class="perf-group"><div class="perf-grid">`
+      + perfStat('Realized P&amp;L', `<span class="${pnlClass(s.realized_pnl)}">${fmtUSD(s.realized_pnl)}</span>`)
+      + perfStat('Unrealized P&amp;L', `<span class="${pnlClass(s.unrealized_pnl)}">${fmtUSD(s.unrealized_pnl)}</span>`)
+      + perfStat('Total P&amp;L', `<span class="${pnlClass(s.total_pnl)}">${fmtUSD(s.total_pnl)}</span>`)
+      // "Capital deployed" = sum of every entry trade's notional across this
+      // symbol's whole history, NOT peak concurrent capital or an average —
+      // labeled explicitly so it doesn't read as a denominator for "return
+      // on capital" (total_pnl / capital_deployed would NOT be a valid ROI).
+      + perfStat('Capital Deployed', fmtUSD(s.capital_deployed), 'sum of all entry notionals, not peak/average concurrent capital')
+      + `</div></div>`;
+
+    html += `<div class="perf-group"><div class="perf-grid">`
+      + perfStat('Completed Round Trips', s.completed_round_trips)
+      + perfStat('Wins / Losses', `${s.wins} / ${s.losses}`, s.breakeven ? `${s.breakeven} breakeven` : '')
+      + perfStat('Win Rate', s.win_rate_pct != null ? `${s.win_rate_pct}%` : '—')
+      + perfStat('Avg Return', `<span class="${pnlClass(s.avg_return_pct)}">${fmtPct(s.avg_return_pct, 2)}</span>`)
+      + perfStat('Median Return', `<span class="${pnlClass(s.median_return_pct)}">${fmtPct(s.median_return_pct, 2)}</span>`)
+      + perfStat('Avg Holding Period', fmtDays(s.avg_holding_days))
+      + perfStat('Best Trade', s.best_trip ? `<span class="up">${fmtUSD(s.best_trip.net_pnl)}</span>` : '—',
+                  s.best_trip ? fmtPct(s.best_trip.return_pct, 2) : '')
+      + perfStat('Worst Trade', s.worst_trip ? `<span class="down">${fmtUSD(s.worst_trip.net_pnl)}</span>` : '—',
+                  s.worst_trip ? fmtPct(s.worst_trip.return_pct, 2) : '')
+      + `</div></div>`;
+
+    // Showing the raw dollar figures alongside each % is deliberate: a bare
+    // "132%" reads as a bug without the arithmetic that produced it.
+    const grossSub = s.portfolio_gross_profit_total
+      ? `${fmtUSD(s.symbol_gross_profit)} / ${fmtUSD(s.portfolio_gross_profit_total)} portfolio gross profit`
+      : 'share of all winning trades\' P&L, portfolio-wide';
+    const netSub = s.portfolio_net_pnl_total
+      ? `${fmtUSD(s.symbol_net_pnl)} / ${fmtUSD(s.portfolio_net_pnl_total)} portfolio net P&L — can exceed 100% or go negative`
+      : 'can exceed 100% or be negative — other symbols\' results shift this';
+
+    html += `<div class="perf-group"><div class="perf-grid">`
+      + perfStat('Contribution to Gross Gains', s.contribution_to_gross_gains_pct != null ? `${s.contribution_to_gross_gains_pct}%` : '—', grossSub)
+      + perfStat('Contribution to Net P&amp;L', s.contribution_to_net_pnl_pct != null ? `${s.contribution_to_net_pnl_pct}%` : '—', netSub)
+      + `</div></div>`;
+
+    if (s.methodology_status === 'partial') {
+      html += `<div class="perf-note">⚠ Reconstruction is partial for this symbol: ${s.unmatched_sell_qty} share(s) sold could not be matched to any locally-recorded buy (a pre-ledger broker holding, or a data gap) — realized P&amp;L above reflects only the locally-attributable portion, not the full history.</div>`;
+    }
+
+    if (s.reconciliation && s.reconciliation.status !== 'match') {
+      html += `<div class="perf-note">⚠ ${s.reconciliation.detail} <span style="color:#555">(ledger: ${s.reconciliation.ledger_status}, broker: ${s.reconciliation.broker_status})</span></div>`;
+    }
+
+    card.innerHTML = html;
+  } catch (e) {
+    card.innerHTML = '<div class="no-data">Could not load performance summary</div>';
+  }
+}
+
+async function loadRoundTrips() {
+  const table = document.getElementById('rt-table');
+  const body = document.getElementById('rt-body');
+  const empty = document.getElementById('rt-empty');
+  try {
+    const r = await fetch(`/api/symbol-performance/${SYMBOL}/round-trips`);
+    const data = await r.json();
+    const rows = [];
+
+    if (data.open_position && data.open_position.qty) {
+      const op = data.open_position;
+      rows.push(`
+        <tr class="rt-row-open">
+          <td><span class="rt-status-badge rt-status-open">OPEN</span></td>
+          <td>${op.opened_at ? new Date(op.opened_at).toLocaleDateString() : '—'}</td>
+          <td>—</td>
+          <td style="text-align:right">${op.qty}</td>
+          <td style="text-align:right">${fmtUSD(op.entry_notional)}</td>
+          <td style="text-align:right" class="${pnlClass(op.unrealized_pnl)}">${fmtUSD(op.unrealized_pnl)} <span style="color:#555;font-size:.72rem">(unrealized)</span></td>
+          <td style="text-align:right">—</td>
+          <td style="text-align:right">—</td>
+        </tr>`);
+    }
+
+    for (const t of [...data.round_trips].reverse()) {
+      rows.push(`
+        <tr>
+          <td><span class="rt-status-badge rt-status-closed">CLOSED</span></td>
+          <td>${new Date(t.opened_at).toLocaleDateString()}</td>
+          <td>${new Date(t.closed_at).toLocaleDateString()}</td>
+          <td style="text-align:right">${t.qty}</td>
+          <td style="text-align:right">${fmtUSD(t.entry_notional)}</td>
+          <td style="text-align:right" class="${pnlClass(t.net_pnl)}">${fmtUSD(t.net_pnl)}</td>
+          <td style="text-align:right" class="${pnlClass(t.return_pct)}">${fmtPct(t.return_pct, 2)}</td>
+          <td style="text-align:right">${fmtDays(t.holding_days)}</td>
+        </tr>`);
+    }
+
+    if (!rows.length) {
+      table.style.display = 'none';
+      empty.style.display = 'block';
+    } else {
+      body.innerHTML = rows.join('');
+      table.style.display = 'table';
+      empty.style.display = 'none';
+    }
+  } catch (e) {
+    empty.textContent = 'Could not load round-trip history';
+    empty.style.display = 'block';
+    table.style.display = 'none';
+  }
+}
+
 loadHeader();
 loadPosition();
 loadChart(14, null);
@@ -565,6 +741,8 @@ loadSignals();
 loadNews();
 loadTrades();
 loadBreakdown('buy', document.getElementById('breakdown-btn-buy'));
+loadPerfSummary();
+loadRoundTrips();
 </script>
 </body>
 </html>
