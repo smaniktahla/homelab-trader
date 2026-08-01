@@ -56,6 +56,24 @@
   .field input, .field select { width:100%; background:#0d0f1a; border:1px solid #2a2d3a; border-radius:5px; color:#ccc; padding:8px 10px; font-size:.85rem; }
   .modal-actions { display:flex; gap:8px; margin-top:16px; }
   .btn-cancel { background:#2a2d3a; color:#aaa; }
+  .comp-row { display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid #1a1d27; }
+  .comp-row:last-child { border-bottom:none; }
+  .comp-name { flex:0 0 92px; font-size:.78rem; color:#888; text-transform:capitalize; }
+  .comp-bar-track { flex:1; height:6px; background:#222; border-radius:3px; overflow:hidden; }
+  .comp-bar-fill { height:100%; border-radius:3px; background:#4f8ef7; }
+  .comp-row.shadow .comp-bar-fill { background:#666; opacity:.55; }
+  .comp-row.shadow .comp-bar-track { background:repeating-linear-gradient(45deg,#1a1d27,#1a1d27 4px,#222 4px,#222 8px); }
+  .comp-row.unavailable .comp-bar-track { background:#161822; }
+  .comp-val { flex:0 0 70px; text-align:right; font-size:.78rem; font-weight:600; color:#fff; }
+  .comp-row.unavailable .comp-val { color:#444; font-weight:400; }
+  .comp-row.stale .comp-val { color:#f7c94f; }
+  .comp-status-tag { flex:0 0 78px; font-size:.68rem; text-transform:uppercase; letter-spacing:.04em; text-align:right; }
+  .comp-status-tag.live { color:#3ecf6e; }
+  .comp-status-tag.shadow { color:#888; }
+  .comp-status-tag.unavailable { color:#444; }
+  .comp-status-tag.stale { color:#f7c94f; }
+  .breakdown-meta { font-size:.72rem; color:#555; margin-top:10px; }
+  .breakdown-side-btns { display:flex; gap:6px; margin-bottom:12px; }
 </style>
 </head>
 <body>
@@ -127,6 +145,16 @@
         </table>
       </div>
     </div>
+  </div>
+
+  <!-- Signal Breakdown -->
+  <h2>Signal Breakdown</h2>
+  <div class="card">
+    <div class="breakdown-side-btns">
+      <button class="range-btn active" id="breakdown-btn-buy" onclick="loadBreakdown('buy', this)">Buy</button>
+      <button class="range-btn" id="breakdown-btn-sell" onclick="loadBreakdown('sell', this)">Sell</button>
+    </div>
+    <div id="breakdown-body"><div class="no-data">Loading…</div></div>
   </div>
 
   <!-- Trading Actions -->
@@ -480,12 +508,63 @@ async function submitTrade() {
   }
 }
 
+const COMPONENT_LABELS = {technical: 'Technical', fundamental: 'Fundamental', earnings: 'Earnings',
+                           news: 'News', options: 'Options', macro_fit: 'Macro Fit'};
+
+function fmtAge(iso) {
+  if (!iso) return '';
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.round(hrs / 24)}d ago`;
+}
+
+async function loadBreakdown(side, btn) {
+  document.querySelectorAll('.breakdown-side-btns .range-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  const body = document.getElementById('breakdown-body');
+  try {
+    const r = await fetch(`/api/symbol-features/${SYMBOL}`);
+    const data = await r.json();
+    const snap = data[side];
+    if (!snap) {
+      body.innerHTML = '<div class="no-data">No feature snapshot yet for this symbol/side</div>';
+      return;
+    }
+    let rows = '';
+    for (const name of Object.keys(COMPONENT_LABELS)) {
+      const comp = snap.components[name];
+      const status = comp.status; // live | shadow | unavailable | stale
+      const pct = comp.value != null ? Math.max(0, Math.min(100, comp.value)) : 0;
+      const valStr = comp.value != null ? comp.value.toFixed(0) : '—';
+      rows += `
+        <div class="comp-row ${status}">
+          <div class="comp-name">${COMPONENT_LABELS[name]}</div>
+          <div class="comp-bar-track"><div class="comp-bar-fill" style="width:${pct}%"></div></div>
+          <div class="comp-val">${valStr}</div>
+          <div class="comp-status-tag ${status}">${status}</div>
+        </div>`;
+    }
+    const composite = snap.composite_score != null ? snap.composite_score.toFixed(0) : '—';
+    body.innerHTML = `
+      ${rows}
+      <div class="breakdown-meta">
+        Composite ${composite} · confidence ${snap.data_confidence != null ? (snap.data_confidence * 100).toFixed(0) + '%' : '—'}
+        · feature ${snap.feature_version} · model ${snap.model_version} · as of ${fmtAge(snap.as_of)}
+      </div>`;
+  } catch (e) {
+    body.innerHTML = '<div class="no-data">Could not load signal breakdown</div>';
+  }
+}
+
 loadHeader();
 loadPosition();
 loadChart(14, null);
 loadSignals();
 loadNews();
 loadTrades();
+loadBreakdown('buy', document.getElementById('breakdown-btn-buy'));
 </script>
 </body>
 </html>

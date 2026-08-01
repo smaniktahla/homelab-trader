@@ -8,6 +8,7 @@ import psycopg2, psycopg2.extras, os, requests as http, secrets, time, bisect
 from datetime import datetime, timezone
 
 from signals import compute_signals, compute_bollinger
+from signal_components import weighted_component_score
 
 DB_DSN = os.environ["DATABASE_URL"]
 ALPACA_KEY = os.environ.get("ALPACA_API_KEY", "")
@@ -214,6 +215,78 @@ def get_signal_outcomes(symbol: Optional[str] = None, limit: int = 200):
                 SELECT * FROM signal_outcomes ORDER BY generated_at DESC LIMIT %s
             """, (limit,))
         return cur.fetchall()
+
+COMPONENT_NAMES = ("technical", "fundamental", "earnings", "news", "options", "macro_fit")
+
+def _component_status(value, weight):
+    """live: computed and carries non-zero weight in the actual decision.
+    shadow: computed but weight is currently zero (not yet activated).
+    unavailable: not yet computed for this symbol/feature_version.
+    (stale is a defined status but unreachable in PR #1 — no source has
+    an independent freshness threshold yet; every component here shares
+    signal_outcomes' own as_of.)"""
+    if value is None:
+        return "unavailable"
+    return "live" if weight > 0 else "shadow"
+
+def _symbol_features_side(cur, symbol, side):
+    # Secondary sort on feature_version is not cosmetic: symbol_features is
+    # explicitly designed to let a future repair/backfill process insert a
+    # new feature_version row at a historical as_of it's re-deriving (see
+    # feature_store.py's docstring). Without a tiebreaker, two rows sharing
+    # the same as_of would resolve to whichever Postgres happens to return
+    # first -- not reliably the newer version -- the moment that scenario
+    # actually occurs. feature_version is a plain string ("v1", "v2", ...);
+    # sorting it descending assumes lexicographic order tracks version
+    # order, true for this naming scheme but worth remembering if that
+    # scheme ever changes.
+    cur.execute("""
+        SELECT * FROM symbol_features
+        WHERE symbol=%s AND side=%s
+        ORDER BY as_of DESC, feature_version DESC, id DESC LIMIT 1
+    """, (symbol.upper(), side))
+    row = cur.fetchone()
+    if not row:
+        return None
+    # psycopg2 returns NUMERIC as decimal.Decimal; component_weights (jsonb)
+    # decodes as float. weighted_component_score does float arithmetic, so
+    # normalize scores to float here rather than teach the shared combiner
+    # about the DB driver's type mapping.
+    weights = {k: float(v) for k, v in (row["component_weights"] or {}).items()}
+    scores = {
+        name: (float(row[f"{name}_score"]) if row[f"{name}_score"] is not None else None)
+        for name in COMPONENT_NAMES
+    }
+    composite = weighted_component_score(scores, weights)
+    return {
+        "as_of": row["as_of"].isoformat() if row["as_of"] else None,
+        "feature_version": row["feature_version"],
+        "model_version": row["model_version"],
+        "data_confidence": float(row["data_confidence"]) if row["data_confidence"] is not None else None,
+        "composite_score": composite,
+        "component_weights": weights,
+        "components": {
+            name: {
+                "value": float(scores[name]) if scores[name] is not None else None,
+                "status": _component_status(scores[name], weights.get(name, 0)),
+            }
+            for name in COMPONENT_NAMES
+        },
+    }
+
+@app.get("/api/symbol-features/{symbol}")
+def get_symbol_features(symbol: str):
+    """Latest technical/fundamental/earnings/news/options/macro_fit component
+    breakdown per side. composite_score is always computed through
+    weighted_component_score() — the same function scoring.py will use once
+    later PRs add real weights — rather than a second hardcoded
+    "== technical_score" shortcut, so this endpoint exercises the actual
+    combination abstraction even though PR #1's weights make the result
+    identical to technical_score today."""
+    with db() as conn, conn.cursor() as cur:
+        buy = _symbol_features_side(cur, symbol, "buy")
+        sell = _symbol_features_side(cur, symbol, "sell")
+    return {"symbol": symbol.upper(), "buy": buy, "sell": sell}
 
 @app.get("/api/reviews")
 def get_strategy_reviews(limit: int = 20):

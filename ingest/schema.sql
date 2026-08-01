@@ -119,6 +119,47 @@ CREATE INDEX IF NOT EXISTS idx_signal_outcomes_generated_at ON signal_outcomes(g
 CREATE INDEX IF NOT EXISTS idx_signal_outcomes_proposal_id ON signal_outcomes(proposal_id);
 CREATE INDEX IF NOT EXISTS idx_signal_outcomes_pending ON signal_outcomes(forward_return_20d) WHERE forward_return_20d IS NULL;
 
+-- Schema-drift fix: universe/universe_scan have existed live (scanner.py)
+-- since before this repo tracked them here -- same class of gap as the
+-- trades.source/status/proposal_id fix below. Recovered verbatim from the
+-- live DB (information_schema/pg_indexes, verified 2026-07-31): PK-only,
+-- no FKs, no extra constraints beyond what's declared here. IF NOT EXISTS
+-- makes this a no-op against the existing live tables.
+-- Declared here (not appended at end-of-file) because the ALTER TABLE
+-- universe statement immediately below needs the table to already exist
+-- on a from-scratch apply.
+--
+-- This closes universe/universe_scan's own gap, but does NOT make
+-- schema.sql as a whole bootstrappable on a truly empty database: earlier
+-- in this file (see the trade_proposals ALTER a few dozen lines up, and
+-- theses further down) this file already assumes trade_proposals,
+-- signal_params and theses exist, and none of those three have a CREATE
+-- TABLE anywhere in this repo -- only in prod's own history and, for
+-- theses, in migrations/001_multi_thesis_architecture.sql, which nothing
+-- runs automatically on container startup. `docker compose up` on an
+-- empty volume still fails before reaching this point. Fixing that is a
+-- separate, larger schema-drift cleanup, not part of this PR.
+CREATE TABLE IF NOT EXISTS universe (
+    symbol      TEXT PRIMARY KEY,
+    name        TEXT,
+    exchange    TEXT,
+    added_at    TIMESTAMPTZ DEFAULT NOW(),
+    scannable   BOOLEAN DEFAULT FALSE,
+    sector      TEXT
+);
+
+-- No FK to universe: scanner.py upserts by symbol independently and never
+-- joins PK->PK between these two tables in the live app.
+CREATE TABLE IF NOT EXISTS universe_scan (
+    symbol      TEXT PRIMARY KEY,
+    price       NUMERIC,
+    rsi         NUMERIC,
+    buy_score   NUMERIC DEFAULT 0,
+    sell_score  NUMERIC DEFAULT 0,
+    regime      TEXT,
+    scanned_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- PRD v1.1 #3: Sector Concentration Cap. GICS sector, scraped alongside the
 -- S&P 500 constituent list already fetched in scanner.py; NULL for ETFs/
 -- unclassified symbols, which the cap check skips.
@@ -317,3 +358,61 @@ ALTER TABLE price_history ADD COLUMN IF NOT EXISTS adjclose NUMERIC;
 INSERT INTO signal_params (key, value, description) VALUES
     ('buy_cooldown_days', 2, 'Skip new BUY proposals for a symbol within N days of its last filled BUY trade')
 ON CONFLICT (key) DO NOTHING;
+
+-- Signal component infrastructure (PR #1 of the multi-source quant signal
+-- integration -- see docs/signal-component-architecture.md). Append-only,
+-- point-in-time feature snapshots. One row per (symbol, side, as_of,
+-- feature_version) because score_signal() already produces an independent
+-- score per side, not one scalar per symbol -- this mirrors signal_outcomes'
+-- own `side` column rather than inventing a fictional composite.
+--
+-- PR #1 populates technical_score only; fundamental/earnings/news/options/
+-- macro_fit_score are NULL until their own PR lands a real collector. NULL
+-- means "not yet computed", never 0 -- a missing optional signal must never
+-- read as bearish.
+CREATE TABLE IF NOT EXISTS symbol_features (
+    id                   BIGSERIAL PRIMARY KEY,
+    symbol               TEXT NOT NULL,
+    side                 TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+    as_of                TIMESTAMPTZ NOT NULL,
+    technical_score      NUMERIC,
+    fundamental_score    NUMERIC,
+    earnings_score       NUMERIC,
+    news_score           NUMERIC,
+    options_score        NUMERIC,
+    macro_fit_score      NUMERIC,
+    data_confidence      NUMERIC NOT NULL
+        CHECK (data_confidence >= 0 AND data_confidence <= 1),
+    feature_version      TEXT NOT NULL,
+    model_version        TEXT NOT NULL,
+    component_weights    JSONB NOT NULL DEFAULT '{}',
+    source_timestamps    JSONB NOT NULL DEFAULT '{}',
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (symbol, as_of, side, feature_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_symbol_features_symbol_as_of
+    ON symbol_features (symbol, as_of DESC);
+
+-- signal_outcomes gets a nullable pointer to the snapshot used, plus copies
+-- of the component scores actually attached at signal time so historical
+-- rows remain queryable without joining symbol_features (which may later
+-- be pruned -- see ON DELETE SET NULL below). feature_snapshot_id is
+-- nullable and attachment is best-effort/fail-open: a failed feature
+-- write must never block or alter the existing proposal decision path.
+ALTER TABLE signal_outcomes
+    ADD COLUMN IF NOT EXISTS technical_score    NUMERIC,
+    ADD COLUMN IF NOT EXISTS fundamental_score  NUMERIC,
+    ADD COLUMN IF NOT EXISTS earnings_score     NUMERIC,
+    ADD COLUMN IF NOT EXISTS news_score         NUMERIC,
+    ADD COLUMN IF NOT EXISTS options_score      NUMERIC,
+    ADD COLUMN IF NOT EXISTS macro_fit_score    NUMERIC,
+    ADD COLUMN IF NOT EXISTS data_confidence    NUMERIC
+        CHECK (data_confidence IS NULL OR
+               (data_confidence >= 0 AND data_confidence <= 1)),
+    ADD COLUMN IF NOT EXISTS feature_snapshot_id BIGINT
+        REFERENCES symbol_features(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS feature_version    TEXT,
+    ADD COLUMN IF NOT EXISTS model_version      TEXT,
+    ADD COLUMN IF NOT EXISTS component_weights  JSONB,
+    ADD COLUMN IF NOT EXISTS vetoes             JSONB;

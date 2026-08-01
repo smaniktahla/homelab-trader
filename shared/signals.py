@@ -11,6 +11,7 @@ import requests
 
 from earnings import earnings_blackout_reason
 from circuit_breaker import record_snapshot_and_check
+from feature_store import record_symbol_feature_snapshot, attach_feature_snapshot
 
 log = logging.getLogger(__name__)
 
@@ -411,19 +412,22 @@ def calc_buy_qty(price, cash, portfolio_value, existing_market_value, p):
 def _record_outcome(conn, signal_id, sym, side, score, rsi, bb_upper, bb_middle, bb_lower,
                      band_std, market_regime, symbol_regime, price, thesis_id):
     """Insert the signal_outcomes stub row for a scored signal. Defaults to blocked
-    until the caller marks it proposed."""
+    until the caller marks it proposed. Returns (outcome_id, generated_at) — the
+    DB-assigned timestamp is handed back so callers needing a shared "as of" moment
+    (e.g. feature_store's symbol_features.as_of) reuse this exact value instead of
+    taking a second, independently-drifting datetime.now() reading."""
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO signal_outcomes
                 (signal_id, symbol, side, score, rsi, bb_upper, bb_middle, bb_lower, band_std,
                  market_regime, symbol_regime, price_at_signal, thesis_id)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            RETURNING id
+            RETURNING id, generated_at
         """, (signal_id, sym, side, score, rsi, bb_upper, bb_middle, bb_lower, band_std,
               market_regime, symbol_regime, price, thesis_id))
-        outcome_id = cur.fetchone()[0]
+        outcome_id, generated_at = cur.fetchone()
     conn.commit()
-    return outcome_id
+    return outcome_id, generated_at
 
 
 def _block_outcome(conn, outcome_id, reason):
@@ -730,9 +734,19 @@ def compute_signals(conn, symbols):
                 conn.commit()
                 log.info(f"Signal {sym} {side}: score={score} — {rationale}")
 
-                outcome_id = _record_outcome(conn, signal_id, sym, side, score, rsi,
+                outcome_id, generated_at = _record_outcome(conn, signal_id, sym, side, score, rsi,
                                               bb_upper, bb_middle, bb_lower, band_std,
                                               market_overall, regime, price, thesis_id)
+
+                # Shadow feature snapshot — side-effecting only, never branched on.
+                # Runs unconditionally (before any gating check) so blocked signals
+                # get shadow features too, not just proposals. Both calls are
+                # internally fail-open (see shared/feature_store.py): any failure
+                # here is logged and swallowed, never raised, and never alters the
+                # score/gating/proposal decision below.
+                snap_id = record_symbol_feature_snapshot(conn, sym, side, generated_at, score)
+                if snap_id is not None:
+                    attach_feature_snapshot(conn, outcome_id, snap_id, score)
 
                 if score < effective_proposal_min:
                     if score_mod > 0:
