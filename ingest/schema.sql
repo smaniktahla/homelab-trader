@@ -124,11 +124,21 @@ CREATE INDEX IF NOT EXISTS idx_signal_outcomes_pending ON signal_outcomes(forwar
 -- trades.source/status/proposal_id fix below. Recovered verbatim from the
 -- live DB (information_schema/pg_indexes, verified 2026-07-31): PK-only,
 -- no FKs, no extra constraints beyond what's declared here. IF NOT EXISTS
--- makes this a no-op against the existing live tables; it exists so a
--- from-scratch `docker compose up` on an empty volume is reproducible.
+-- makes this a no-op against the existing live tables.
 -- Declared here (not appended at end-of-file) because the ALTER TABLE
 -- universe statement immediately below needs the table to already exist
 -- on a from-scratch apply.
+--
+-- This closes universe/universe_scan's own gap, but does NOT make
+-- schema.sql as a whole bootstrappable on a truly empty database: earlier
+-- in this file (see the trade_proposals ALTER a few dozen lines up, and
+-- theses further down) this file already assumes trade_proposals,
+-- signal_params and theses exist, and none of those three have a CREATE
+-- TABLE anywhere in this repo -- only in prod's own history and, for
+-- theses, in migrations/001_multi_thesis_architecture.sql, which nothing
+-- runs automatically on container startup. `docker compose up` on an
+-- empty volume still fails before reaching this point. Fixing that is a
+-- separate, larger schema-drift cleanup, not part of this PR.
 CREATE TABLE IF NOT EXISTS universe (
     symbol      TEXT PRIMARY KEY,
     name        TEXT,

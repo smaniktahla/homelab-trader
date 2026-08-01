@@ -230,10 +230,20 @@ def _component_status(value, weight):
     return "live" if weight > 0 else "shadow"
 
 def _symbol_features_side(cur, symbol, side):
+    # Secondary sort on feature_version is not cosmetic: symbol_features is
+    # explicitly designed to let a future repair/backfill process insert a
+    # new feature_version row at a historical as_of it's re-deriving (see
+    # feature_store.py's docstring). Without a tiebreaker, two rows sharing
+    # the same as_of would resolve to whichever Postgres happens to return
+    # first -- not reliably the newer version -- the moment that scenario
+    # actually occurs. feature_version is a plain string ("v1", "v2", ...);
+    # sorting it descending assumes lexicographic order tracks version
+    # order, true for this naming scheme but worth remembering if that
+    # scheme ever changes.
     cur.execute("""
         SELECT * FROM symbol_features
         WHERE symbol=%s AND side=%s
-        ORDER BY as_of DESC LIMIT 1
+        ORDER BY as_of DESC, feature_version DESC, id DESC LIMIT 1
     """, (symbol.upper(), side))
     row = cur.fetchone()
     if not row:

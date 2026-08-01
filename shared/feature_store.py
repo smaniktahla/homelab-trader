@@ -21,6 +21,7 @@ called) makes a plain rollback safe here — there is nothing else pending on
 the connection to lose.
 """
 
+import json
 import logging
 
 log = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ MODEL_VERSION = "mean_reversion_technical_only_v1"  # versions the *combination*
                          # PR #1's combination is the identity function (weight
                          # {technical: 1.0}); this label exists so PR #6's real
                          # weighted-combination rows are unambiguous against these.
+TECHNICAL_ONLY_WEIGHTS = {"technical": 1.0}  # PR #1's fixed component_weights value.
 
 
 def record_symbol_feature_snapshot(conn, symbol, side, as_of, technical_score):
@@ -62,8 +64,8 @@ def record_symbol_feature_snapshot(conn, symbol, side, as_of, technical_score):
             """, (
                 symbol, side, as_of, technical_score, 1.0,
                 FEATURE_VERSION, MODEL_VERSION,
-                '{"technical": 1.0}',
-                '{"technical": "%s"}' % as_of.isoformat(),
+                json.dumps(TECHNICAL_ONLY_WEIGHTS),
+                json.dumps({"technical": as_of.isoformat()}),
             ))
             row = cur.fetchone()
             if row is None:
@@ -97,7 +99,7 @@ def attach_feature_snapshot(conn, outcome_id, feature_snapshot_id, technical_sco
                 WHERE id=%s
             """, (
                 feature_snapshot_id, technical_score, 1.0,
-                FEATURE_VERSION, MODEL_VERSION, '{"technical": 1.0}',
+                FEATURE_VERSION, MODEL_VERSION, json.dumps(TECHNICAL_ONLY_WEIGHTS),
                 outcome_id,
             ))
         conn.commit()

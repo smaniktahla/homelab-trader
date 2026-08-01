@@ -62,3 +62,32 @@ def test_symbol_features_live_technical_only(api_client, conn):
     for name in ("fundamental", "earnings", "news", "options", "macro_fit"):
         assert buy["components"][name] == {"value": None, "status": "unavailable"}
     assert r.json()["sell"] is None
+
+
+def test_symbol_features_picks_highest_feature_version_at_same_as_of(api_client, conn):
+    """Regression test for a code-review finding: with no tiebreaker beyond
+    as_of, two rows sharing the same as_of (e.g. a future repair process
+    re-deriving a historical snapshot under a newer feature_version -- the
+    exact scenario record_symbol_feature_snapshot's own docstring
+    anticipates) resolved to whichever row Postgres happened to return
+    first, not reliably the newer version. Must always prefer the higher
+    feature_version, and fall back to id (insertion order) if even that
+    ties."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO symbol_features
+                (symbol, side, as_of, technical_score, data_confidence,
+                 feature_version, model_version, component_weights, source_timestamps)
+            VALUES
+                ('AAPL', 'buy', '2026-07-31T12:00:00Z', 40, 1.0, 'v1',
+                 'mean_reversion_technical_only_v1', '{"technical": 1.0}', '{}'),
+                ('AAPL', 'buy', '2026-07-31T12:00:00Z', 90, 1.0, 'v2',
+                 'mean_reversion_technical_only_v2', '{"technical": 1.0}', '{}')
+        """)
+    conn.commit()
+
+    r = api_client.get("/api/symbol-features/AAPL", auth=("test_invest_user", "test_invest_pass_not_real"))
+    assert r.status_code == 200
+    buy = r.json()["buy"]
+    assert buy["feature_version"] == "v2"
+    assert buy["composite_score"] == 90
