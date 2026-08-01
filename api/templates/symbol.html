@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{{ symbol }} — Invest</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #0d0f1a; color: #ccc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: .9rem; }
@@ -133,6 +135,10 @@
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
         <h2 style="margin:0">Price History</h2>
         <div style="display:flex;align-items:center;gap:14px">
+          <label style="display:flex;align-items:center;gap:5px;font-size:.78rem;color:#888;cursor:pointer">
+            <input type="checkbox" id="candles-toggle" onchange="loadChart(currentChartDays,null)">
+            Candlesticks
+          </label>
           <label style="display:flex;align-items:center;gap:5px;font-size:.78rem;color:#888;cursor:pointer">
             <input type="checkbox" id="bb-toggle" checked onchange="loadChart(currentChartDays,null)">
             Bollinger Bands
@@ -325,57 +331,78 @@ async function loadChart(days, btn) {
   document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
   const showBB = document.getElementById('bb-toggle').checked;
+  const showCandles = document.getElementById('candles-toggle').checked;
   try {
     const [data, allTrades] = await Promise.all([
       fetch(`/api/prices/${SYMBOL}?days=${days}&include_bb=${showBB}`).then(r => r.json()),
       fetch(`/api/trades`).then(r => r.json()).catch(() => []),
     ]);
     const wide = days > 365;
-    const fmtLabel = ts => new Date(ts).toLocaleDateString('en-US',
-      wide ? {month:'short', year:'2-digit'} : {month:'short', day:'numeric'});
-    const labels = data.map(r => fmtLabel(r.ts));
     const prices = data.map(r => r.close);
-    const dataTimes = data.map(r => new Date(r.ts).getTime());
     const color = prices.length > 1 && prices[prices.length-1] >= prices[0] ? '#3ecf6e' : '#f75f5f';
 
-    // Position markers by nearest-data-point INDEX, not label text — with
-    // year-repeating labels (e.g. "Jul 10" appears once per year over a 5Y
-    // span) or multiple points sharing a day label, Chart.js's category
-    // scale resolves a string x to its first match, pinning every trade to
-    // the wrong point. Index is unambiguous and reads y off that same point.
-    function nearestIndex(tradeTime) {
-      if (!dataTimes.length) return null;
-      let idx = 0;
-      for (let i = 0; i < dataTimes.length; i++) {
-        if (dataTimes[i] <= tradeTime) idx = i; else break;
+    // Real timestamps on a time x-axis (chartjs-adapter-date-fns), not
+    // category labels/index. This replaces the old index-snapping hack for
+    // trade markers -- a trade's own timestamp is now a first-class x value
+    // that Chart.js positions correctly on its own, including on a 5Y view
+    // where multiple points used to share a "Jul 10"-style label.
+    function nearestBar(tradeTime) {
+      if (!data.length) return null;
+      let bar = data[0];
+      for (const r of data) {
+        if (new Date(r.ts).getTime() <= tradeTime) bar = r; else break;
       }
-      return idx;
+      return bar;
     }
 
     // Build trade marker datasets
     const trades = allTrades.filter(t => t.symbol === SYMBOL && t.status === 'filled');
     const buyPoints = [], sellPoints = [], buyLabels = [], sellLabels = [];
     trades.forEach(t => {
-      const idx = nearestIndex(new Date(t.traded_at).getTime());
-      if (idx === null) return;
-      const y = t.price || prices[idx];
+      const tradeTime = new Date(t.traded_at).getTime();
+      const bar = nearestBar(tradeTime);
+      if (!bar) return;
+      const y = t.price || bar.close;
       if (!y) return;
       const dt = new Date(t.traded_at).toLocaleString('en-US', {month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit'});
-      if (t.side === 'buy') { buyPoints.push({x: idx, y}); buyLabels.push(`▲ Bought ${t.qty} @ $${parseFloat(y).toFixed(2)}  ·  ${dt}`); }
-      else                  { sellPoints.push({x: idx, y}); sellLabels.push(`▼ Sold ${t.qty} @ $${parseFloat(y).toFixed(2)}  ·  ${dt}`); }
+      const point = {x: tradeTime, y};
+      if (t.side === 'buy') { buyPoints.push(point); buyLabels.push(`▲ Bought ${t.qty} @ $${parseFloat(y).toFixed(2)}  ·  ${dt}`); }
+      else                  { sellPoints.push(point); sellLabels.push(`▼ Sold ${t.qty} @ $${parseFloat(y).toFixed(2)}  ·  ${dt}`); }
     });
+
+    // chartjs-chart-financial@0.2.1 (last published release) predates
+    // Chart.js 4's parsing pipeline and doesn't feed the candlestick
+    // dataset's o/h/l/c into the y-scale's auto min/max detection --
+    // without this, the y-axis silently collapses to [0,1] whenever
+    // candlesticks are shown. Computing the range ourselves sidesteps the
+    // library bug entirely, for both modes.
+    const yValues = showCandles
+      ? data.flatMap(r => [r.low, r.high]).filter(v => v != null)
+      : prices.filter(v => v != null);
+    if (showBB) yValues.push(...data.flatMap(r => [r.bb_upper, r.bb_lower]).filter(v => v != null));
+    const yPad = yValues.length ? (Math.max(...yValues) - Math.min(...yValues)) * 0.05 || 1 : 1;
+    const yMin = yValues.length ? Math.min(...yValues) - yPad : undefined;
+    const yMax = yValues.length ? Math.max(...yValues) + yPad : undefined;
+
+    const priceDataset = showCandles ? {
+      type: 'candlestick', label: 'Price',
+      data: data.map(r => ({x: new Date(r.ts).getTime(), o: r.open, h: r.high, l: r.low, c: r.close})),
+      color: { up: '#3ecf6e', down: '#f75f5f', unchanged: '#888' },
+      borderColor: { up: '#3ecf6e', down: '#f75f5f', unchanged: '#888' },
+    } : {
+      label: 'Price',
+      data: data.map(r => ({x: new Date(r.ts).getTime(), y: r.close})),
+      borderColor: color, borderWidth: 2,
+      pointRadius: 0, pointHoverRadius: 4, pointHoverBackgroundColor: color, tension: 0.3,
+      fill: true, backgroundColor: color + '15',
+    };
 
     if (priceChart) priceChart.destroy();
     priceChart = new Chart(document.getElementById('price-chart'), {
       type: 'line',
       data: {
-        labels,
         datasets: [
-          {
-            data: prices, borderColor: color, borderWidth: 2,
-            pointRadius: 0, pointHoverRadius: 4, pointHoverBackgroundColor: color, tension: 0.3,
-            fill: true, backgroundColor: color + '15',
-          },
+          priceDataset,
           {
             type: 'scatter', label: 'Buy', data: buyPoints,
             backgroundColor: '#3ecf6e', borderColor: '#fff', borderWidth: 1.5,
@@ -390,17 +417,17 @@ async function loadChart(days, btn) {
           },
           ...(showBB ? [
             {
-              label: 'BB upper', data: data.map(r => r.bb_upper),
+              label: 'BB upper', data: data.map(r => ({x: new Date(r.ts).getTime(), y: r.bb_upper})),
               borderColor: '#4f8ef7', borderWidth: 1, borderDash: [4, 3],
               pointRadius: 0, tension: 0.2, fill: false,
             },
             {
-              label: 'BB middle', data: data.map(r => r.bb_middle),
+              label: 'BB middle', data: data.map(r => ({x: new Date(r.ts).getTime(), y: r.bb_middle})),
               borderColor: '#4f8ef7', borderWidth: 1, borderDash: [1, 2],
               pointRadius: 0, tension: 0.2, fill: false,
             },
             {
-              label: 'BB lower', data: data.map(r => r.bb_lower),
+              label: 'BB lower', data: data.map(r => ({x: new Date(r.ts).getTime(), y: r.bb_lower})),
               borderColor: '#4f8ef7', borderWidth: 1, borderDash: [4, 3],
               pointRadius: 0, tension: 0.2, fill: '-2', backgroundColor: '#4f8ef70c',
             },
@@ -419,17 +446,27 @@ async function loadChart(days, btn) {
             bodyColor: '#e8eaf6',
             callbacks: {
               label: ctx => {
-                if (ctx.datasetIndex === 0) return ' $' + ctx.parsed.y.toFixed(2);
-                if (ctx.datasetIndex >= 3) return ctx.parsed.y == null ? null : ` ${ctx.dataset.label}: $${ctx.parsed.y.toFixed(2)}`;
-                const labels = ctx.dataset.tooltipLabels || [];
-                return ' ' + (labels[ctx.dataIndex] || (ctx.datasetIndex === 1 ? '▲ Buy' : '▼ Sell'));
+                if (ctx.dataset.type === 'candlestick') {
+                  const p = ctx.raw;
+                  return ` O ${p.o.toFixed(2)}  H ${p.h.toFixed(2)}  L ${p.l.toFixed(2)}  C ${p.c.toFixed(2)}`;
+                }
+                if (ctx.dataset.label === 'Price') return ' $' + ctx.parsed.y.toFixed(2);
+                if (ctx.dataset.label === 'Buy' || ctx.dataset.label === 'Sell') {
+                  const labels = ctx.dataset.tooltipLabels || [];
+                  return ' ' + (labels[ctx.dataIndex] || (ctx.dataset.label === 'Buy' ? '▲ Buy' : '▼ Sell'));
+                }
+                return ctx.parsed.y == null ? null : ` ${ctx.dataset.label}: $${ctx.parsed.y.toFixed(2)}`;
               }
             }
           }
         },
         scales: {
-          x: { grid: { color: '#1a1d27' }, ticks: { color: '#555', maxTicksLimit: 8 } },
-          y: { grid: { color: '#1a1d27' }, ticks: { color: '#555', callback: v => '$' + v.toFixed(0) } }
+          x: {
+            type: 'time',
+            time: { unit: wide ? 'month' : 'day', tooltipFormat: 'MMM d, yyyy' },
+            grid: { color: '#1a1d27' }, ticks: { color: '#555', maxTicksLimit: 8 }
+          },
+          y: { min: yMin, max: yMax, grid: { color: '#1a1d27' }, ticks: { color: '#555', callback: v => '$' + v.toFixed(0) } }
         },
         animation: false,
       }
