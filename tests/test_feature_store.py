@@ -4,6 +4,7 @@ from feature_store import (
     FEATURE_VERSION,
     record_symbol_feature_snapshot,
     attach_feature_snapshot,
+    attach_fundamental_score,
 )
 
 
@@ -134,6 +135,74 @@ def test_attach_feature_snapshot_rolls_back_on_db_exception(conn):
         row = cur.fetchone()
     assert row[0] is None
     assert row[1] == 62  # untouched, still committed from before attach ran
+
+
+def test_attach_fundamental_score_updates_both_tables(conn):
+    as_of = _as_of()
+    snap_id = record_symbol_feature_snapshot(conn, "AAPL", "buy", as_of, 62)
+    thesis_id = _mean_reversion_thesis_id(conn)
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO signal_outcomes (symbol, side, score, thesis_id)
+            VALUES ('AAPL', 'buy', 62, %s) RETURNING id
+        """, (thesis_id,))
+        outcome_id = cur.fetchone()[0]
+    conn.commit()
+
+    attach_fundamental_score(conn, snap_id, outcome_id, 74.5)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT fundamental_score FROM symbol_features WHERE id=%s", (snap_id,))
+        assert float(cur.fetchone()[0]) == 74.5
+        cur.execute("SELECT fundamental_score FROM signal_outcomes WHERE id=%s", (outcome_id,))
+        assert float(cur.fetchone()[0]) == 74.5
+
+
+def test_attach_fundamental_score_does_not_touch_component_weights(conn):
+    """Storing a fundamental_score must not itself grant it any decision
+    weight -- component_weights stays {"technical": 1.0} until a
+    validated backtest changes that in a later PR."""
+    as_of = _as_of()
+    snap_id = record_symbol_feature_snapshot(conn, "AAPL", "buy", as_of, 62)
+    thesis_id = _mean_reversion_thesis_id(conn)
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO signal_outcomes (symbol, side, score, thesis_id)
+            VALUES ('AAPL', 'buy', 62, %s) RETURNING id
+        """, (thesis_id,))
+        outcome_id = cur.fetchone()[0]
+    conn.commit()
+
+    attach_fundamental_score(conn, snap_id, outcome_id, 74.5)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT component_weights FROM symbol_features WHERE id=%s", (snap_id,))
+        weights = cur.fetchone()[0]
+    assert weights == {"technical": 1.0}
+
+
+def test_attach_fundamental_score_rolls_back_on_db_exception(conn):
+    """Passing a non-numeric value for a NUMERIC column is a genuine
+    Postgres cast error -- must not raise, must leave the row untouched,
+    and the connection must remain usable afterward."""
+    as_of = _as_of()
+    snap_id = record_symbol_feature_snapshot(conn, "AAPL", "buy", as_of, 62)
+    thesis_id = _mean_reversion_thesis_id(conn)
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO signal_outcomes (symbol, side, score, thesis_id)
+            VALUES ('AAPL', 'buy', 62, %s) RETURNING id
+        """, (thesis_id,))
+        outcome_id = cur.fetchone()[0]
+    conn.commit()
+
+    attach_fundamental_score(conn, snap_id, outcome_id, "not-a-number")  # must not raise
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT fundamental_score FROM symbol_features WHERE id=%s", (snap_id,))
+        assert cur.fetchone()[0] is None
+        cur.execute("SELECT score FROM signal_outcomes WHERE id=%s", (outcome_id,))
+        assert cur.fetchone()[0] == 62  # untouched
 
 
 def _mean_reversion_thesis_id(conn):

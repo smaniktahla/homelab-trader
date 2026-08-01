@@ -14,6 +14,7 @@ from market_regime import compute_market_regime, save_market_context
 from outcomes import update_signal_outcomes
 from earnings import sync_earnings_calendar
 from postmortem import run_postmortem_review
+from fundamentals_collector import sync_fundamentals
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -121,6 +122,34 @@ def get_last_morning_date(conn):
 
 def set_last_morning_date(conn, d: date):
     set_kv(conn, "last_morning_date", d.isoformat())
+
+def get_last_fundamentals_sync_date(conn):
+    v = get_kv(conn, "last_fundamentals_sync_date")
+    if v:
+        try:
+            return date.fromisoformat(v)
+        except ValueError:
+            pass
+    return None
+
+def set_last_fundamentals_sync_date(conn, d: date):
+    set_kv(conn, "last_fundamentals_sync_date", d.isoformat())
+
+def refresh_fundamentals_if_due(conn, symbols):
+    """Daily cadence, same app_settings-backed gate as the digest/morning
+    schedules above -- fundamentals don't change intra-day, so there's no
+    reason to hit SEC EDGAR every hourly ingest cycle. Own try/except:
+    sync_fundamentals() is already internally fail-isolated per symbol,
+    but a failure in the date bookkeeping itself must not propagate into
+    run_once() and skip everything after it in the same cycle."""
+    try:
+        today = date.today()
+        if get_last_fundamentals_sync_date(conn) == today:
+            return
+        sync_fundamentals(conn, symbols)
+        set_last_fundamentals_sync_date(conn, today)
+    except Exception as e:
+        log.warning(f"Fundamentals refresh failed: {e}")
 
 def alert_throttled(conn, alert_key, hours=4):
     """Return True if we've already sent this alert within the throttle window."""
@@ -1007,6 +1036,7 @@ def run_once(conn, last_universe_scan):
         log.warning(f"Market regime update failed: {e}")
 
     sync_earnings_calendar(conn)
+    refresh_fundamentals_if_due(conn, symbols)
     compute_signals(conn, symbols)
     reconcile_orders(conn)
     update_signal_outcomes(conn)
