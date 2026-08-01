@@ -6,12 +6,11 @@ and shared/signals.py must not depend on an ingest-only module — that would
 reverse the existing dependency direction and could break the API
 container's import path.
 
-ingest/feature_pipeline.py (added in a later PR) is a different thing: the
-process that computes multi-source *derived* features from raw collector
-tables (fundamental_facts, macro_observations, ...). This module only
-stores the technical score signals.py already computed, plus whatever
-components a later PR's feature_pipeline hands it — it does no scoring
-itself.
+shared/fundamentals.py (PR #2) is the same pattern one level up: it reads
+fundamental_facts (raw collector data written by ingest/fundamentals.py)
+and computes a shadow fundamental_score, which compute_signals() passes
+into attach_fundamental_score() below. This module still does no scoring
+itself — it only persists scores computed elsewhere in shared/.
 
 Every public function here is best-effort and fail-open: on any DB error it
 rolls back just its own statement and returns None, and never raises past
@@ -105,6 +104,40 @@ def attach_feature_snapshot(conn, outcome_id, feature_snapshot_id, technical_sco
         conn.commit()
     except Exception as e:
         log.warning(f"feature_store: attach failed for outcome {outcome_id}: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+def attach_fundamental_score(conn, feature_snapshot_id, outcome_id, fundamental_score):
+    """Best-effort update of fundamental_score on both symbol_features
+    (via feature_snapshot_id) and signal_outcomes (via outcome_id), in one
+    transaction so they can never disagree with each other. Never raises.
+    A failure here never touches either row's other fields (technical
+    score, block_reason, etc.), since those were already committed by the
+    caller before this runs.
+
+    component_weights is deliberately left untouched (still
+    {"technical": 1.0}) -- storing a fundamental_score value here does not
+    give it any decision weight. Status ("shadow" vs "unavailable") is
+    derived by the API purely from whether component_weights names this
+    component with a nonzero weight, which it doesn't yet -- see
+    api/main.py::_component_status()."""
+    try:
+        with conn.cursor() as cur:
+            if feature_snapshot_id is not None:
+                cur.execute(
+                    "UPDATE symbol_features SET fundamental_score=%s WHERE id=%s",
+                    (fundamental_score, feature_snapshot_id),
+                )
+            cur.execute(
+                "UPDATE signal_outcomes SET fundamental_score=%s WHERE id=%s",
+                (fundamental_score, outcome_id),
+            )
+        conn.commit()
+    except Exception as e:
+        log.warning(f"feature_store: fundamental attach failed for outcome {outcome_id}: {e}")
         try:
             conn.rollback()
         except Exception:
