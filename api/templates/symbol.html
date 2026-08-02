@@ -462,7 +462,12 @@ async function loadChart(days, btn) {
         },
         scales: {
           x: {
-            type: 'time',
+            // 'timeseries' (not 'time'): spaces points evenly by index like
+            // the old category scale did, instead of proportionally to
+            // elapsed calendar time -- 'time' was leaving a visual gap for
+            // every weekend/holiday since there's no data point to plot
+            // there. Tooltips/labels still show real dates.
+            type: 'timeseries',
             time: { unit: wide ? 'month' : 'day', tooltipFormat: 'MMM d, yyyy' },
             grid: { color: '#1a1d27' }, ticks: { color: '#555', maxTicksLimit: 8 }
           },
