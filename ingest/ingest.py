@@ -12,6 +12,7 @@ from signals import compute_signals
 from scanner import seed_universe, scan_universe, promote_demote
 from market_regime import compute_market_regime, save_market_context
 from outcomes import update_signal_outcomes
+from build_position_lifecycles import build_position_lifecycles
 from earnings import sync_earnings_calendar
 from postmortem import run_postmortem_review
 from fundamentals_collector import sync_fundamentals
@@ -1040,6 +1041,14 @@ def run_once(conn, last_universe_scan):
     compute_signals(conn, symbols)
     reconcile_orders(conn)
     update_signal_outcomes(conn)
+
+    # Platform Improvements PR A: derived from the trades ledger every
+    # cycle, same fail-open placement as the other derivation steps above
+    # -- a failure here must never affect the proposal/execution path.
+    try:
+        build_position_lifecycles(conn)
+    except Exception as e:
+        log.warning(f'Position lifecycles rebuild failed: {e}')
 
     # Every cycle, regardless of market hours — a proposal existing is a DB
     # fact, not a live-market condition, unlike the other alerts below.
