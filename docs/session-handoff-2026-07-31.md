@@ -2,6 +2,8 @@
 
 Written at the end of a long session on `homelab-trader`, stopping before the context limit. All facts below were re-verified against GitHub and the live deployment host (ubuntu-box, 10.10.10.13) immediately before writing this — nothing here is asserted from memory alone. No new code was written after verification began.
 
+**2026-08-01 addendum**: `docs/research-backtesting-improvements.md` (its own docs-only PR) adds six research/backtesting roadmap items — transaction-cost sensitivity, a shared realistic fill model, intraday ambiguity handling, robustness/concentration reporting, intraday execution diagnostics, and an opening-range breakout research backlog entry. All extend Platform Improvements PR B/D (§3 below) and share PR A's dependency. Still design-only, not implemented.
+
 ## 1. Repository state
 
 **`main`**: `5833b2a` ("Add DB rollback in per-symbol error handler and alert on ingest cycle failures") — unchanged all session. This is also exactly what's currently deployed and running on ubuntu-box (`invest-api`/`invest-ingest` containers, up 2 days, untouched by this session).
