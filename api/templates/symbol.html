@@ -136,7 +136,7 @@
         <h2 style="margin:0">Price History</h2>
         <div style="display:flex;align-items:center;gap:14px">
           <label style="display:flex;align-items:center;gap:5px;font-size:.78rem;color:#888;cursor:pointer">
-            <input type="checkbox" id="candles-toggle" onchange="loadChart(currentChartDays,null)">
+            <input type="checkbox" id="candles-toggle" checked onchange="loadChart(currentChartDays,null)">
             Candlesticks
           </label>
           <label style="display:flex;align-items:center;gap:5px;font-size:.78rem;color:#888;cursor:pointer">
@@ -398,11 +398,33 @@ async function loadChart(days, btn) {
       fill: true, backgroundColor: color + '15',
     };
 
+    // Volume as a footer strip under the price panel, same canvas/chart --
+    // a real secondary axis (not a second canvas) so it shares the x-axis
+    // panning/zooming and trade-marker alignment for free. Scaled to only
+    // ever occupy the bottom ~20% of the chart's vertical space (max = 5x
+    // the period's peak volume) regardless of days shown, same visual
+    // convention every candlestick charting tool uses for a volume footer.
+    const volumes = data.map(r => r.volume).filter(v => v != null);
+    const maxVolume = volumes.length ? Math.max(...volumes) : 0;
+    const volumeDataset = {
+      type: 'bar', label: 'Volume', yAxisID: 'y1',
+      data: data.map(r => ({
+        x: new Date(r.ts).getTime(),
+        y: r.volume,
+        _up: r.close >= r.open,
+      })),
+      backgroundColor: ctx => ctx.raw && ctx.raw._up === false ? '#f75f5f33' : '#3ecf6e33',
+      borderWidth: 0,
+      barPercentage: 0.8, categoryPercentage: 0.9,
+      order: 10,   // drawn behind the price/candlestick series
+    };
+
     if (priceChart) priceChart.destroy();
     priceChart = new Chart(document.getElementById('price-chart'), {
       type: 'line',
       data: {
         datasets: [
+          volumeDataset,
           priceDataset,
           {
             type: 'scatter', label: 'Buy', data: buyPoints,
@@ -456,6 +478,12 @@ async function loadChart(days, btn) {
                   const labels = ctx.dataset.tooltipLabels || [];
                   return ' ' + (labels[ctx.dataIndex] || (ctx.dataset.label === 'Buy' ? '▲ Buy' : '▼ Sell'));
                 }
+                if (ctx.dataset.label === 'Volume') {
+                  const v = ctx.parsed.y;
+                  if (v == null) return null;
+                  const fmt = v >= 1e6 ? (v/1e6).toFixed(2) + 'M' : v >= 1e3 ? (v/1e3).toFixed(1) + 'K' : v.toFixed(0);
+                  return ` Volume: ${fmt}`;
+                }
                 return ctx.parsed.y == null ? null : ` ${ctx.dataset.label}: $${ctx.parsed.y.toFixed(2)}`;
               }
             }
@@ -472,7 +500,11 @@ async function loadChart(days, btn) {
             time: { unit: wide ? 'month' : 'day', tooltipFormat: 'MMM d, yyyy' },
             grid: { color: '#1a1d27' }, ticks: { color: '#555', maxTicksLimit: 8 }
           },
-          y: { min: yMin, max: yMax, grid: { color: '#1a1d27' }, ticks: { color: '#555', callback: v => '$' + v.toFixed(0) } }
+          y: { min: yMin, max: yMax, grid: { color: '#1a1d27' }, ticks: { color: '#555', callback: v => '$' + v.toFixed(0) } },
+          // Volume footer: hidden axis, 0 to 5x peak volume so real bars
+          // only ever fill the bottom ~20% of the chart -- see
+          // volumeDataset's own comment for why.
+          y1: { min: 0, max: maxVolume * 5 || 1, display: false, grid: { display: false } }
         },
         animation: false,
       }
