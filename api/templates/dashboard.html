@@ -1228,6 +1228,51 @@ function gmUtcNowDecimalHours() {
   return n.getUTCHours() + n.getUTCMinutes() / 60;
 }
 
+// Greedy label-collision avoidance, shared by the clock strip and the map.
+// `items` must already be sorted by xFn ascending. Assigns each item a tier
+// (0, 1, 2, ...) such that any two items sharing a tier are always at least
+// `minGap` px apart in x -- unlike a fixed i%N cycle (the clock strip's old
+// approach), this actually looks at real pixel distance, so a dense cluster
+// (e.g. Shanghai/Tokyo/Taipei/Seoul/Hong Kong all close together on this
+// map's projection) automatically spreads across as many tiers as it
+// genuinely needs instead of silently colliding whenever 3 tiers isn't
+// enough for how many markets happen to be crammed into a narrow x-range.
+function gmAssignTiers(items, xFn, minGap) {
+  const lastXPerTier = [];
+  return items.map(d => {
+    const x = xFn(d);
+    let tier = lastXPerTier.findIndex(lastX => x - lastX >= minGap);
+    if (tier === -1) { tier = lastXPerTier.length; lastXPerTier.push(x); }
+    else { lastXPerTier[tier] = x; }
+    return tier;
+  });
+}
+
+// True 2D collision resolution for the map's per-marker labels (unlike the
+// clock strip, markers aren't on a single line -- two markers can be at
+// different tiers of their OWN per-marker offset and still collide in
+// absolute screen space, if one marker's real lat happens to sit far
+// enough from another's that the tier gap doesn't cover it). Mutates each
+// item's `y` in place. `items` should be pre-sorted so the ones that get
+// priority to keep their natural position come first; `direction` is +1
+// to push conflicting items further down, -1 to push them further up.
+function gmResolveCollisions(items, minDX, minDY, direction) {
+  const placed = [];
+  items.forEach(it => {
+    let moved = true;
+    while (moved) {
+      moved = false;
+      for (const p of placed) {
+        if (Math.abs(it.x - p.x) < minDX && Math.abs(it.y - p.y) < minDY) {
+          it.y = p.y + direction * minDY;
+          moved = true;
+        }
+      }
+    }
+    placed.push(it);
+  });
+}
+
 async function loadGlobalMarkets() {
   document.getElementById('gm-clock-strip').innerHTML = '';
   document.getElementById('gm-map').innerHTML = '';
@@ -1246,7 +1291,21 @@ async function loadGlobalMarkets() {
 
   // ── Clock strip ──
   (function() {
-    const height = 100, trackY = 60;
+    const sorted = [...markets].sort((a, b) => px(a) - px(b));
+    // Two-line labels (~46px wide at this font size) need real horizontal
+    // clearance, not just a different tier number, or adjacent tiers can
+    // still visually touch for markets close together in x.
+    const tiers = gmAssignTiers(sorted, px, 46);
+    // The SVG's height must grow with however many rungs this render
+    // actually needs (a dense cluster of 5 close markets needs 3 rungs on
+    // each side) -- a fixed height clipped/overflowed labels for tall
+    // stacks before this, which is why they could go missing or spill
+    // into the section below the strip.
+    const rungSpacing = 30;
+    const maxTier = tiers.length ? Math.max(...tiers) : 0;
+    const maxRung = Math.floor(maxTier / 2);
+    const trackY = 32 + maxRung * rungSpacing + 16;
+    const height = trackY + 40 + maxRung * rungSpacing + 16;
     const svg = d3.select('#gm-clock-strip').append('svg').attr('viewBox', `0 0 ${width} ${height}`).attr('width', '100%')
       .attr('role', 'img').attr('aria-label', 'World clock strip showing current local time at each market');
 
@@ -1264,12 +1323,12 @@ async function loadGlobalMarkets() {
     svg.append('rect').attr('x', 0).attr('y', trackY - 10).attr('width', width).attr('height', 20).attr('fill', 'none')
       .attr('stroke', '#2a2d3a').attr('stroke-width', 0.5).attr('rx', 3);
 
-    const sorted = [...markets].sort((a, b) => px(a) - px(b));
     sorted.forEach((m, i) => {
       const cx = px(m);
-      const tier = i % 3;
-      const above = tier !== 1;
-      const labelY = tier === 0 ? trackY - 32 : tier === 2 ? trackY - 16 : trackY + 40;
+      const tier = tiers[i];
+      const above = tier % 2 === 0;
+      const rung = Math.floor(tier / 2);
+      const labelY = above ? trackY - 32 - rung * rungSpacing : trackY + 40 + rung * rungSpacing;
 
       svg.append('line').attr('x1', cx).attr('x2', cx)
         .attr('y1', above ? labelY + 8 : trackY + 10)
@@ -1307,16 +1366,41 @@ async function loadGlobalMarkets() {
     const nodes = g.selectAll('g.market').data(sorted).join('g')
       .attr('transform', d => `translate(${projection([d.lon, d.lat])})`);
 
+    // True 2D collision avoidance, not just x-proximity tiers: markers
+    // close together on this projection (Shanghai/Tokyo/Taipei/Seoul/Hong
+    // Kong all sit within a narrow area) can still collide even at
+    // different tiers, since their real lat differences put them at
+    // different natural screen y before any offset is even applied. Offset
+    // from a single shared max-radius baseline (not each marker's own
+    // market-cap-scaled radius) so every "natural" position starts level,
+    // then resolve any remaining overlap directly in absolute space.
+    const maxR = d3.max(markets, d => radius(d.market_cap_usd_tn));
+    const posBySlug = new Map(markets.map(d => [d.slug, projection([d.lon, d.lat])]));
+
+    const belowItems = markets.map(d => {
+      const [x, y] = posBySlug.get(d.slug);
+      return { slug: d.slug, x, y: y + maxR + 16 };
+    }).sort((a, b) => a.y - b.y);
+    gmResolveCollisions(belowItems, 55, 16, 1);
+    const belowYBySlug = new Map(belowItems.map(it => [it.slug, it.y]));
+
+    const aboveItems = markets.map(d => {
+      const [x, y] = posBySlug.get(d.slug);
+      return { slug: d.slug, x, y: y - maxR - 6 };
+    }).sort((a, b) => b.y - a.y);
+    gmResolveCollisions(aboveItems, 70, 16, -1);
+    const aboveYBySlug = new Map(aboveItems.map(it => [it.slug, it.y]));
+
     nodes.append('circle').attr('r', d => radius(d.market_cap_usd_tn)).attr('fill', d => gmRegimeColor[d.regime])
       .attr('fill-opacity', 0.88).attr('stroke', '#0d0f1a').attr('stroke-width', 1.5);
     nodes.filter(gmIsOpen).append('circle').attr('r', d => radius(d.market_cap_usd_tn) + 4).attr('fill', 'none')
       .attr('stroke', '#fff').attr('stroke-width', 1.5);
     nodes.filter(d => d.is_home).append('text').attr('y', 5).attr('text-anchor', 'middle')
       .attr('font-size', d => radius(d.market_cap_usd_tn)).attr('fill', '#0d0f1a').text('★');
-    nodes.append('text').attr('y', d => -radius(d.market_cap_usd_tn) - 6).attr('text-anchor', 'middle')
+    nodes.append('text').attr('y', d => aboveYBySlug.get(d.slug) - posBySlug.get(d.slug)[1]).attr('text-anchor', 'middle')
       .attr('fill', '#eee').attr('font-size', 11).attr('font-weight', 500)
       .text(d => gmName(d));
-    nodes.append('text').attr('y', d => radius(d.market_cap_usd_tn) + 16).attr('text-anchor', 'middle')
+    nodes.append('text').attr('y', d => belowYBySlug.get(d.slug) - posBySlug.get(d.slug)[1]).attr('text-anchor', 'middle')
       .attr('fill', d => gmRegimeColor[d.regime]).attr('font-size', 11).attr('font-weight', 500)
       .text(d => (d.overnight_pct >= 0 ? '+' : '') + d.overnight_pct.toFixed(1) + '%');
 
