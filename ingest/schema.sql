@@ -496,18 +496,18 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS initial_stop_price NUMERIC;
 -- always safe to re-run (truncate-and-rebuild per symbol) since trades is
 -- the only source of truth.
 --
--- Distinct from shared/round_trips.py's existing average-cost
--- reconstruction (still what /api/symbol-performance serves as of this
--- PR -- see that module's own docstring): this is true FIFO lot matching,
--- with a real planned-vs-actual risk basis and pathwise MAE/MFE that
--- round_trips.py has no concept of. Swapping /api/symbol-performance over
--- to read from this table instead is deliberately a separate follow-up
--- PR, not part of this one -- see that module's docstring for why.
+-- Was distinct, at the time this table was introduced (Platform
+-- Improvements PR A), from shared/round_trips.py's average-cost
+-- reconstruction -- this is true FIFO lot matching, with a real
+-- planned-vs-actual risk basis and pathwise MAE/MFE round_trips.py never
+-- had. Platform Improvements PR A.1 repointed /api/symbol-performance at
+-- this table and removed round_trips.py, which no longer exists in this
+-- codebase -- see shared/lifecycle_performance.py for the current
+-- read-side logic.
 --
 -- All risk/R/excursion fields are NULL when unknown or not applicable --
 -- never coerced to 0 -- consistent with every other NULL-vs-zero decision
--- already made in this codebase (symbol_features, fundamental_facts,
--- round_trips.py's own cost proration).
+-- already made in this codebase (symbol_features, fundamental_facts).
 CREATE TABLE IF NOT EXISTS position_lifecycles (
     id                              BIGSERIAL PRIMARY KEY,
     symbol                          TEXT NOT NULL,
@@ -563,3 +563,20 @@ CREATE TABLE IF NOT EXISTS position_trades (
 
 CREATE INDEX IF NOT EXISTS idx_position_trades_lifecycle ON position_trades (position_lifecycle_id);
 CREATE INDEX IF NOT EXISTS idx_position_trades_trade ON position_trades (trade_id);
+
+-- Per-symbol unmatched_sell_qty from the same match_lifecycles() run that
+-- builds position_lifecycles/position_trades above -- DERIVED, rebuilt in
+-- the same truncate-and-rebuild transaction, never hand-maintained. This
+-- number (sell quantity that couldn't be matched to any locally-known
+-- FIFO lot -- pre-ledger holdings, data gaps) only ever existed as an
+-- in-memory value summed into a log line until this table; API consumers
+-- (methodology_status/unmatched_sell_qty on /api/symbol-performance) need
+-- it per-symbol without re-walking the full trade ledger on every request.
+-- One row per symbol that appears in a match_lifecycles() run, including
+-- rows with unmatched_sell_qty = 0 -- so a caller can tell "verified zero"
+-- apart from "no lifecycle data built for this symbol at all" (absent row).
+CREATE TABLE IF NOT EXISTS position_lifecycle_symbol_status (
+    symbol               TEXT PRIMARY KEY,
+    unmatched_sell_qty   NUMERIC NOT NULL DEFAULT 0,
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

@@ -1,10 +1,12 @@
 """
-Idempotent builder for position_lifecycles/position_trades -- Platform
-Improvements PR A. Mirrors the price_history -> signals -> signal_outcomes
-derivation pattern already established in this codebase: trades stays
-append-only and is the only source of truth; this module recomputes the
-derived lifecycle tables from it every cycle, safe to re-run any number of
-times (truncate-and-rebuild, not incremental patching).
+Idempotent builder for position_lifecycles/position_trades/
+position_lifecycle_symbol_status -- Platform Improvements PR A (+ PR A.1's
+position_lifecycle_symbol_status addition). Mirrors the price_history ->
+signals -> signal_outcomes derivation pattern already established in this
+codebase: trades stays append-only and is the only source of truth; this
+module recomputes the derived lifecycle tables from it every cycle, safe
+to re-run any number of times (truncate-and-rebuild, not incremental
+patching).
 
 Only fetches price bars for symbols that actually have trades, bounded to
 each symbol's own first trade -> now, rather than pulling every symbol's
@@ -84,7 +86,7 @@ def _rebuild_tables(conn, lifecycles_by_symbol):
     same reason _fetch_trade_rows uses one -- must not depend on whatever
     cursor style the caller's connection happens to default to."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute("TRUNCATE position_trades, position_lifecycles RESTART IDENTITY")
+        cur.execute("TRUNCATE position_trades, position_lifecycles, position_lifecycle_symbol_status RESTART IDENTITY")
 
         for symbol, data in lifecycles_by_symbol.items():
             for lc in data["lifecycles"]:
@@ -122,6 +124,12 @@ def _rebuild_tables(conn, lifecycles_by_symbol):
                         ON CONFLICT (position_lifecycle_id, trade_id) DO UPDATE
                             SET qty_allocated = position_trades.qty_allocated + EXCLUDED.qty_allocated
                     """, (lifecycle_id, pt["trade_id"], pt["role"], pt["qty_allocated"]))
+
+        for symbol, data in lifecycles_by_symbol.items():
+            cur.execute("""
+                INSERT INTO position_lifecycle_symbol_status (symbol, unmatched_sell_qty, updated_at)
+                VALUES (%s, %s, NOW())
+            """, (symbol, data["unmatched_sell_qty"]))
     conn.commit()
 
 

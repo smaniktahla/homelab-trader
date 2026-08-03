@@ -1,10 +1,18 @@
 """
 End-to-end test of GET /api/symbol-performance/{symbol} against a real
 Postgres connection, with Alpaca's live-position lookup mocked. Exists
-specifically to catch integration-level issues pure round_trips.py unit
-tests can't (RealDictCursor row shapes, the HTTPException(404)-as-"flat"
-path, actual SQL execution) — the same reasoning as
-test_api_symbol_features.py in the signal-component work.
+specifically to catch integration-level issues pure lifecycle_performance.py
+unit tests can't (RealDictCursor row shapes, the HTTPException(404)-as-"flat"
+path, actual SQL execution) — same reasoning as test_api_symbol_features.py.
+
+Platform Improvements PR A.1: this endpoint now reads from the materialized
+position_lifecycles/position_trades/position_lifecycle_symbol_status
+tables instead of reconstructing from shared/round_trips.py (removed) at
+request time. Every test here inserts trades, then runs
+ingest/build_position_lifecycles.py's build_position_lifecycles(conn) to
+actually materialize those tables — exercising the real trades ->
+build_position_lifecycles -> API pipeline end to end, not just the API
+layer in isolation.
 """
 
 import os
@@ -53,14 +61,29 @@ def _insert_trade(conn, symbol, side, qty, price, cost, traded_at, status="fille
     conn.commit()
 
 
+def _materialize_lifecycles(conn):
+    """Runs the real ingest/build_position_lifecycles.py builder against
+    whatever's currently in `trades`, same as a real ingest cycle would --
+    the API only ever reads the tables this populates, never the ledger
+    directly."""
+    import pathlib
+    ingest_dir = str(pathlib.Path(__file__).resolve().parent.parent / "ingest")
+    if ingest_dir not in sys.path:
+        sys.path.insert(0, ingest_dir)
+    sys.modules.pop("build_position_lifecycles", None)
+    from build_position_lifecycles import build_position_lifecycles
+    build_position_lifecycles(conn)
+
+
 def test_symbol_performance_no_trades(api_client, conn):
+    _materialize_lifecycles(conn)
     with requests_mock.Mocker() as m:
         m.get("https://fake-alpaca.test/v2/positions/AAPL", status_code=404, json={"message": "not found"})
         r = api_client.get("/api/symbol-performance/AAPL", auth=AUTH)
     assert r.status_code == 200
     body = r.json()
     assert body["completed_round_trips"] == 0
-    assert body["methodology"] == "average_cost_reconstruction"
+    assert body["methodology"] == "position_lifecycle_fifo"
     assert body["open_position"] is None
 
 
@@ -69,6 +92,7 @@ def test_symbol_performance_completed_and_open(api_client, conn):
     _insert_trade(conn, "AAPL", "buy", 10, 100.0, 1.0, base)
     _insert_trade(conn, "AAPL", "sell", 10, 90.0, 1.0, base + timedelta(days=3))     # completed loser
     _insert_trade(conn, "AAPL", "buy", 5, 95.0, 1.0, base + timedelta(days=10))       # still open
+    _materialize_lifecycles(conn)
 
     with requests_mock.Mocker() as m:
         m.get("https://fake-alpaca.test/v2/positions/AAPL", json={
@@ -83,7 +107,7 @@ def test_symbol_performance_completed_and_open(api_client, conn):
     assert body["wins"] == 0
     assert body["losses"] == 1
     assert body["win_rate_pct"] == 0.0
-    assert body["realized_pnl"] == -102.0   # -100 pnl - 2 in costs across the closed trip
+    assert body["realized_pnl"] == -102.0   # -100 pnl - 2 in costs across the closed lifecycle
     assert body["unrealized_pnl"] == 275.0
     assert body["total_pnl"] == pytest.approx(173.0)
     assert body["open_position"]["qty"] == 5.0
@@ -93,9 +117,40 @@ def test_symbol_performance_completed_and_open(api_client, conn):
     assert body["capital_deployed_methodology"] == "sum_of_entry_notionals"
 
 
+def test_symbol_performance_fifo_differs_from_average_cost_on_pyramided_position(api_client, conn):
+    """The whole point of PR A.1: a pyramided (added-to) position produces
+    different numbers under true FIFO lot matching than round_trips.py's
+    now-removed average-cost blending would have. Two entries at different
+    prices, then a partial sell that FIFO resolves against the older,
+    cheaper lot first."""
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    _insert_trade(conn, "TSLA", "buy", 10, 100.0, 0.0, base)                       # older, cheaper lot
+    _insert_trade(conn, "TSLA", "buy", 10, 200.0, 0.0, base + timedelta(days=1))   # newer, pricier lot
+    _insert_trade(conn, "TSLA", "sell", 10, 250.0, 0.0, base + timedelta(days=5))  # FIFO consumes the $100 lot fully
+    _materialize_lifecycles(conn)
+
+    with requests_mock.Mocker() as m:
+        m.get("https://fake-alpaca.test/v2/positions/TSLA", json={
+            "symbol": "TSLA", "qty": "10", "avg_entry_price": "150.0",
+            "current_price": "250.0", "unrealized_pl": "1000.0", "market_value": "2500.0",
+        })
+        r = api_client.get("/api/symbol-performance/TSLA", auth=AUTH)
+    body = r.json()
+
+    # Still one open lifecycle (started by the first buy, never fully
+    # closed) -- FIFO's realized-to-date P&L on the sell is
+    # 10 * (250 - 100) = 1500 against the OLDEST lot's cost, not the $150
+    # blended average an average-cost reconstruction would have used
+    # (which would've computed 10 * (250 - 150) = 1000).
+    assert body["completed_round_trips"] == 0
+    assert body["open_position"]["partial_realized_pnl"] == 1500.0
+    assert body["methodology"] == "position_lifecycle_fifo"
+
+
 def test_symbol_performance_flags_qty_mismatch_end_to_end(api_client, conn):
     base = datetime(2026, 6, 1, tzinfo=timezone.utc)
     _insert_trade(conn, "AAPL", "buy", 5, 100.0, 0.0, base)
+    _materialize_lifecycles(conn)
 
     with requests_mock.Mocker() as m:
         # Broker reports more shares than the local ledger knows about --
@@ -115,6 +170,7 @@ def test_symbol_performance_flags_partial_methodology_on_oversell(api_client, co
     base = datetime(2026, 6, 1, tzinfo=timezone.utc)
     _insert_trade(conn, "AAPL", "buy", 5, 100.0, 0.0, base)
     _insert_trade(conn, "AAPL", "sell", 25, 110.0, 0.0, base + timedelta(days=3))
+    _materialize_lifecycles(conn)
 
     with requests_mock.Mocker() as m:
         m.get("https://fake-alpaca.test/v2/positions/AAPL", status_code=404, json={"message": "not found"})
@@ -129,6 +185,7 @@ def test_symbol_round_trips_endpoint_distinguishes_open_from_closed(api_client, 
     _insert_trade(conn, "MSFT", "buy", 10, 200.0, 0.0, base)
     _insert_trade(conn, "MSFT", "sell", 10, 220.0, 0.0, base + timedelta(days=4))
     _insert_trade(conn, "MSFT", "buy", 3, 210.0, 0.0, base + timedelta(days=20))
+    _materialize_lifecycles(conn)
 
     with requests_mock.Mocker() as m:
         m.get("https://fake-alpaca.test/v2/positions/MSFT", json={

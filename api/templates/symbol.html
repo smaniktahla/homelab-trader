@@ -666,8 +666,8 @@ async function loadPerfSummary() {
     if (!r.ok) { card.innerHTML = '<div class="no-data">Could not load performance summary</div>'; return; }
     const s = await r.json();
 
-    const methodologyLabel = s.methodology === 'average_cost_reconstruction'
-      ? 'Reconstructed from the full trade ledger via weighted-average-cost matching — will switch to lifecycle-based accounting once position_lifecycles ships.'
+    const methodologyLabel = s.methodology === 'position_lifecycle_fifo'
+      ? 'True FIFO lot-based accounting from position_lifecycles, with real stop-based risk where available.'
       : s.methodology;
 
     let html = `<div class="methodology-tag"><span class="dot"></span>${methodologyLabel}</div>`;
