@@ -2,14 +2,19 @@
 
 Design note, following the precedent of `docs/thesis-horizons-and-intraday-data.md`
 and the other `docs/*` design notes from this line of work: committed to
-the repo rather than left in chat history. These six items extend two
-PRs from the Platform Improvements roadmap that were designed in
+the repo rather than left in chat history. Items 1–6 extend two PRs
+from the Platform Improvements roadmap that were designed in
 conversation but not yet written to a repo doc — **Platform Improvements
 PR B (Expectancy Reporting)** and **PR D (Exit-Policy Research)** — plus
-one net-new research backlog entry (#6). None of this is implemented.
-None of it changes current live behavior; everything here is either a
-backtest/research-script concern or an explicitly offline/shadow
-analysis, same as the rest of the Platform Improvements sequence.
+one net-new research backlog entry (#6). Items 7–13, added in a second
+pass, cover re-entry/setup-episode analysis, a target-allocation
+strategy interface, strategy timing contracts, ensemble attribution,
+drawdown-duration reporting, research lineage/multiple-testing records,
+and backtest data-lineage metadata. None of this is implemented. None
+of it changes current live behavior; everything here is either a
+backtest/research-script concern, a strategy-interface design, or an
+explicitly offline/shadow analysis, same as the rest of the Platform
+Improvements sequence.
 
 ## Grounding: what actually exists today
 
@@ -210,6 +215,131 @@ Requirements before any backtesting work starts:
   central question of whether this strategy family is viable at all
   after realistic costs, not a nice-to-have addendum.
 
+## 7. Setup episodes and re-entry analysis
+
+For strategies that permit multiple entries against one underlying setup
+(a stopped-out breakout retried after a cooldown, for example), group
+those attempts under a shared `setup_episode_id` rather than letting
+each attempt read as an unrelated, independent trade — the existing
+`buy_cooldown_days` mechanism (`signal_params`, enforced in
+`shared/signals.py`) already suppresses same-symbol re-proposals within
+a window, but nothing currently links a suppressed-then-later-approved
+re-entry back to the setup that originally triggered it, so there is no
+way today to ask "did the second attempt at this setup do better or
+worse than the first."
+
+Record per attempt: attempt number, the episode's initial setup time,
+entry and exit reason, cooldown duration actually observed, cumulative
+gross and net P&L, cumulative realized R (once PR A's R-multiple fields
+exist), cumulative costs and slippage (once item 2's fill model exists),
+maximum attempts allowed, and whether the final episode followed all
+rules.
+
+Strategy Review (`strategy_review_proposals`) should be able to compare:
+first-entry-only performance, performance including re-entries, the
+marginal expectancy of attempt 2, 3, and later specifically (not just
+the episode average — a strategy where only attempt 1 ever works is a
+materially different finding than one where every attempt contributes
+equally), total friction from repeated trading, episode-level drawdown,
+and whether re-entry improves net expectancy after costs at all, or
+just adds friction for the same eventual outcome.
+
+**Re-entry must be defined deterministically and must consume the same
+live-risk budget as any other new entry.** It is not a continuation that
+bypasses position, daily-loss, or trade-count limits — `max_positions`
+(the same position-count cap the dashboard's advisor card already
+enforces, e.g. "At position limit (18/15)") and any daily-loss or
+trade-count gate apply to a re-entry exactly as they would to a
+brand-new symbol, with no special-cased exemption anywhere in the
+approval path.
+
+## 8. Target-allocation strategy interface
+
+Allow future strategies to emit desired portfolio weights or share
+quantities directly, rather than being limited to the discrete buy/sell
+signals `shared/signals.py::compute_signals()` produces today. A
+target-allocation strategy needs to report, at minimum: current
+exposure, requested exposure, final risk-capped exposure (after
+`max_positions`, the circuit breaker, and any other live risk gate has
+had a chance to constrain it), and the resulting required adjustment
+(the actual order(s) needed to move from current to risk-capped
+exposure). This is a new strategy *shape*, not a replacement for the
+existing discrete-signal path — `theses.horizon`'s existing taxonomy
+(`long_term` / `short_term` / `day_trading`, see
+`docs/thesis-horizons-and-intraday-data.md`) already anticipates more
+than one kind of strategy coexisting; a target-allocation interface is
+additive to that, not a rewrite of it.
+
+## 9. Strategy timing contracts
+
+Store, per strategy (or per proposal): decision window (how long a
+signal is valid to be acted on), execution window (how long an approved
+proposal remains fillable), and signal expiry. Block stale or
+mistimed proposals — a signal generated before yesterday's close being
+approved and filled today, well outside whatever window the strategy
+that generated it actually intended, is exactly the kind of
+timing-contract violation this is meant to catch. No existing table
+tracks this today; `trade_proposals` (undocumented in `schema.sql`,
+per the pre-existing gap noted in this repo's operational notes) has
+`proposed_at`/`decided_at` but nothing that expresses the strategy's own
+intended validity window as distinct from when a human happened to act.
+
+## 10. Ensemble attribution
+
+Once more than one signal-integration component carries real weight
+(see `docs/signal-component-architecture.md` — today only `technical`
+does; `component_weights` is stored per outcome specifically so this is
+answerable once that changes), preserve each strategy or component's
+individual contribution to the final target, and separately identify
+any risk overlay (the circuit breaker, `max_positions`, a future
+launch-risk profile) that modified it after the fact. The goal is being
+able to answer "how much of this decision came from the signal versus
+how much came from a risk constraint overriding it" after the fact, not
+just at decision time.
+
+## 11. Drawdown-duration reporting
+
+Add longest drawdown, time to recovery, and percentage of time
+underwater to Strategy Review's metric set. The circuit breaker
+(`shared/circuit_breaker.py`) already tracks `high_water_mark` and
+`drawdown_pct` continuously in `portfolio_snapshots`, so the raw data to
+compute these already exists — this is a reporting gap, not a new data
+requirement, unlike most of the other items on this list.
+
+## 12. Research lineage and multiple-testing records
+
+Record rejected experiments and parameter searches, not only winning
+backtests. `backtest_results` exists today (`experiment_id`, `run_at`,
+`git_commit`, `summary`, `results` JSONB) and every one of the four
+current backtest scripts writes to it at the end of a run — but nothing
+distinguishes a deliberately-rejected result from an adopted one, and
+nothing records the parameter sweep that produced a winning
+configuration versus the runs that didn't make the cut. Without that,
+a strategy's apparent edge can't be checked for multiple-testing bias
+(the more parameter combinations tried, the more likely one looks good
+by chance alone) after the fact. Require out-of-sample validation
+*after* strategy selection, not folded into the same search that picked
+the winning parameters — the same discipline
+`docs/signal-component-architecture.md` already holds live component
+weights to ("no component but `technical` gets real weight... until its
+own validated backtest").
+
+## 13. Backtest data-lineage metadata
+
+Label market data as observed, adjusted, reconstructed, or synthetic.
+`price_history.adjclose` (dividend/split-adjusted close, added
+alongside the existing raw `close`) is the one piece of this that
+already exists and is already labeled by construction — extending the
+same discipline to every other data source a backtest might use.
+Synthetic leveraged-product histories (a simulated 2x/3x leveraged ETF
+history reconstructed from an underlying index, for strategies that
+want to backtest further back than the real leveraged product's actual
+inception) must document leverage reset frequency, fees, financing
+cost, and tracking-error assumptions explicitly — a synthetic history
+that silently omits daily-reset compounding effects can make a
+leveraged strategy look substantially better in backtest than any real
+version of that product would have performed.
+
 ## Where this sits in the overall roadmap
 
 Items 1–4 are refinements of **Platform Improvements PR B and PR D**,
@@ -219,8 +349,18 @@ PR A/B/C/D exist as designs but PR B/C/D were never written to a repo doc
 in the same depth as PR A's schema was). Item 5 is a placeholder tied to
 the already-documented `short_term` horizon. Item 6 is a new backlog
 entry, deliberately kept at arm's length from any existing execution
-path. None of the six should be implemented before **Platform
+path. Items 7 and 10 extend PR B's expectancy/segmentation framing to
+re-entries and multi-component ensembles respectively; item 11 is a
+reporting-only addition against data the circuit breaker already
+collects; items 8 and 9 are new strategy-interface concerns (allocation
+targets and timing contracts) that sit alongside, not on top of, the
+existing discrete-signal path; items 12 and 13 are research-process
+and data-hygiene requirements that apply to every item above rather
+than being scoped to any one of them.
+
+None of items 1–11 should be implemented before **Platform
 Improvements PR A** (position lifecycles / R-multiple foundation) lands
-— items 1 and 4's "gross vs. net" and "expectancy" framing both assume
-PR A's R-multiple fields exist, same dependency already noted for PR B
+— items 1, 4, 7, and 10's "gross vs. net," "expectancy," and
+R-multiple framing all assume PR A's fields exist, same dependency
+already noted for PR B
 and PR D in the handoff.
