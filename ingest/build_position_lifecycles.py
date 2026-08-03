@@ -14,6 +14,8 @@ periods a real lifecycle was actually open.
 
 import logging
 
+import psycopg2.extras
+
 from position_lifecycles import match_lifecycles
 
 log = logging.getLogger(__name__)
@@ -24,8 +26,14 @@ def _fetch_trade_rows(conn):
     shared/round_trips.py's callers already use. Joins trade_proposals for
     the planned_* fields (only ever populated on buy proposals -- see
     shared/signals.py); trades.initial_stop_price is already the
-    fill-time-immutable copy, no join needed for that one."""
-    with conn.cursor() as cur:
+    fill-time-immutable copy, no join needed for that one.
+
+    Uses an explicit dict cursor regardless of the caller's connection
+    default -- ingest.py's own get_db() returns plain tuple cursors, but
+    match_lifecycles() (and this module's own row access) needs dict-style
+    access, so this must not depend on whatever cursor style the caller
+    happens to have configured."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
             SELECT t.id, t.symbol, t.side, t.qty, t.price, t.cost, t.traded_at,
                    t.thesis_id, t.initial_stop_price,
@@ -48,21 +56,21 @@ def _fetch_price_bars(conn, symbols_with_earliest_trade):
     bars is labeled accordingly rather than silently claiming hourly
     precision it didn't have."""
     bars_by_symbol = {}
-    with conn.cursor() as cur:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         for symbol, earliest in symbols_with_earliest_trade.items():
             cur.execute("""
                 SELECT ts, high, low FROM price_history_hourly
                 WHERE symbol=%s AND ts >= %s
                 ORDER BY ts ASC
             """, (symbol, earliest))
-            hourly = [{"ts": r[0], "high": r[1], "low": r[2], "resolution": "hourly"} for r in cur.fetchall()]
+            hourly = [{"ts": r["ts"], "high": r["high"], "low": r["low"], "resolution": "hourly"} for r in cur.fetchall()]
 
             cur.execute("""
                 SELECT ts, high, low FROM price_history
                 WHERE symbol=%s AND ts >= %s
                 ORDER BY ts ASC
             """, (symbol, earliest))
-            daily = [{"ts": r[0], "high": r[1], "low": r[2], "resolution": "daily"} for r in cur.fetchall()]
+            daily = [{"ts": r["ts"], "high": r["high"], "low": r["low"], "resolution": "daily"} for r in cur.fetchall()]
 
             bars = sorted(hourly + daily, key=lambda b: b["ts"])
             if bars:
@@ -72,8 +80,10 @@ def _fetch_price_bars(conn, symbols_with_earliest_trade):
 
 def _rebuild_tables(conn, lifecycles_by_symbol):
     """Truncate-and-rebuild inside one transaction -- never a partial
-    write visible to readers mid-rebuild."""
-    with conn.cursor() as cur:
+    write visible to readers mid-rebuild. Explicit dict cursor for the
+    same reason _fetch_trade_rows uses one -- must not depend on whatever
+    cursor style the caller's connection happens to default to."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("TRUNCATE position_trades, position_lifecycles RESTART IDENTITY")
 
         for symbol, data in lifecycles_by_symbol.items():
@@ -103,7 +113,7 @@ def _rebuild_tables(conn, lifecycles_by_symbol):
                     lc.mae_price, lc.mfe_price, lc.mae_r, lc.mfe_r,
                     lc.excursion_resolution, lc.data_quality_flags,
                 ))
-                lifecycle_id = cur.fetchone()[0]
+                lifecycle_id = cur.fetchone()["id"]
 
                 for pt in lc.position_trades:
                     cur.execute("""
