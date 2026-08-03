@@ -966,8 +966,23 @@ async function loadTrades() {
 // ── Strategy Review ───────────────────────────────────────────────
 const BUCKET_GROUP_LABEL = { score_buckets: 'Score', symbol_regime: 'Regime', approval_status: 'Approval' };
 
+// Platform Improvements PR B: real trade-level expectancy segments,
+// computed from closed position_lifecycles (see ingest/postmortem.py's
+// _lifecycle_segments) — a different, independent data source from the
+// signal-level buckets above (signal_outcomes: hypothetical, large N).
+// Namespaced lifecycle_*-prefixed keys in the same metric_summary JSONB,
+// rendered in their own table below so the two are never visually
+// conflated.
+const LIFECYCLE_GROUP_LABEL = {
+  lifecycle_thesis: 'Thesis', lifecycle_symbol: 'Symbol', lifecycle_exit_reason: 'Exit Reason',
+  lifecycle_market_regime: 'Market Regime', lifecycle_sector: 'Sector',
+  lifecycle_holding_period: 'Holding Period', lifecycle_calendar_period: 'Month',
+};
+const SAMPLE_QUALITY_COLOR = { insufficient: '#666', preliminary: '#c9a227', established: '#3fb950' };
+
 function _reviewBucketTable(metricSummary) {
-  const groups = Object.entries(metricSummary || {}).filter(([, buckets]) => buckets && Object.keys(buckets).length);
+  const groups = Object.entries(metricSummary || {})
+    .filter(([k, buckets]) => !k.startsWith('lifecycle_') && buckets && Object.keys(buckets).length);
   if (!groups.length) return '';
   return groups.map(([group, buckets]) => {
     const rows = Object.entries(buckets).map(([label, s]) => `
@@ -980,6 +995,24 @@ function _reviewBucketTable(metricSummary) {
         <td class="down">${s.avg_loss ?? '—'}</td>
       </tr>`).join('');
     return rows;
+  }).join('');
+}
+
+function _reviewLifecycleBucketTable(metricSummary) {
+  const groups = Object.entries(metricSummary || {})
+    .filter(([k, buckets]) => k.startsWith('lifecycle_') && buckets && Object.keys(buckets).length);
+  if (!groups.length) return '';
+  return groups.map(([group, buckets]) => {
+    return Object.entries(buckets).map(([label, s]) => `
+      <tr>
+        <td style="color:#888">${LIFECYCLE_GROUP_LABEL[group] || group}: ${label}</td>
+        <td>${s.n}</td>
+        <td>${s.win_rate}%</td>
+        <td class="${s.expectancy_dollars >= 0 ? 'up' : 'down'}">$${s.expectancy_dollars}</td>
+        <td>${s.expectancy_r != null ? `${s.expectancy_r}R (n=${s.n_with_r})` : '—'}</td>
+        <td>${s.profit_factor ?? '—'}</td>
+        <td><span style="color:${SAMPLE_QUALITY_COLOR[s.sample_quality] || '#888'}">${s.sample_quality}</span></td>
+      </tr>`).join('');
   }).join('');
 }
 
@@ -1003,6 +1036,14 @@ async function loadReviews() {
              <tbody>${bucketRows}</tbody>
            </table>`
         : '';
+      const lifecycleRows = _reviewLifecycleBucketTable(r.metric_summary);
+      const lifecycleTable = lifecycleRows
+        ? `<div style="margin-top:14px;color:#888;font-size:.78rem">Trade-Level Expectancy (real filled trades, position_lifecycles)</div>
+           <table style="margin-top:6px">
+             <thead><tr><th>Bucket</th><th>N</th><th>Win Rate</th><th>Expectancy $</th><th>Expectancy R</th><th>Profit Factor</th><th>Sample Quality</th></tr></thead>
+             <tbody>${lifecycleRows}</tbody>
+           </table>`
+        : '';
       return `
       <div class="proposal-row" style="flex-direction:column;align-items:stretch">
         <div class="prop-info">
@@ -1011,6 +1052,7 @@ async function loadReviews() {
           <div class="prop-meta">${r.finding}</div>
           ${proposalLine}
           ${bucketTable}
+          ${lifecycleTable}
         </div>
       </div>`;
     }).join('');
