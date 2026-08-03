@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from signals import compute_signals, compute_bollinger
 from signal_components import weighted_component_score
-import round_trips
+import lifecycle_performance
 
 DB_DSN = os.environ["DATABASE_URL"]
 ALPACA_KEY = os.environ.get("ALPACA_API_KEY", "")
@@ -493,34 +493,58 @@ def get_positions():
         "pending_orders": pending_by_symbol.get(p["symbol"], []),
     } for p in positions]
 
-def _all_filled_trades(cur):
-    """Every filled trade, oldest -> newest, across ALL symbols — the full
-    ledger, never a limited/paginated slice, so shared/round_trips.py's
-    reconstruction can correctly attribute a sell to a buy that happened
-    long before whatever window a UI happens to be showing. Separate from
-    _realized_pnl_by_trade_id's own query (same filter/ordering, different
-    column list) so that function's existing behavior for /api/trades'
-    WIN/LOSS badges is untouched by this addition.
-
-    PERFORMANCE NOTE: get_symbol_performance() and get_symbol_round_trips()
-    each call this and re-run the full-ledger reconstruction independently
-    — the symbol page currently fires both as separate requests, so one
-    page load does this walk twice. Harmless at today's trade count
-    (a full scan of the whole ledger is cheap at this scale); worth
-    revisiting once it isn't, via one of:
-      - request-time caching of reconstruct()'s output,
-      - merging the two endpoints into one response so a single page load
-        only reconstructs once,
-      - the eventual switch to position_lifecycles as the data source,
-        which (being already materialized incrementally rather than
-        walked fresh) sidesteps this cost entirely.
-    Not fixed now — no evidence yet that it needs to be."""
+def _all_closed_lifecycles(cur):
+    """Every CLOSED position_lifecycles row, across ALL symbols, oldest
+    opened_at first, each joined to position_trades to recover its
+    entry_trade_ids/exit_trade_ids (grouped via array_agg ... FILTER, since
+    a lifecycle can have more than one entry and more than one exit trade —
+    pyramiding and partial exits). Already materialized incrementally by
+    ingest/build_position_lifecycles.py every ingest cycle, unlike the old
+    round_trips.py reconstruction this replaces — no full-ledger walk
+    happens at request time anymore."""
     cur.execute("""
-        SELECT id, symbol, side, qty, price, cost, traded_at FROM trades
-        WHERE status='filled' AND price IS NOT NULL
-        ORDER BY traded_at ASC, id ASC
+        SELECT pl.*,
+               COALESCE(array_agg(pt.trade_id) FILTER (WHERE pt.role='entry'), '{}') AS entry_trade_ids,
+               COALESCE(array_agg(pt.trade_id) FILTER (WHERE pt.role='exit'), '{}') AS exit_trade_ids
+        FROM position_lifecycles pl
+        LEFT JOIN position_trades pt ON pt.position_lifecycle_id = pl.id
+        WHERE pl.status = 'closed'
+        GROUP BY pl.id
+        ORDER BY pl.opened_at ASC
     """)
-    return cur.fetchall()
+    rows = cur.fetchall()
+    lifecycles_by_symbol = {}
+    for row in rows:
+        lifecycles_by_symbol.setdefault(row["symbol"], []).append(row)
+    return lifecycles_by_symbol
+
+def _open_lifecycle(cur, symbol: str):
+    """This symbol's single open position_lifecycles row (status='open'),
+    or None — a symbol can have at most one open lifecycle by construction
+    (match_lifecycles() only starts a new one once the previous fully
+    closes). Joined to position_trades the same way _all_closed_lifecycles
+    is, for consistency, even though entry/exit trade ids on the open
+    lifecycle aren't currently rendered anywhere."""
+    cur.execute("""
+        SELECT pl.*,
+               COALESCE(array_agg(pt.trade_id) FILTER (WHERE pt.role='entry'), '{}') AS entry_trade_ids,
+               COALESCE(array_agg(pt.trade_id) FILTER (WHERE pt.role='exit'), '{}') AS exit_trade_ids
+        FROM position_lifecycles pl
+        LEFT JOIN position_trades pt ON pt.position_lifecycle_id = pl.id
+        WHERE pl.symbol = %s AND pl.status = 'open'
+        GROUP BY pl.id
+    """, (symbol,))
+    return cur.fetchone()
+
+def _symbol_unmatched_sell_qty(cur, symbol: str):
+    """From position_lifecycle_symbol_status (see ingest/schema.sql) —
+    derived by the same match_lifecycles() run that builds
+    position_lifecycles/position_trades, persisted specifically so this
+    doesn't require re-walking the full ledger per request. 0.0 if this
+    symbol has no lifecycle data built for it at all yet."""
+    cur.execute("SELECT unmatched_sell_qty FROM position_lifecycle_symbol_status WHERE symbol = %s", (symbol,))
+    row = cur.fetchone()
+    return float(row["unmatched_sell_qty"]) if row else 0.0
 
 def _live_position_or_none(symbol: str):
     try:
@@ -533,68 +557,56 @@ def _live_position_or_none(symbol: str):
 @app.get("/api/symbol-performance/{symbol}")
 def get_symbol_performance(symbol: str):
     """Symbol Performance Summary: realized/unrealized/total P&L, completed
-    round trips, win rate, avg/median return, best/worst trade, capital
+    lifecycles, win rate, avg/median return, best/worst trade, capital
     deployed, avg holding period, and this symbol's contribution to
     portfolio gross gains and net P&L.
 
-    Reporting-only — reads trades/positions that already exist, computes
-    nothing that feeds back into proposal, sizing, or execution logic.
+    Reporting-only — reads position_lifecycles/positions that already
+    exist, computes nothing that feeds back into proposal, sizing, or
+    execution logic.
 
-    Uses shared/round_trips.py's average-cost reconstruction (methodology
-    explicitly labeled in the response) — a stand-in for the
-    position_lifecycles work planned but not yet built. Once that lands,
-    this endpoint should be repointed at position_lifecycles as the
-    canonical source; the response shape here is intentionally close to
-    what that will look like so the switch is mostly a data-source swap,
-    not a UI rewrite.
+    Uses shared/lifecycle_performance.py against the materialized
+    position_lifecycles table (true FIFO lot matching, methodology
+    explicitly labeled in the response) — Platform Improvements PR A.1,
+    replacing the prior shared/round_trips.py average-cost reconstruction.
+    Numbers here can legitimately differ from what this endpoint used to
+    return for any symbol pyramided into more than once before fully
+    exiting; see lifecycle_performance.py's own module docstring.
 
-    Completed-trade statistics come exclusively from round_trips.reconstruct()'s
-    completed round trips — the currently open position (if any), sourced
-    live from Alpaca rather than re-derived locally, only ever contributes
-    to the separate unrealized/total P&L fields. See round_trips.symbol_summary's
-    own docstring for why live Alpaca data is preferred over a second local
-    reconstruction of "what's currently held."
+    Completed-lifecycle statistics come exclusively from this symbol's
+    closed position_lifecycles rows — the currently open position (if
+    any), sourced live from Alpaca rather than re-derived locally, only
+    ever contributes to the separate unrealized/total P&L fields. See
+    lifecycle_performance.symbol_summary's own docstring for why live
+    Alpaca data is preferred over a second local reconstruction of "what's
+    currently held."
     """
     symbol = symbol.upper()
     with db() as conn, conn.cursor() as cur:
-        trades = _all_filled_trades(cur)
-    reconstruction = round_trips.reconstruct(trades)
-    totals = round_trips.portfolio_totals(reconstruction)
+        lifecycles_by_symbol = _all_closed_lifecycles(cur)
+        open_lifecycle = _open_lifecycle(cur, symbol)
+        unmatched_sell_qty = _symbol_unmatched_sell_qty(cur, symbol)
+    totals = lifecycle_performance.portfolio_totals(lifecycles_by_symbol)
     live_position = _live_position_or_none(symbol)
-    return round_trips.symbol_summary(symbol, reconstruction, totals, live_position=live_position)
+    return lifecycle_performance.symbol_summary(
+        symbol, lifecycles_by_symbol, totals, unmatched_sell_qty,
+        open_lifecycle=open_lifecycle, live_position=live_position,
+    )
 
 @app.get("/api/symbol-performance/{symbol}/round-trips")
 def get_symbol_round_trips(symbol: str):
-    """Full round-trip history for the table below the summary — completed
-    trips oldest-first, plus the open episode (if any) called out
-    separately so the UI can visually distinguish it rather than mixing it
-    into the same rows."""
+    """Full closed-lifecycle history for the table below the summary —
+    oldest-first, plus the open lifecycle (if any) called out separately
+    so the UI can visually distinguish it rather than mixing it into the
+    same rows."""
     symbol = symbol.upper()
     with db() as conn, conn.cursor() as cur:
-        trades = _all_filled_trades(cur)
-    reconstruction = round_trips.reconstruct(trades)
-    data = reconstruction.get(symbol, {"round_trips": [], "open_episode": None})
+        lifecycles_by_symbol = _all_closed_lifecycles(cur)
+        open_lifecycle = _open_lifecycle(cur, symbol)
     live_position = _live_position_or_none(symbol)
-    return {
-        "symbol": symbol,
-        "methodology": round_trips.METHODOLOGY,
-        "round_trips": [
-            {
-                "status": "closed",
-                "entry_trade_ids": t.entry_trade_ids,
-                "exit_trade_ids": t.exit_trade_ids,
-                "opened_at": t.opened_at.isoformat() if t.opened_at else None,
-                "closed_at": t.closed_at.isoformat() if t.closed_at else None,
-                "qty": t.qty,
-                "entry_notional": t.entry_notional,
-                "net_pnl": t.net_pnl,
-                "return_pct": t.return_pct,
-                "holding_days": t.holding_days,
-            }
-            for t in data["round_trips"]
-        ],
-        "open_position": round_trips.open_episode_summary(data["open_episode"], live_position),
-    }
+    return lifecycle_performance.round_trips_detail(
+        symbol, lifecycles_by_symbol, open_lifecycle=open_lifecycle, live_position=live_position,
+    )
 
 def _total_trade_cost(cur):
     cur.execute("SELECT COALESCE(SUM(cost), 0) AS total FROM trades")

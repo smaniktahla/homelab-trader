@@ -3,15 +3,18 @@ FIFO position-lifecycle matching, R-multiple computation, and pathwise
 MAE/MFE -- Platform Improvements PR A (position lifecycles / R-multiple
 foundation). See docs/session-handoff-2026-07-31.md sections 3/4/6.
 
-Distinct from shared/round_trips.py's average-cost reconstruction (still
-what /api/symbol-performance serves as of this PR -- see that module's own
-docstring): round_trips.py blends every entry into one running average
-cost and has no concept of planned risk. This module does true FIFO lot
-matching -- each entry keeps its own price/cost/stop until consumed by a
-sell, oldest lot first -- and carries a real planned-vs-actual risk basis
-per lifecycle plus pathwise MAE/MFE. Swapping /api/symbol-performance over
-to this module is a deliberate, separate follow-up PR, not part of this
-one -- see round_trips.py's own docstring for why.
+At the time this module was introduced, it was distinct from
+shared/round_trips.py's average-cost reconstruction, which then still
+backed /api/symbol-performance: round_trips.py blended every entry into
+one running average cost and had no concept of planned risk. This module
+does true FIFO lot matching instead -- each entry keeps its own
+price/cost/stop until consumed by a sell, oldest lot first -- and carries
+a real planned-vs-actual risk basis per lifecycle plus pathwise MAE/MFE.
+Platform Improvements PR A.1 repointed /api/symbol-performance at this
+module's output (via shared/lifecycle_performance.py) and removed
+round_trips.py entirely -- remaining references to it below are historical
+design rationale for why FIFO and average-cost differ, not a live
+comparison against a file that still exists.
 
 Long-only. Nothing in this codebase supports short positions as of this
 PR; a sell with no locally-open qty is an oversell/pre-ledger-holding case
