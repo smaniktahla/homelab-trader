@@ -157,7 +157,7 @@
     <!-- Signal history -->
     <div class="card" style="display:flex;flex-direction:column">
       <h2 style="margin-top:0;margin-bottom:8px">Recent Signals</h2>
-      <div style="overflow-y:auto;max-height:200px">
+      <div style="overflow-y:auto;flex:1;min-height:0">
         <table>
           <thead><tr><th>Time</th><th>Type</th><th>Score</th></tr></thead>
           <tbody id="signals-body"><tr><td colspan="3" class="no-data">Loading…</td></tr></tbody>
@@ -285,6 +285,7 @@ async function loadHeader() {
     ]);
     const row = summary.find(s => s.symbol === SYMBOL);
     if (row) {
+      document.getElementById('sym-name').textContent = row.company_name || '';
       document.getElementById('sym-price').textContent = fmtUSD(row.price);
       const pct = row.day_pct ?? 0;
       const chEl = document.getElementById('sym-change');

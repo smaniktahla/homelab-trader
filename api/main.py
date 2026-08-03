@@ -719,9 +719,11 @@ def get_summary():
                 JOIN latest l ON l.symbol = ph.symbol AND ph.ts < l.ts
                 ORDER BY ph.symbol, ph.ts DESC
             )
-            SELECT l.symbol, l.close AS price, l.ts AS as_of,
+            SELECT l.symbol, u.name AS company_name, l.close AS price, l.ts AS as_of,
                    ROUND(((l.close - p.close) / p.close * 100)::numeric, 2) AS day_pct
-            FROM latest l LEFT JOIN prev p ON p.symbol = l.symbol
+            FROM latest l
+            LEFT JOIN prev p ON p.symbol = l.symbol
+            LEFT JOIN universe u ON u.symbol = l.symbol
             ORDER BY l.symbol
         """)
         return cur.fetchall()
