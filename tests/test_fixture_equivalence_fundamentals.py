@@ -33,15 +33,20 @@ def _repo_root():
 
 
 def _resolve_pre_pr2_ref():
-    """This branch (feat/fundamentals-shadow-mode) was created from
-    feat/symbol-features-shadow-mode's tip -- that's the correct baseline
-    for "did PR #2 change anything," not main (which PR #1 already diffed
-    against in its own test). Try the local branch first, then the
-    equivalent remote-tracking ref, matching the same fallback pattern
-    test_fixture_equivalence.py uses for main/origin/main -- a plain
-    `git clone` of just this branch won't have the parent as a local
-    branch either."""
-    for ref in ("feat/symbol-features-shadow-mode", "origin/feat/symbol-features-shadow-mode"):
+    """feat/symbol-features-shadow-mode (PR #1's branch, which PR #2 was
+    originally stacked on) was deleted from origin after PR #1 squash-merged
+    into main as 6ed6abab99e7a2e0d89ce75a5c9beb4c89c874ad on 2026-08-01 --
+    so neither the local branch nor its origin ref resolves in any fresh
+    clone anymore. That squash-merge commit's tree is identical to the old
+    branch tip's, so it stands in as the pre-PR#2 baseline for
+    shared/signals.py. Keep the deleted branch name as a first try in case
+    a long-lived local checkout still has it, then fall back to the pinned
+    SHA that stands in for it."""
+    for ref in (
+        "feat/symbol-features-shadow-mode",
+        "origin/feat/symbol-features-shadow-mode",
+        "6ed6abab99e7a2e0d89ce75a5c9beb4c89c874ad",
+    ):
         result = subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", ref],
             cwd=_repo_root(), capture_output=True, text=True,
@@ -49,8 +54,10 @@ def _resolve_pre_pr2_ref():
         if result.returncode == 0:
             return ref
     raise RuntimeError(
-        "Neither 'feat/symbol-features-shadow-mode' nor its origin ref resolves in "
-        "this checkout -- can't locate the pre-PR#2 baseline for shared/signals.py."
+        "Neither 'feat/symbol-features-shadow-mode', its origin ref, nor the pinned "
+        "pre-PR#2 SHA (6ed6abab99e7a2e0d89ce75a5c9beb4c89c874ad, PR #1's squash-merge "
+        "commit on main, standing in for the deleted branch) resolves in this "
+        "checkout -- can't locate the pre-PR#2 baseline for shared/signals.py."
     )
 
 
