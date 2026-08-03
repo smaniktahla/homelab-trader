@@ -450,3 +450,116 @@ CREATE TABLE IF NOT EXISTS fundamental_facts (
 
 CREATE INDEX IF NOT EXISTS idx_fundamental_facts_symbol_metric_accepted
     ON fundamental_facts (symbol, metric, accepted_at DESC);
+
+-- Schema-drift fix: trades.thesis_id has been written by both INSERT INTO
+-- trades call sites in api/main.py for some time but was never declared
+-- here -- same class of gap as trades.source/status/proposal_id above.
+-- No FK to theses (theses itself has no tracked CREATE TABLE -- see the
+-- universe/universe_scan comment earlier in this file for the same
+-- pre-existing bootstrap gap); adding one here would make a from-scratch
+-- apply fail even harder than it already does, not fix anything.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS thesis_id BIGINT;
+
+-- Platform Improvements PR A: position lifecycles / R-multiple foundation.
+-- Introduces the first-ever PERSISTED stop price anywhere in this codebase
+-- -- until now, stop-loss has only ever been a live percentage
+-- (theses.config.stop_loss_pct / signal_params) re-evaluated every cycle
+-- against the current price by shared/signals.py::check_stop_losses(),
+-- never a stored price level. planned_initial_stop_price is deliberately
+-- derived from that SAME existing ratio at proposal time
+-- (planned_entry_price * (1 - stop_loss_pct)) -- this is a snapshot of
+-- what the existing mechanism already implies, not new risk-sizing logic.
+-- Real risk-based position sizing remains a separate, later decision.
+--
+-- planned_* fields apply to BUY/position-opening proposals only; NULL on
+-- sell/exit proposals (not applicable, never coerced to 0) and on manual
+-- trades with no linked proposal at all.
+ALTER TABLE trade_proposals
+    ADD COLUMN IF NOT EXISTS planned_entry_price       NUMERIC,
+    ADD COLUMN IF NOT EXISTS planned_initial_stop_price NUMERIC,
+    ADD COLUMN IF NOT EXISTS planned_risk_per_share    NUMERIC,
+    ADD COLUMN IF NOT EXISTS planned_risk_dollars      NUMERIC;
+
+-- Copied immutably from trade_proposals.planned_initial_stop_price (via
+-- proposal_id) at the moment a trade is inserted -- this is what makes a
+-- lifecycle's risk basis fixed at entry even if stop_loss_pct or the
+-- proposal's own fields change later. NULL for manual trades (no
+-- proposal_id).
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS initial_stop_price NUMERIC;
+
+-- One row per position lifecycle (open or closed), built by the idempotent
+-- ingest/build_position_lifecycles.py from the full trades ledger --
+-- trades itself stays append-only and is never annotated beyond the
+-- additive columns above; lifecycles are always DERIVED, never
+-- hand-maintained, mirroring the price_history -> signals -> signal_outcomes
+-- derivation pattern already established in this codebase. Rebuilding is
+-- always safe to re-run (truncate-and-rebuild per symbol) since trades is
+-- the only source of truth.
+--
+-- Distinct from shared/round_trips.py's existing average-cost
+-- reconstruction (still what /api/symbol-performance serves as of this
+-- PR -- see that module's own docstring): this is true FIFO lot matching,
+-- with a real planned-vs-actual risk basis and pathwise MAE/MFE that
+-- round_trips.py has no concept of. Swapping /api/symbol-performance over
+-- to read from this table instead is deliberately a separate follow-up
+-- PR, not part of this one -- see that module's docstring for why.
+--
+-- All risk/R/excursion fields are NULL when unknown or not applicable --
+-- never coerced to 0 -- consistent with every other NULL-vs-zero decision
+-- already made in this codebase (symbol_features, fundamental_facts,
+-- round_trips.py's own cost proration).
+CREATE TABLE IF NOT EXISTS position_lifecycles (
+    id                              BIGSERIAL PRIMARY KEY,
+    symbol                          TEXT NOT NULL,
+    thesis_id                       BIGINT,          -- NULL if ambiguous -- see concurrent_multi_thesis_symbol below
+    status                          TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+    opened_at                       TIMESTAMPTZ NOT NULL,
+    closed_at                       TIMESTAMPTZ,      -- NULL while open
+    qty                             NUMERIC NOT NULL,
+    planned_entry_price             NUMERIC,          -- from the originating proposal; NULL for manual trades
+    planned_initial_stop_price      NUMERIC,
+    planned_risk_per_share          NUMERIC,
+    planned_risk_dollars            NUMERIC,
+    initial_stop_price              NUMERIC,          -- copied immutably from trades.initial_stop_price at first entry fill
+    actual_initial_risk_per_share   NUMERIC,          -- |first fill price - initial_stop_price|
+    actual_initial_risk_dollars     NUMERIC,
+    entry_notional                  NUMERIC,
+    exit_notional                   NUMERIC,          -- realized-to-date; 0.0 if nothing sold yet, partial if still open
+    total_cost                      NUMERIC,          -- entry cost prorated to shares actually sold + full exit cost
+    gross_pnl                       NUMERIC,          -- realized-to-date; 0.0 baseline, partial if still open
+    net_pnl                         NUMERIC,          -- realized-to-date; 0.0 baseline, partial if still open
+    realized_r                      NUMERIC,          -- net_pnl / actual_initial_risk_dollars; NULL if risk unknown or zero
+    mae_price                       NUMERIC,          -- worst price reached during holding (pathwise, real)
+    mfe_price                       NUMERIC,          -- best price reached during holding (pathwise, real)
+    mae_r                           NUMERIC,          -- NULL if actual_initial_risk_dollars unknown
+    mfe_r                           NUMERIC,
+    excursion_resolution            TEXT CHECK (excursion_resolution IS NULL
+                                         OR excursion_resolution IN ('hourly', 'daily_approximation')),
+    data_quality_flags              TEXT[] NOT NULL DEFAULT '{}',  -- e.g. 'concurrent_multi_thesis_symbol', 'pre_ledger_holding_excluded'
+    created_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_position_lifecycles_symbol ON position_lifecycles (symbol);
+CREATE INDEX IF NOT EXISTS idx_position_lifecycles_status ON position_lifecycles (status);
+CREATE INDEX IF NOT EXISTS idx_position_lifecycles_opened_at ON position_lifecycles (opened_at);
+
+-- Normalized join between trades and position_lifecycles -- deliberately
+-- NOT an array column (e.g. trades.position_id) on either side, because a
+-- single trade can legitimately be allocated across more than one
+-- lifecycle (a partial fill split across concurrent lots, or the
+-- cross-thesis concurrent-symbol edge case flagged above) and a single
+-- lifecycle is built from more than one trade (pyramided entries, partial
+-- exits). qty_allocated carries the split when a trade's full qty isn't
+-- entirely consumed by one lifecycle.
+CREATE TABLE IF NOT EXISTS position_trades (
+    id                     BIGSERIAL PRIMARY KEY,
+    position_lifecycle_id  BIGINT NOT NULL REFERENCES position_lifecycles(id),
+    trade_id               BIGINT NOT NULL REFERENCES trades(id),
+    role                   TEXT NOT NULL CHECK (role IN ('entry', 'exit')),
+    qty_allocated          NUMERIC NOT NULL,
+    UNIQUE (position_lifecycle_id, trade_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_position_trades_lifecycle ON position_trades (position_lifecycle_id);
+CREATE INDEX IF NOT EXISTS idx_position_trades_trade ON position_trades (trade_id);

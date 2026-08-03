@@ -830,12 +830,36 @@ def compute_signals(conn, symbols):
                     rationale = f"{rationale}; sell full position ({qty} shares)"
 
                 exit_reason = "overbought" if side == "sell" else None
+
+                # Platform Improvements PR A: planned risk fields, buy/
+                # position-opening proposals only -- sell/exit proposals
+                # leave these NULL (not applicable, never coerced to 0).
+                # Derived from the SAME stop_loss_pct ratio
+                # check_stop_losses() already re-evaluates live every
+                # cycle -- this only snapshots what that ratio already
+                # implies at proposal time, no new risk-sizing logic.
+                planned_entry_price = None
+                planned_initial_stop_price = None
+                planned_risk_per_share = None
+                planned_risk_dollars = None
+                if side == "buy":
+                    planned_entry_price = price
+                    planned_initial_stop_price = price * (1 - p["stop_loss_pct"])
+                    planned_risk_per_share = price - planned_initial_stop_price
+                    planned_risk_dollars = planned_risk_per_share * qty
+
                 with conn.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason, thesis_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        INSERT INTO trade_proposals (
+                            symbol, side, qty, rationale, signal_score, exit_reason, thesis_id,
+                            planned_entry_price, planned_initial_stop_price,
+                            planned_risk_per_share, planned_risk_dollars
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
-                    """, (sym, side, qty, rationale, score, exit_reason, thesis_id))
+                    """, (sym, side, qty, rationale, score, exit_reason, thesis_id,
+                          planned_entry_price, planned_initial_stop_price,
+                          planned_risk_per_share, planned_risk_dollars))
                     proposal_id = cur.fetchone()[0]
                 conn.commit()
                 log.info(f"PROPOSAL created: {sym} {side} qty={qty} score={score}")

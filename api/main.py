@@ -796,15 +796,25 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     with db() as conn, conn.cursor() as cur:
         cost = _current_trade_cost_flat(cur)
         thesis_id = _resolve_thesis_id(cur, req.proposal_id)
+        # Platform Improvements PR A: copy the linked proposal's planned
+        # stop price onto the trade, immutably, at fill time -- this is
+        # what makes a lifecycle's risk basis fixed at entry even if
+        # stop_loss_pct or the proposal's own fields change later. NULL
+        # for manual trades with no proposal_id at all.
+        initial_stop_price = None
+        if req.proposal_id:
+            cur.execute("SELECT planned_initial_stop_price FROM trade_proposals WHERE id=%s", (req.proposal_id,))
+            row = cur.fetchone()
+            initial_stop_price = row["planned_initial_stop_price"] if row else None
         cur.execute("""
-            INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, notes, source, status, proposal_id, cost, thesis_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, notes, source, status, proposal_id, cost, thesis_id, initial_stop_price)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             req.symbol.upper(), req.side, filled_qty, filled_price,
             filled_qty * filled_price, order["id"],
             datetime.now(timezone.utc), req.notes, req.source,
-            order["status"], req.proposal_id, cost, thesis_id
+            order["status"], req.proposal_id, cost, thesis_id, initial_stop_price
         ))
         trade_id = cur.fetchone()["id"]
         conn.commit()
@@ -880,12 +890,13 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
                     pass
             cost = _current_trade_cost_flat(cur)
             cur.execute("""
-                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id, cost, thesis_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id, cost, thesis_id, initial_stop_price)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (p["symbol"], p["side"], filled_qty, filled_price,
                   filled_qty * filled_price, order["id"],
-                  datetime.now(timezone.utc), "model_approved", order["status"], proposal_id, cost, p["thesis_id"]))
+                  datetime.now(timezone.utc), "model_approved", order["status"], proposal_id, cost, p["thesis_id"],
+                  p["planned_initial_stop_price"]))
             new_trade_id = cur.fetchone()["id"]
             # update proposal qty if it was null
             cur.execute("UPDATE trade_proposals SET qty=%s WHERE id=%s AND qty IS NULL", (trade_qty, proposal_id))
