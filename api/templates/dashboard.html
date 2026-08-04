@@ -21,6 +21,7 @@
 
   /* Portfolio chart */
   .card { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; padding: 18px; margin: 20px 0; }
+  .chart-wrap { position: relative; height: 300px; }
   .range-btns { display: flex; gap: 6px; margin-bottom: 14px; }
   .range-btn { padding: 3px 10px; border-radius: 4px; border: 1px solid #2a2d3a; background: transparent; color: #888; font-size: .78rem; cursor: pointer; }
   .range-btn.active { background: #4f8ef7; color: #fff; border-color: #4f8ef7; }
@@ -318,7 +319,7 @@
         </div>
       </div>
     </div>
-    <canvas id="portfolio-chart" height="80"></canvas>
+    <div class="chart-wrap"><canvas id="portfolio-chart"></canvas></div>
   </div>
 
   <!-- Market Context Bar -->
@@ -1756,6 +1757,7 @@ async function loadPortfolioChart(range, btn) {
         ]
       },
       options: {
+        maintainAspectRatio: false,
         interaction: { mode: 'nearest', intersect: false },
         plugins: {
           legend: { display: false },
