@@ -56,6 +56,8 @@ display purposes). What you see here is what the engine saw.
 
 ## Strategy Review
 
+![Strategy Review](docs/screenshots/strategy-review.png)
+
 This is probably the least "trading bot" part of the repo, and the most
 important. Once a week, the platform looks at its own trade history and
 asks two separate questions:
