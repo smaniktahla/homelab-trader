@@ -91,6 +91,51 @@ def _classify_vix(vix_level):
     return "fear", f"fear/crisis ({vix_level:.1f})"
 
 
+def classify_overall(spy_trend, qqq_trend, vix_regime):
+    """
+    Combine SPY/QQQ trend + VIX regime into the overall bull/bear x
+    VIX-bucket classification and its trading-gate modifiers.
+
+    Pure function, no I/O -- the single source of truth for this cascade.
+    Used both live (compute_market_regime, today only) and historically
+    (market_regime_history.regime_for_date, backtest_portfolio_montecarlo's
+    historical_market_context, any date) so the two paths can never drift.
+
+    Returns (overall, score_modifier, alloc_modifier, rationale).
+    """
+    # Combine SPY + QQQ: if both agree, strong signal; if split, neutral
+    if spy_trend == "bull" and qqq_trend in ("bull", "neutral"):
+        market = "bull"
+    elif spy_trend == "bear" and qqq_trend in ("bear", "neutral"):
+        market = "bear"
+    elif spy_trend == "bear" and qqq_trend == "bear":
+        market = "bear"
+    elif spy_trend == "bull" and qqq_trend == "bull":
+        market = "bull"
+    else:
+        market = "neutral"
+
+    # Gate modifiers
+    if market == "bull" and vix_regime == "calm":
+        return "bull_calm", 0, 1.0, "Bull market, calm volatility — standard operation"
+    elif market == "bull" and vix_regime == "elevated":
+        return "bull_volatile", 5, 0.85, "Bull market but elevated VIX — raise bar slightly, reduce size"
+    elif market == "neutral" and vix_regime in ("calm", "elevated"):
+        return "neutral", 10, 0.85, "Neutral market trend — require stronger signals before buying"
+    elif market == "bear" and vix_regime == "calm":
+        return "bear_calm", 20, 0.70, "Bear market, calm VIX — only high-conviction signals; reduce position size"
+    elif market == "bear" and vix_regime == "elevated":
+        return "bear_volatile", 28, 0.60, "Bear market with elevated VIX — significantly reduced activity"
+    elif market in ("bear", "neutral") and vix_regime == "fear":
+        return "bear_fear", 35, 0.50, "Bear + high VIX (fear/crisis) — near-freeze on new buys, half position size"
+    elif vix_regime == "fear":
+        return "fear", 25, 0.60, "High VIX fear regime — require very strong signals, reduce size"
+    else:
+        # Fail closed: when we can't classify, treat as neutral/elevated rather than bull/calm.
+        # This prevents a data outage from silently removing all risk controls.
+        return "unknown", 10, 0.85, "Market regime unknown (data gap) — applying neutral-level caution"
+
+
 def compute_market_regime():
     """
     Fetch VIX + index data, compute regime.
@@ -151,64 +196,9 @@ def compute_market_regime():
         vix_regime = "elevated"  # fail closed: unknown VIX → treat as elevated, not calm
 
     # ── Overall regime + trading modifiers ───────────────────────────────
-    spy = result["spy_trend"]
-    qqq = result["qqq_trend"]
-
-    # Combine SPY + QQQ: if both agree, strong signal; if split, neutral
-    if spy == "bull" and qqq in ("bull", "neutral"):
-        market = "bull"
-    elif spy == "bear" and qqq in ("bear", "neutral"):
-        market = "bear"
-    elif spy == "bear" and qqq == "bear":
-        market = "bear"
-    elif spy == "bull" and qqq == "bull":
-        market = "bull"
-    else:
-        market = "neutral"
-
-    # Gate modifiers
-    if market == "bull" and vix_regime == "calm":
-        overall        = "bull_calm"
-        score_modifier = 0       # no change to threshold
-        alloc_modifier = 1.0
-        rationale      = "Bull market, calm volatility — standard operation"
-    elif market == "bull" and vix_regime == "elevated":
-        overall        = "bull_volatile"
-        score_modifier = 5       # slightly more selective
-        alloc_modifier = 0.85
-        rationale      = "Bull market but elevated VIX — raise bar slightly, reduce size"
-    elif market == "neutral" and vix_regime in ("calm", "elevated"):
-        overall        = "neutral"
-        score_modifier = 10      # require stronger conviction
-        alloc_modifier = 0.85
-        rationale      = "Neutral market trend — require stronger signals before buying"
-    elif market == "bear" and vix_regime == "calm":
-        overall        = "bear_calm"
-        score_modifier = 20      # significantly more selective
-        alloc_modifier = 0.70
-        rationale      = "Bear market, calm VIX — only high-conviction signals; reduce position size"
-    elif market == "bear" and vix_regime == "elevated":
-        overall        = "bear_volatile"
-        score_modifier = 28      # between bear_calm and bear_fear
-        alloc_modifier = 0.60
-        rationale      = "Bear market with elevated VIX — significantly reduced activity"
-    elif market in ("bear", "neutral") and vix_regime == "fear":
-        overall        = "bear_fear"
-        score_modifier = 35      # near-freeze on new buys
-        alloc_modifier = 0.50
-        rationale      = "Bear + high VIX (fear/crisis) — near-freeze on new buys, half position size"
-    elif vix_regime == "fear":
-        overall        = "fear"
-        score_modifier = 25
-        alloc_modifier = 0.60
-        rationale      = "High VIX fear regime — require very strong signals, reduce size"
-    else:
-        # Fail closed: when we can't classify, treat as neutral/elevated rather than bull/calm.
-        # This prevents a data outage from silently removing all risk controls.
-        overall        = "unknown"
-        score_modifier = 10
-        alloc_modifier = 0.85
-        rationale      = "Market regime unknown (data gap) — applying neutral-level caution"
+    overall, score_modifier, alloc_modifier, rationale = classify_overall(
+        result["spy_trend"], result["qqq_trend"], vix_regime
+    )
 
     result["overall"]        = overall
     result["score_modifier"] = score_modifier

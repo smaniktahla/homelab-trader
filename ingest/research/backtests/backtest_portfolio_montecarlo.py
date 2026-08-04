@@ -35,14 +35,15 @@ Reused as-is from signals.py (pure, no DB/network side effects):
   load_params, calc_buy_qty, sector_cap_block_reason, RS_LOOKBACK_DAYS,
   ATR_PERIOD.
 Reused as-is from market_regime.py (pure):
-  _classify_trend, _classify_vix, SMA_FAST, SMA_SLOW, VIX_CALM, VIX_FEAR.
+  _classify_trend, _classify_vix, classify_overall, SMA_FAST, SMA_SLOW,
+  VIX_CALM, VIX_FEAR. classify_overall is the overall bull/bear x
+  VIX-bucket table itself — historical_market_context() below now just
+  feeds it historical arrays, it no longer hand-duplicates the cascade.
+Reused as-is from market_regime_history.py (pure): asof_index.
 
 NOT reusable directly (DB-writing / datetime.now()-coupled in production),
 so mirrored here as pure functions operating on simulated state instead:
-  check_stop_losses, check_symbol_exits, check_regime_deterioration_sell,
-  and compute_market_regime()'s overall bull/bear x VIX-bucket table (the
-  classification primitives it calls ARE reused; only the "now" plumbing
-  around them is reimplemented).
+  check_stop_losses, check_symbol_exits, check_regime_deterioration_sell.
 
 Documented simplifications (same spirit as Experiment 002's own gap list):
   - Universe/watchlist composition uses TODAY's scannable universe (S&P 500
@@ -66,7 +67,6 @@ Not part of the recurring ingest loop. Run manually:
 
 import os
 import sys
-import bisect
 import json
 import logging
 import random
@@ -79,7 +79,8 @@ sys.path.insert(0, "/app")
 from signals import (compute_rsi, compute_bollinger, compute_atr, detect_regime,
                       score_signal, load_params, calc_buy_qty, sector_cap_block_reason,
                       RS_LOOKBACK_DAYS, ATR_PERIOD)
-from market_regime import _classify_trend, _classify_vix, SMA_FAST, SMA_SLOW, VIX_CALM, VIX_FEAR
+from market_regime import _classify_trend, _classify_vix, classify_overall, SMA_FAST, SMA_SLOW, VIX_CALM, VIX_FEAR
+from market_regime_history import asof_index
 from db_utils import save_backtest_result
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -131,12 +132,6 @@ def load_series(conn, symbol):
     return dates, closes, highs, lows
 
 
-def asof_index(dates, target_date):
-    """Index of the last date <= target_date, or None if no such date."""
-    idx = bisect.bisect_right(dates, target_date) - 1
-    return idx if idx >= 0 else None
-
-
 # ─────────────────────────────────────────────────────────────────────────
 # Pure helpers mirroring signal-generation inputs (relative strength vs SPY)
 # ─────────────────────────────────────────────────────────────────────────
@@ -154,8 +149,10 @@ def relative_strength(idx, closes, spy_dates, spy_closes, current_date, lookback
 
 # ─────────────────────────────────────────────────────────────────────────
 # Pure historical market regime — mirrors market_regime.compute_market_regime(),
-# reusing its classification primitives, just fed historical arrays instead
-# of a live fetch.
+# reusing its classification primitives AND its overall-regime cascade
+# (classify_overall) directly, just fed historical arrays instead of a
+# live fetch. The cascade itself used to be hand-duplicated here; now both
+# paths funnel through the same function so they can't drift.
 # ─────────────────────────────────────────────────────────────────────────
 
 def historical_market_context(spy_closes_upto, qqq_closes_upto, vix_level):
@@ -163,33 +160,8 @@ def historical_market_context(spy_closes_upto, qqq_closes_upto, vix_level):
     qqq_trend, _, _, _ = _classify_trend(qqq_closes_upto) if len(qqq_closes_upto) >= SMA_FAST else ("unknown", None, None, None)
     vix_regime, _ = _classify_vix(vix_level)
 
-    if spy_trend == "bull" and qqq_trend in ("bull", "neutral"):
-        market = "bull"
-    elif spy_trend == "bear" and qqq_trend in ("bear", "neutral"):
-        market = "bear"
-    elif spy_trend == "bear" and qqq_trend == "bear":
-        market = "bear"
-    elif spy_trend == "bull" and qqq_trend == "bull":
-        market = "bull"
-    else:
-        market = "neutral"
-
-    if market == "bull" and vix_regime == "calm":
-        return "bull_calm", 0, 1.0
-    elif market == "bull" and vix_regime == "elevated":
-        return "bull_volatile", 5, 0.85
-    elif market == "neutral" and vix_regime in ("calm", "elevated"):
-        return "neutral", 10, 0.85
-    elif market == "bear" and vix_regime == "calm":
-        return "bear_calm", 20, 0.70
-    elif market == "bear" and vix_regime == "elevated":
-        return "bear_volatile", 28, 0.60
-    elif market in ("bear", "neutral") and vix_regime == "fear":
-        return "bear_fear", 35, 0.50
-    elif vix_regime == "fear":
-        return "fear", 25, 0.60
-    else:
-        return "unknown", 10, 0.85
+    overall, score_modifier, alloc_modifier, _rationale = classify_overall(spy_trend, qqq_trend, vix_regime)
+    return overall, score_modifier, alloc_modifier
 
 
 # ─────────────────────────────────────────────────────────────────────────

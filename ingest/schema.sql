@@ -66,6 +66,27 @@ CREATE TABLE IF NOT EXISTS market_context (
     updated_at   TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Per-trading-day market regime history. market_context above is a single
+-- overwritten row (today only) -- this is the durable append-by-day
+-- counterpart, the data layer for a "find a similar market regime in the
+-- past" backtest-date-finder (see shared/market_regime_history.py). Same
+-- "if we calculate it, we should store it" default global_market_signals
+-- already established. computed_at can update on a same-day re-run
+-- (ON CONFLICT DO UPDATE), same intraday-refine behavior market_context has.
+CREATE TABLE IF NOT EXISTS market_regime_history (
+    trading_date   DATE PRIMARY KEY,
+    spy_trend      TEXT,
+    qqq_trend      TEXT,
+    vix            NUMERIC,
+    vix_regime     TEXT,
+    overall        TEXT,
+    score_modifier INTEGER,
+    alloc_modifier NUMERIC,
+    computed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_regime_history_overall ON market_regime_history (overall);
+
 -- exit_reason classifies sell proposals by which rule triggered them:
 -- thesis_complete | time_stop | stop_loss | overbought | regime_deterioration | manual
 ALTER TABLE trade_proposals ADD COLUMN IF NOT EXISTS exit_reason TEXT;
