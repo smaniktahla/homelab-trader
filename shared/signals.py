@@ -7,6 +7,8 @@ rigorous walk-forward validation across all asset classes and market conditions.
 import logging
 import math
 import os
+
+import psycopg2.extensions
 import requests
 
 from earnings import earnings_blackout_reason
@@ -365,8 +367,12 @@ def recent_buy_block_reason(conn, symbol, cooldown_days):
     user re-approving) the same BUY on consecutive cycles just because the
     underlying RSI/BB oversold condition hasn't resolved yet — the position
     was already sized for that signal; a still-oversold RSI the next cycle
-    isn't a new opportunity."""
-    with conn.cursor() as cur:
+    isn't a new opportunity. Explicit tuple cursor regardless of the
+    caller's connection default -- now called both from ingest.py's
+    tuple-cursor connections and from api/main.py's dict-cursor
+    connections (via shared/rule_adherence.py), and this function's own
+    row[0] access assumes tuple/positional indexing either way."""
+    with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
         cur.execute("""
             SELECT traded_at FROM trades
             WHERE symbol=%s AND side='buy'
@@ -450,12 +456,15 @@ def _propose_outcome(conn, outcome_id, proposal_id):
     conn.commit()
 
 
-def _load_sector_map(conn, symbols):
+def load_sector_map(conn, symbols):
     """symbol -> GICS sector for the given symbols. Symbols with no sector
-    (ETFs, unclassified) are simply absent from the returned dict."""
+    (ETFs, unclassified) are simply absent from the returned dict. Explicit
+    tuple cursor regardless of the caller's connection default -- same
+    reasoning as recent_buy_block_reason above, now called both from
+    ingest.py and api/main.py's rule_adherence path."""
     if not symbols:
         return {}
-    with conn.cursor() as cur:
+    with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
         cur.execute("""
             SELECT symbol, sector FROM universe
             WHERE symbol = ANY(%s) AND sector IS NOT NULL
@@ -463,7 +472,7 @@ def _load_sector_map(conn, symbols):
         return {r[0]: r[1] for r in cur.fetchall()}
 
 
-def _sector_cap_block_reason(sym, price, qty, sector_map, positions, portfolio_value, p):
+def sector_cap_block_reason(sym, price, qty, sector_map, positions, portfolio_value, p):
     """Return a block reason string if buying qty*price of sym would push its
     GICS sector over sector_max_pct of the portfolio, else None."""
     sector = sector_map.get(sym)
@@ -693,7 +702,7 @@ def compute_signals(conn, symbols):
 
     # Sector map for the sector-concentration cap, covers watchlist + any
     # held position not currently in the watchlist slice being scanned
-    sector_map = _load_sector_map(conn, set(symbols) | set(positions.keys()))
+    sector_map = load_sector_map(conn, set(symbols) | set(positions.keys()))
 
     for sym in symbols:
         try:
@@ -813,7 +822,7 @@ def compute_signals(conn, symbols):
                         log.info(f"Skipping buy proposal for {sym}: {sizing_note}")
                         _block_outcome(conn, outcome_id, sizing_note)
                         continue
-                    sector_block = _sector_cap_block_reason(
+                    sector_block = sector_cap_block_reason(
                         sym, price, qty, sector_map, positions, portfolio_value, p)
                     if sector_block:
                         log.info(f"Skipping buy proposal for {sym}: {sector_block}")

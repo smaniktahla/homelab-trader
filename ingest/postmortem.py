@@ -20,10 +20,20 @@ metric_summary JSONB under lifecycle_*-prefixed keys so both render in the
 same Strategy Review UI row without conflating what each one actually
 measures — see shared/expectancy.py's own module docstring for the full
 rationale.
+
+Platform Improvements PR C adds a third, again independent, computation:
+rule_adherence_by_context/rule_adherence_by_rule, aggregating
+rule_adherence_checks (see shared/rule_adherence.py) -- how often a manual
+trade or stale proposal approval bypassed one of compute_signals()'s
+buy-side gates. Same "always computed, merged in under its own prefixed
+keys" treatment as the lifecycle segments, and for the same reason: a slow
+week for any one of these three data sources says nothing about the other
+two.
 """
 
 import json
 import logging
+from collections import Counter
 
 import psycopg2.extras
 
@@ -177,6 +187,81 @@ def _lifecycle_segments(rows):
     }
 
 
+def _fetch_rule_adherence_checks(conn):
+    """All rule_adherence_checks rows within WINDOW_DAYS -- same window
+    convention _fetch_resolved above uses, though this is a genuinely
+    independent data source (see run_postmortem_review). rule_results is a
+    JSONB column; psycopg2 deserializes it to a plain list of dicts
+    automatically, no json.loads needed."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT context, rule_results, any_violation
+            FROM rule_adherence_checks
+            WHERE checked_at >= NOW() - INTERVAL '%s days'
+            ORDER BY checked_at ASC
+        """, (WINDOW_DAYS,))
+        return cur.fetchall()
+
+
+def _rule_adherence_segments(rows):
+    """Two views over the same rule_adherence_checks rows -- Platform
+    Improvements PR C:
+
+    rule_adherence_by_context: one bucket per context ('manual_trade' /
+    'proposal_approval') -- n, n_with_violation, violation_rate_pct, and
+    which single rule was violated most often within that context.
+
+    rule_adherence_by_rule: one bucket per individual gate name, across
+    BOTH contexts combined -- n_checks, n_failed, fail_rate_pct. Answers
+    "which single rule gets bypassed most often" regardless of whether it
+    happened via a manual trade or a stale proposal approval.
+    """
+    by_context = {}
+    rule_totals = Counter()
+    rule_failures = Counter()
+
+    for row in rows:
+        context = row["context"]
+        results = row["rule_results"]
+        violated_rules = [r["rule"] for r in results if not r["passed"]]
+
+        bucket = by_context.setdefault(
+            context, {"n": 0, "n_with_violation": 0, "_violated_rule_counts": Counter()})
+        bucket["n"] += 1
+        if row["any_violation"]:
+            bucket["n_with_violation"] += 1
+            bucket["_violated_rule_counts"].update(violated_rules)
+
+        for r in results:
+            rule_totals[r["rule"]] += 1
+            if not r["passed"]:
+                rule_failures[r["rule"]] += 1
+
+    context_out = {}
+    for context, b in by_context.items():
+        most_common = b["_violated_rule_counts"].most_common(1)
+        context_out[context] = {
+            "n": b["n"],
+            "n_with_violation": b["n_with_violation"],
+            "violation_rate_pct": round(100 * b["n_with_violation"] / b["n"], 1) if b["n"] else None,
+            "most_common_violated_rule": most_common[0][0] if most_common else None,
+        }
+
+    rule_out = {}
+    for rule, n_checks in rule_totals.items():
+        n_failed = rule_failures.get(rule, 0)
+        rule_out[rule] = {
+            "n_checks": n_checks,
+            "n_failed": n_failed,
+            "fail_rate_pct": round(100 * n_failed / n_checks, 1) if n_checks else None,
+        }
+
+    return {
+        "rule_adherence_by_context": context_out,
+        "rule_adherence_by_rule": rule_out,
+    }
+
+
 def _propose_score_threshold_change(conn, score_stats):
     """If low score buckets clearly underperform high buckets with enough N,
     propose raising score_proposal_min to the boundary of the better bucket.
@@ -236,12 +321,18 @@ def run_postmortem_review(conn):
         f"across {len(lifecycle_segments)} segment views."
     )
 
+    # Same independence principle as lifecycle_segments above -- a third,
+    # unrelated data source (Platform Improvements PR C).
+    adherence_rows = _fetch_rule_adherence_checks(conn)
+    adherence_segments = _rule_adherence_segments(adherence_rows)
+    adherence_note = f" | Rule adherence: {len(adherence_rows)} manual trade/approval check(s) in window."
+
     if n < MIN_BUCKET_N:
         finding = (
             f"Insufficient data: {n} resolved buy signals in the last {WINDOW_DAYS}d "
             f"(need {MIN_BUCKET_N}+ per bucket). Skipping calibration check."
-        ) + lifecycle_note
-        _insert_review(conn, n, dict(lifecycle_segments), finding, None)
+        ) + lifecycle_note + adherence_note
+        _insert_review(conn, n, {**lifecycle_segments, **adherence_segments}, finding, None)
         return {"n_resolved": n, "finding": finding, "proposal": None}
 
     score_rows = [(_score_bucket(float(s)), float(r)) for s, _, _, r, _ in rows if s is not None]
@@ -259,6 +350,7 @@ def run_postmortem_review(conn):
         "symbol_regime": regime_stats,
         "approval_status": approval_stats,
         **lifecycle_segments,
+        **adherence_segments,
     }
 
     proposal = _propose_score_threshold_change(conn, score_stats)
@@ -267,9 +359,12 @@ def run_postmortem_review(conn):
         finding = (
             f"Score calibration gap found: {proposal['reason']}. "
             f"Suggest raising score_proposal_min from {proposal['current_value']} to {proposal['proposed_value']}."
-        ) + lifecycle_note
+        ) + lifecycle_note + adherence_note
     else:
-        finding = f"No calibration change proposed this cycle (N={n} resolved). Bucket stats logged for trend-watching." + lifecycle_note
+        finding = (
+            f"No calibration change proposed this cycle (N={n} resolved). Bucket stats logged for trend-watching."
+            + lifecycle_note + adherence_note
+        )
 
     _insert_review(conn, n, metric_summary, finding, proposal)
     return {"n_resolved": n, "finding": finding, "proposal": proposal}

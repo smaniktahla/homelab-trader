@@ -580,3 +580,32 @@ CREATE TABLE IF NOT EXISTS position_lifecycle_symbol_status (
     unmatched_sell_qty   NUMERIC NOT NULL DEFAULT 0,
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Platform Improvements PR C: one row per manual trade (POST /api/trade) or
+-- proposal approval (PATCH /api/proposals/{id}) -- the two paths that
+-- bypass every gate shared/signals.py's compute_signals() enforces for the
+-- automated pipeline (circuit breaker, max_open_positions, sector cap, buy
+-- cooldown, earnings blackout, position sizing). Advisory only: nothing
+-- reads this table to block anything, it exists purely so a bypassed rule
+-- leaves a record instead of vanishing silently. Written by
+-- shared/rule_adherence.py's check_gates(), called from api/main.py
+-- fail-open (a failure here must never affect the trade/approval response).
+--
+-- Forward-looking only, same precedent as position_lifecycles.realized_r --
+-- there is no way to reconstruct exact portfolio state at a past manual
+-- trade's moment, so trades before this shipped simply have no row here.
+CREATE TABLE IF NOT EXISTS rule_adherence_checks (
+    id             BIGSERIAL PRIMARY KEY,
+    checked_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    context        TEXT NOT NULL CHECK (context IN ('manual_trade', 'proposal_approval')),
+    trade_id       BIGINT REFERENCES trades(id),
+    proposal_id    BIGINT REFERENCES trade_proposals(id),
+    symbol         TEXT NOT NULL,
+    side           TEXT NOT NULL,
+    rule_results   JSONB NOT NULL,   -- [{"rule": ..., "passed": bool, "detail": str|null}, ...]
+    any_violation  BOOLEAN NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rule_adherence_checks_checked_at ON rule_adherence_checks (checked_at);
+CREATE INDEX IF NOT EXISTS idx_rule_adherence_checks_trade_id ON rule_adherence_checks (trade_id);
+CREATE INDEX IF NOT EXISTS idx_rule_adherence_checks_proposal_id ON rule_adherence_checks (proposal_id);

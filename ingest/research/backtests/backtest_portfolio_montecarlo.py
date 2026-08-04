@@ -22,7 +22,7 @@ Picks N random historical start dates, and for each one walks forward
 `HORIZON_DAYS` trading days with a simulated portfolio (no Alpaca, no live
 DB writes) that mirrors compute_signals()'s gate order:
   circuit breaker -> max_open_positions -> [earnings blackout: skipped]
-  -> position sizing (calc_buy_qty) -> sector cap (_sector_cap_block_reason)
+  -> position sizing (calc_buy_qty) -> sector cap (sector_cap_block_reason)
 and the same exit ladder: stop_loss -> regime_deterioration_sell ->
 thesis_complete / time_stop -> overbought (sell-side score_signal).
 
@@ -32,7 +32,7 @@ doc for why, and for the intent to make this policy swappable later.
 
 Reused as-is from signals.py (pure, no DB/network side effects):
   compute_rsi, compute_bollinger, compute_atr, detect_regime, score_signal,
-  load_params, calc_buy_qty, _sector_cap_block_reason, RS_LOOKBACK_DAYS,
+  load_params, calc_buy_qty, sector_cap_block_reason, RS_LOOKBACK_DAYS,
   ATR_PERIOD.
 Reused as-is from market_regime.py (pure):
   _classify_trend, _classify_vix, SMA_FAST, SMA_SLOW, VIX_CALM, VIX_FEAR.
@@ -77,7 +77,7 @@ import psycopg2
 
 sys.path.insert(0, "/app")
 from signals import (compute_rsi, compute_bollinger, compute_atr, detect_regime,
-                      score_signal, load_params, calc_buy_qty, _sector_cap_block_reason,
+                      score_signal, load_params, calc_buy_qty, sector_cap_block_reason,
                       RS_LOOKBACK_DAYS, ATR_PERIOD)
 from market_regime import _classify_trend, _classify_vix, SMA_FAST, SMA_SLOW, VIX_CALM, VIX_FEAR
 from db_utils import save_backtest_result
@@ -362,7 +362,7 @@ def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sec
             qty, _sizing_note = calc_buy_qty(price, ledger["cash"], cur_value, 0.0, p_gated)
             if qty is None:
                 continue
-            # _sector_cap_block_reason (signals.py) expects each position to
+            # sector_cap_block_reason (signals.py) expects each position to
             # carry a precomputed market_value, matching the shape
             # get_positions() returns live from Alpaca. The simulated
             # ledger only stores qty/avg_entry/entry_date, so shape a view
@@ -373,7 +373,7 @@ def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sec
                 s: {**pos, "market_value": pos["qty"] * (price_of(s, current_date) or 0)}
                 for s, pos in ledger["positions"].items()
             }
-            sector_block = _sector_cap_block_reason(sym, price, qty, sector_map, positions_with_mv, cur_value, p)
+            sector_block = sector_cap_block_reason(sym, price, qty, sector_map, positions_with_mv, cur_value, p)
             if sector_block:
                 continue
             execute_buy(ledger, sym, qty, price, current_date, buy_score, buy_rationale, trade_log)
