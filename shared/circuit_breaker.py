@@ -11,16 +11,21 @@ latched into a stored on/off state.
 
 import logging
 
+import psycopg2.extensions
+
 log = logging.getLogger(__name__)
 
 
 def record_snapshot_and_check(conn, portfolio_value, drawdown_threshold):
     """Record a portfolio_snapshots row and return
-    (breaker_active, high_water_mark, drawdown_pct)."""
+    (breaker_active, high_water_mark, drawdown_pct). Explicit tuple cursor
+    regardless of the caller's connection default -- see
+    current_high_water_mark()'s own docstring below for why this matters
+    now that this module has a second caller path."""
     if not portfolio_value:
         return False, None, None
 
-    with conn.cursor() as cur:
+    with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
         cur.execute("SELECT MAX(high_water_mark) FROM portfolio_snapshots")
         row = cur.fetchone()
         prior_hwm = float(row[0]) if row and row[0] is not None else 0.0
@@ -43,3 +48,22 @@ def record_snapshot_and_check(conn, portfolio_value, drawdown_threshold):
             f"— new BUY proposals paused, sells continue"
         )
     return breaker_active, hwm, drawdown_pct
+
+
+def current_high_water_mark(conn):
+    """Read-only peek at the all-time high-water mark -- unlike
+    record_snapshot_and_check() above, never inserts a portfolio_snapshots
+    row. Platform Improvements PR C's rule_adherence checks call this
+    instead of the function above specifically to avoid polluting the
+    once-per-ingest-cycle snapshot cadence that drawdown-duration reporting
+    and portfolio-value charting both depend on -- a manual trade or
+    proposal approval can happen at any time, not just once an hour.
+
+    Explicit tuple cursor regardless of the caller's connection default --
+    this is called from api/main.py's dict-cursor connections (via
+    shared/rule_adherence.py), and row[0] access below assumes
+    tuple/positional indexing."""
+    with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
+        cur.execute("SELECT MAX(high_water_mark) FROM portfolio_snapshots")
+        row = cur.fetchone()
+    return float(row[0]) if row and row[0] is not None else 0.0

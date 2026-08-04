@@ -10,6 +10,7 @@ import logging
 import os
 from datetime import date, timedelta
 
+import psycopg2.extensions
 import requests
 
 log = logging.getLogger(__name__)
@@ -61,8 +62,13 @@ def sync_earnings_calendar(conn):
 
 def earnings_blackout_reason(conn, symbol, blackout_days):
     """Return a block reason string if `symbol` has a known earnings date
-    within blackout_days (either side) of today, else None."""
-    with conn.cursor() as cur:
+    within blackout_days (either side) of today, else None. Explicit tuple
+    cursor regardless of the caller's connection default -- this is now
+    called both from ingest.py's tuple-cursor connections (via
+    compute_signals()) and from api/main.py's dict-cursor connections (via
+    shared/rule_adherence.py), and this function's own row[0] access
+    assumes tuple/positional indexing either way."""
+    with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
         cur.execute("""
             SELECT earnings_date FROM earnings_events
             WHERE symbol=%s AND earnings_date BETWEEN %s AND %s

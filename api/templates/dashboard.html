@@ -1016,6 +1016,38 @@ function _reviewLifecycleBucketTable(metricSummary) {
   }).join('');
 }
 
+// Platform Improvements PR C: rule-adherence bypass detection. A manual
+// trade or proposal approval bypasses every gate compute_signals()
+// enforces for the automated pipeline — this re-checks them against
+// current state at that moment and records which, if any, would fail.
+// Two views over the same rule_adherence_checks rows (see
+// ingest/postmortem.py's _rule_adherence_segments): by context
+// (manual_trade / proposal_approval) and by individual rule, across both
+// contexts combined. Rendered together in one small table, its own
+// column set (violation rate, not win rate/expectancy), independent of
+// the two tables above.
+function _reviewRuleAdherenceTable(metricSummary) {
+  const byContext = (metricSummary || {}).rule_adherence_by_context || {};
+  const byRule = (metricSummary || {}).rule_adherence_by_rule || {};
+  const contextRows = Object.entries(byContext).map(([ctx, s]) => `
+    <tr>
+      <td style="color:#888">Context: ${ctx}</td>
+      <td>${s.n}</td>
+      <td>${s.n_with_violation}</td>
+      <td class="${s.violation_rate_pct > 0 ? 'down' : 'up'}">${s.violation_rate_pct}%</td>
+      <td>${s.most_common_violated_rule ?? '—'}</td>
+    </tr>`).join('');
+  const ruleRows = Object.entries(byRule).map(([rule, s]) => `
+    <tr>
+      <td style="color:#888">Rule: ${rule}</td>
+      <td>${s.n_checks}</td>
+      <td>${s.n_failed}</td>
+      <td class="${s.fail_rate_pct > 0 ? 'down' : 'up'}">${s.fail_rate_pct}%</td>
+      <td>—</td>
+    </tr>`).join('');
+  return contextRows + ruleRows;
+}
+
 async function loadReviews() {
   const wrap = document.getElementById('reviews-list');
   try {
@@ -1044,6 +1076,14 @@ async function loadReviews() {
              <tbody>${lifecycleRows}</tbody>
            </table>`
         : '';
+      const adherenceRows = _reviewRuleAdherenceTable(r.metric_summary);
+      const adherenceTable = adherenceRows
+        ? `<div style="margin-top:14px;color:#888;font-size:.78rem">Rule Adherence (manual trades &amp; proposal approvals, rule_adherence_checks)</div>
+           <table style="margin-top:6px">
+             <thead><tr><th>Bucket</th><th>Checked</th><th>Violated</th><th>Rate</th><th>Most Common Rule</th></tr></thead>
+             <tbody>${adherenceRows}</tbody>
+           </table>`
+        : '';
       return `
       <div class="proposal-row" style="flex-direction:column;align-items:stretch">
         <div class="prop-info">
@@ -1053,6 +1093,7 @@ async function loadReviews() {
           ${proposalLine}
           ${bucketTable}
           ${lifecycleTable}
+          ${adherenceTable}
         </div>
       </div>`;
     }).join('');

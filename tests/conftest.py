@@ -23,6 +23,7 @@ RESET_TABLES = [
     "news", "watchlist", "universe", "universe_scan", "earnings_events",
     "market_context", "congressional_filings", "fundamental_facts",
     "position_trades", "position_lifecycles", "position_lifecycle_symbol_status",
+    "rule_adherence_checks",
 ]
 
 

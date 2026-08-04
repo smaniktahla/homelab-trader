@@ -157,3 +157,69 @@ def test_manual_trade_with_no_linked_signal_skips_market_regime_not_other_dimens
 
     assert metric_summary["lifecycle_symbol"]["TSLA"]["n"] == 1
     assert "TSLA" not in metric_summary.get("lifecycle_market_regime", {})
+
+
+def _insert_rule_adherence_check(conn, context, results, trade_id=None, proposal_id=None,
+                                  symbol="AAPL", side="buy"):
+    import json
+    any_violation = any(not r["passed"] for r in results)
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO rule_adherence_checks (context, trade_id, proposal_id, symbol, side, rule_results, any_violation)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (context, trade_id, proposal_id, symbol, side, json.dumps(results), any_violation))
+    conn.commit()
+
+
+def test_rule_adherence_segments_land_in_metric_summary(conn):
+    """Platform Improvements PR C: a third, independent data source merged
+    into the same metric_summary -- present regardless of whether the
+    signal-level sample is sufficient (same principle already established
+    for the lifecycle segments above)."""
+    build_position_lifecycles, run_postmortem_review = _import_ingest_modules()
+
+    clean = [
+        {"rule": "circuit_breaker", "passed": True, "detail": None},
+        {"rule": "sector_cap", "passed": True, "detail": None},
+    ]
+    violated = [
+        {"rule": "circuit_breaker", "passed": True, "detail": None},
+        {"rule": "sector_cap", "passed": False, "detail": "sector_cap_exceeded:Technology (35%>30%)"},
+    ]
+    _insert_rule_adherence_check(conn, "manual_trade", clean)
+    _insert_rule_adherence_check(conn, "manual_trade", violated)
+    _insert_rule_adherence_check(conn, "proposal_approval", violated)
+
+    build_position_lifecycles(conn)
+    result = run_postmortem_review(conn)
+    assert "Rule adherence: 3 manual trade/approval check(s) in window." in result["finding"]
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT metric_summary FROM strategy_review_proposals ORDER BY created_at DESC LIMIT 1")
+        metric_summary = cur.fetchone()[0]
+
+    by_context = metric_summary["rule_adherence_by_context"]
+    assert by_context["manual_trade"]["n"] == 2
+    assert by_context["manual_trade"]["n_with_violation"] == 1
+    assert by_context["manual_trade"]["violation_rate_pct"] == 50.0
+    assert by_context["manual_trade"]["most_common_violated_rule"] == "sector_cap"
+    assert by_context["proposal_approval"]["n"] == 1
+    assert by_context["proposal_approval"]["n_with_violation"] == 1
+
+    by_rule = metric_summary["rule_adherence_by_rule"]
+    assert by_rule["circuit_breaker"]["n_checks"] == 3
+    assert by_rule["circuit_breaker"]["n_failed"] == 0
+    assert by_rule["sector_cap"]["n_checks"] == 3
+    assert by_rule["sector_cap"]["n_failed"] == 2
+    assert by_rule["sector_cap"]["fail_rate_pct"] == round(100 * 2 / 3, 1)
+
+
+def test_rule_adherence_segments_empty_when_no_checks_exist(conn):
+    build_position_lifecycles, run_postmortem_review = _import_ingest_modules()
+    build_position_lifecycles(conn)
+    run_postmortem_review(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT metric_summary FROM strategy_review_proposals ORDER BY created_at DESC LIMIT 1")
+        metric_summary = cur.fetchone()[0]
+    assert metric_summary["rule_adherence_by_context"] == {}
+    assert metric_summary["rule_adherence_by_rule"] == {}

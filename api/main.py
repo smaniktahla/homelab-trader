@@ -4,12 +4,15 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import Optional
-import psycopg2, psycopg2.extras, os, requests as http, secrets, time, bisect
+import psycopg2, psycopg2.extras, os, requests as http, secrets, time, bisect, json, logging
 from datetime import datetime, timezone
 
 from signals import compute_signals, compute_bollinger
 from signal_components import weighted_component_score
 import lifecycle_performance
+import rule_adherence
+
+log = logging.getLogger(__name__)
 
 DB_DSN = os.environ["DATABASE_URL"]
 ALPACA_KEY = os.environ.get("ALPACA_API_KEY", "")
@@ -775,6 +778,16 @@ class TradeRequest(BaseModel):
     source: str = "manual"
     proposal_id: Optional[int] = None
 
+def _record_rule_adherence(cur, context, trade_id, proposal_id, symbol, side, results):
+    """Platform Improvements PR C. Persists check_gates()'s full result list
+    verbatim -- purely advisory, never read by anything that blocks a trade
+    or approval. Callers wrap this in try/except and commit it themselves;
+    a failure here must never affect the trade/approval response."""
+    cur.execute("""
+        INSERT INTO rule_adherence_checks (context, trade_id, proposal_id, symbol, side, rule_results, any_violation)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (context, trade_id, proposal_id, symbol, side, json.dumps(results), rule_adherence.any_violation(results)))
+
 @app.post("/api/trade")
 def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     if req.side not in ("buy", "sell"):
@@ -808,6 +821,26 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     with db() as conn, conn.cursor() as cur:
         cost = _current_trade_cost_flat(cur)
         thesis_id = _resolve_thesis_id(cur, req.proposal_id)
+
+        # Platform Improvements PR C: rule-adherence bypass detection.
+        # POST /api/trade enforces none of compute_signals()'s six
+        # buy-side gates itself -- this re-checks them and records which,
+        # if any, would currently fail. Purely advisory, fail-open: never
+        # affects the response below. Deliberately checked BEFORE this
+        # trade is inserted, not after -- buy_cooldown looks for a recent
+        # BUY of this symbol in the trades table, and this trade would
+        # always trivially satisfy its own check if it were already
+        # committed first. (The Alpaca order itself already happened by
+        # this point, so position-count/sector-cap gates unavoidably see
+        # it -- that race is inherent to how fast a market order fills and
+        # isn't fixable the same way.)
+        try:
+            adherence_results = rule_adherence.check_gates(
+                conn, req.symbol.upper(), req.side, filled_qty, filled_price)
+        except Exception as e:
+            adherence_results = None
+            log.warning(f"Rule-adherence check failed for {req.symbol.upper()} {req.side}: {e}")
+
         # Platform Improvements PR A: copy the linked proposal's planned
         # stop price onto the trade, immutably, at fill time -- this is
         # what makes a lifecycle's risk basis fixed at entry even if
@@ -839,6 +872,15 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
             """, (req.proposal_id,))
             conn.commit()
 
+        if adherence_results is not None:
+            try:
+                _record_rule_adherence(
+                    cur, "manual_trade", trade_id, req.proposal_id,
+                    req.symbol.upper(), req.side, adherence_results)
+                conn.commit()
+            except Exception as e:
+                log.warning(f"Rule-adherence check failed to record for trade {trade_id}: {e}")
+
     # Market orders fill within seconds — reconcile fill price in the background
     background_tasks.add_task(_reconcile_fill, trade_id, order["id"], filled_qty)
 
@@ -862,6 +904,8 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
         if p["decision"]:
             raise HTTPException(409, "already decided")
 
+        new_trade_id = None
+        adherence_results = None
         if body.decision == "approved":
             # Execute the trade
             trade_qty = body.qty or p["qty"]
@@ -900,6 +944,25 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
                     next_open = alpaca("GET", "/v2/clock").get("next_open")
                 except HTTPException:
                     pass
+
+            # Platform Improvements PR C: re-check the same gates
+            # compute_signals() enforced when this proposal was originally
+            # created, against state NOW at approval time -- the literal
+            # "proposal created, conditions changed, approved anyway" case.
+            # Buy-side only: a sell approval already gets a real
+            # availability check above (qty_available), a different and
+            # more specific question than the six buy-side gates. Checked
+            # BEFORE this trade is inserted below, not after -- same
+            # self-trip reasoning as execute_trade()'s own ordering (a
+            # buy_cooldown check would always trivially find this trade if
+            # it were already committed first).
+            if p["side"] == "buy":
+                try:
+                    adherence_results = rule_adherence.check_gates(
+                        conn, p["symbol"], "buy", float(trade_qty), filled_price)
+                except Exception as e:
+                    log.warning(f"Rule-adherence check failed for proposal {proposal_id}: {e}")
+
             cost = _current_trade_cost_flat(cur)
             cur.execute("""
                 INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id, cost, thesis_id, initial_stop_price)
@@ -921,6 +984,18 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
             WHERE id=%s
         """, (body.decision, body.rejection_reason, proposal_id))
         conn.commit()
+
+        # Recorded only after the decision above is safely committed --
+        # a failure inserting this advisory row must never poison the
+        # transaction the decision itself needs to commit.
+        if adherence_results is not None:
+            try:
+                _record_rule_adherence(
+                    cur, "proposal_approval", new_trade_id, proposal_id,
+                    p["symbol"], "buy", adherence_results)
+                conn.commit()
+            except Exception as e:
+                log.warning(f"Rule-adherence check failed to record for proposal {proposal_id}: {e}")
 
     result = {"status": "ok", "decision": body.decision}
     if body.decision == "approved":
