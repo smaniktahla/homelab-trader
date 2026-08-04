@@ -160,12 +160,24 @@ def get_news(symbol: str, limit: int = 20):
         return cur.fetchall()
 
 @app.get("/api/signals")
-def get_signals(limit: int = 50):
+def get_signals(limit: int = 50, symbol: Optional[str] = None):
+    """symbol is optional and filters server-side before LIMIT is applied --
+    without it, a single quiet symbol's older signals fall outside whatever
+    window `limit` happens to cover globally (500+ symbols scanning hourly
+    means the unfiltered latest-100 window can span just a few hours), so
+    the symbol page's "Recent Signals" card would show blank even when real
+    history exists. See api/templates/symbol.html's loadSignals()."""
     with db() as conn, conn.cursor() as cur:
-        cur.execute("""
-            SELECT symbol, signal_type, score, rationale, generated_at, acted_on
-            FROM signals ORDER BY generated_at DESC LIMIT %s
-        """, (limit,))
+        if symbol:
+            cur.execute("""
+                SELECT symbol, signal_type, score, rationale, generated_at, acted_on
+                FROM signals WHERE symbol = %s ORDER BY generated_at DESC LIMIT %s
+            """, (symbol.upper(), limit))
+        else:
+            cur.execute("""
+                SELECT symbol, signal_type, score, rationale, generated_at, acted_on
+                FROM signals ORDER BY generated_at DESC LIMIT %s
+            """, (limit,))
         return cur.fetchall()
 
 @app.get("/api/signals/latest")
