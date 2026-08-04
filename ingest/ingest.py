@@ -11,6 +11,7 @@ from email.mime.text import MIMEText
 from signals import compute_signals
 from scanner import seed_universe, scan_universe, promote_demote
 from market_regime import compute_market_regime, save_market_context
+from market_regime_history import record_today as record_regime_history_today
 from outcomes import update_signal_outcomes
 from build_position_lifecycles import build_position_lifecycles
 from earnings import sync_earnings_calendar
@@ -1033,6 +1034,7 @@ def run_once(conn, last_universe_scan):
     try:
         ctx = compute_market_regime()
         save_market_context(conn, ctx)
+        record_regime_history_today(conn, ctx)
     except Exception as e:
         log.warning(f"Market regime update failed: {e}")
 
