@@ -515,8 +515,7 @@ async function loadChart(days, btn) {
 async function loadSignals() {
   const tbody = document.getElementById('signals-body');
   try {
-    const signals = await fetch(`/api/signals?limit=100`).then(r => r.json());
-    const sym_signals = signals.filter(s => s.symbol === SYMBOL).slice(0, 10);
+    const sym_signals = await fetch(`/api/signals?symbol=${SYMBOL}&limit=10`).then(r => r.json());
     if (!sym_signals.length) { tbody.innerHTML = '<tr><td colspan="3" class="no-data">No signals yet</td></tr>'; return; }
     tbody.innerHTML = sym_signals.map(s => {
       const isBuy = s.signal_type.includes('buy');
