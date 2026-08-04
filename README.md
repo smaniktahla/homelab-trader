@@ -1,9 +1,6 @@
 # homelab-trader
 
-A self-hosted paper trading research platform: RSI + Bollinger Bands mean
-reversion, gated by market regime (SPY/QQQ trend + VIX), with human
-approval required before any order is placed. Runs against Alpaca's
-paper trading API — no real money moves.
+homelab-trader is a self-hosted quantitative trading research platform focused on building evidence before capital. Rather than chasing ever more complex strategies, it emphasizes measurement, reproducibility, explainability, and disciplined experimentation. Every signal, proposal, trade, and outcome is recorded so new ideas can be evaluated against historical evidence before they ever influence real money.
 
 ![Dashboard](docs/screenshots/dashboard.png)
 
