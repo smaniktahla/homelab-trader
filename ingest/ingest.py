@@ -8,10 +8,12 @@ from datetime import datetime, timezone, date, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from signals import compute_signals
+from signals import compute_signals, load_sector_map
 from scanner import seed_universe, scan_universe, promote_demote
 from market_regime import compute_market_regime, save_market_context
 from market_regime_history import record_today as record_regime_history_today
+from hierarchy_regime import update_hierarchy_regime
+from sector_mapping import get_sector_etf
 from outcomes import update_signal_outcomes
 from build_position_lifecycles import build_position_lifecycles
 from earnings import sync_earnings_calendar
@@ -1019,7 +1021,19 @@ def check_new_proposal_alerts(conn, cfg):
 
 def run_once(conn, last_universe_scan):
     symbols = get_watchlist(conn)
-    price_symbols = sorted(set(symbols) | get_extra_price_symbols(conn))
+
+    # Hierarchical regime PR: sector-regime calculators need each relevant
+    # sector ETF's own price_history kept fresh, same as SPY already is
+    # (implicitly, via relative_strength_vs_spy elsewhere) -- widen the
+    # price-ingest set rather than the watchlist/signal-generation set.
+    try:
+        sector_etfs = {get_sector_etf(s) for s in load_sector_map(conn, symbols).values()}
+        sector_etfs.discard(None)
+    except Exception as e:
+        log.warning(f"Sector ETF lookup for price ingest failed: {e}")
+        sector_etfs = set()
+
+    price_symbols = sorted(set(symbols) | get_extra_price_symbols(conn) | {"SPY"} | sector_etfs)
     log.info(f"Watchlist ({len(symbols)} symbols): {symbols}")
     ingest_prices(conn, price_symbols)
     ingest_hourly_prices(conn, price_symbols)
@@ -1037,6 +1051,13 @@ def run_once(conn, last_universe_scan):
         record_regime_history_today(conn, ctx)
     except Exception as e:
         log.warning(f"Market regime update failed: {e}")
+
+    # Sector + stock regime, one computation per cycle -- signals.py reads
+    # back whatever's stored here rather than recomputing per-symbol live.
+    try:
+        update_hierarchy_regime(conn, symbols)
+    except Exception as e:
+        log.warning(f"Hierarchical regime update failed: {e}")
 
     sync_earnings_calendar(conn)
     refresh_fundamentals_if_due(conn, symbols)

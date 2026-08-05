@@ -197,6 +197,24 @@
   .mkt-rationale { font-size:.72rem; color:#555; margin-left:4px; }
   .mkt-updated { font-size:.65rem; color:#333; margin-left:auto; }
 
+  /* Hierarchical market/sector/stock regime badges on proposal rows.
+     Bucket names differ from .mkt-regime (strong_bullish/bullish/neutral/
+     bearish/strong_bearish/unknown/insufficient_data) plus bull_calm-style
+     market buckets reused as-is via .mkt-regime's own classes above where
+     they overlap (market_regime.classification), so this covers the
+     sector/stock-specific bucket names not already styled. */
+  .regime-badges { margin-top:4px; display:flex; flex-wrap:wrap; gap:4px; }
+  .regime-badge { display:inline-block; padding:1px 8px; border-radius:10px;
+    font-size:.68rem; font-weight:600; background:#1a1d27; color:#888; }
+  .regime-badge.strong_bullish { background:#1a3a2a; color:#3ecf6e; }
+  .regime-badge.bullish        { background:#1e2f22; color:#7fd99a; }
+  .regime-badge.neutral        { background:#222; color:#888; }
+  .regime-badge.bearish        { background:#2e1a10; color:#f0a060; }
+  .regime-badge.strong_bearish { background:#3a1010; color:#f75f5f; }
+  .regime-badge.unknown,
+  .regime-badge.insufficient_data { background:#1a1d27; color:#555; }
+  .regime-badge.adj            { background:#22283a; color:#8fb4f7; }
+
   .mkt-regime-wrap { position:relative; display:inline-flex; align-items:center; }
   .mkt-regime-wrap .mkt-tip {
     display:none; position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%);
@@ -743,6 +761,15 @@ async function loadProposals() {
       const exitTag = p.exit_reason ? `<span style="font-size:.75rem;padding:2px 6px;border-radius:3px;margin-left:6px;background:#2a2d3e;color:#aaa">${p.exit_reason.replace('_',' ')}</span>` : '';
       // Strip the stale dollar amount from the rationale tail (everything after "; sized")
       const cleanRationale = (p.rationale || '').replace(/;\s*sized.*$/, '');
+      const rs = p.regime_snapshot;
+      const regimeTip = 'Reflects recent measured conditions, not a prediction.';
+      const regimeBadges = rs ? `
+        <div class="regime-badges" title="${regimeTip}">
+          <span class="regime-badge ${rs.market_regime?.classification || 'unknown'}">mkt: ${(rs.market_regime?.classification || 'unknown').replace(/_/g,' ')}</span>
+          <span class="regime-badge ${rs.sector_regime?.classification || 'unknown'}">sector: ${(rs.sector_regime?.classification || 'unknown').replace(/_/g,' ')}</span>
+          <span class="regime-badge ${rs.stock_regime?.classification || 'unknown'}">stock: ${(rs.stock_regime?.classification || 'unknown').replace(/_/g,' ')}</span>
+          ${p.total_regime_adjustment ? `<span class="regime-badge adj">score ${p.total_regime_adjustment > 0 ? '+' : ''}${p.total_regime_adjustment}</span>` : ''}
+        </div>` : '';
       return `
       <div class="proposal-row">
         <div class="prop-info">
@@ -751,6 +778,7 @@ async function loadProposals() {
           &nbsp;<span style="color:#888;font-size:.8rem">score ${p.signal_score ?? '—'}</span>
           ${estCost ? `<span style="color:#f7c94f;font-size:.82rem;margin-left:8px">${estCost}</span>` : ''}
           <div class="prop-meta">${cleanRationale || 'No rationale'}</div>
+          ${regimeBadges}
         </div>
         <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
           ${p.qty == null ? `<input id="prop-qty-${p.id}" type="number" min="0.001" step="0.001" placeholder="qty" style="width:70px;padding:4px 6px;background:#12151f;border:1px solid #4f8ef7;border-radius:4px;color:#e8eaf6;font-size:.85rem">` : ''}

@@ -11,6 +11,8 @@ from signals import compute_signals, compute_bollinger
 from signal_components import weighted_component_score
 import lifecycle_performance
 import rule_adherence
+from sector_regime import load_latest_sector_regime
+from security_regime import load_latest_security_regime
 
 log = logging.getLogger(__name__)
 
@@ -1074,6 +1076,40 @@ def get_market_context():
         "overall": "unknown", "score_modifier": 0, "alloc_modifier": 1.0,
         "rationale": "No market context data yet — runs on next ingest cycle",
         "updated_at": None,
+    }
+
+@app.get("/api/regime/sector/{sector}")
+def get_sector_regime(sector: str):
+    """Latest persisted sector-level regime — absolute trend + relative
+    strength vs the market benchmark. Reflects recent measured conditions,
+    not a prediction. 'unknown' means no ETF mapping exists for this
+    sector name; 'insufficient_data' means the mapping exists but there
+    isn't enough price history yet."""
+    with db() as conn:
+        row = load_latest_sector_regime(conn, sector)
+    if row:
+        return row
+    return {
+        "sector": sector, "sector_symbol": None, "classification": "unknown",
+        "total_score": None, "absolute_trend_score": None, "relative_strength_score": None,
+        "breadth_score": None, "confidence": 0.0, "component_values": {},
+        "trading_date": None,
+    }
+
+@app.get("/api/regime/security/{symbol}")
+def get_security_regime(symbol: str):
+    """Latest persisted stock-level regime — absolute trend + relative
+    strength vs both its sector and the market. Reflects recent measured
+    conditions, not a prediction."""
+    with db() as conn:
+        row = load_latest_security_regime(conn, symbol)
+    if row:
+        return row
+    return {
+        "symbol": symbol, "sector": None, "classification": "insufficient_data",
+        "total_score": None, "absolute_trend_score": None, "vs_sector_score": None,
+        "vs_market_score": None, "confidence": 0.0, "component_values": {},
+        "trading_date": None,
     }
 
 @app.get("/api/global-markets")

@@ -21,7 +21,8 @@ RESET_TABLES = [
     "symbol_features", "signal_outcomes", "signals", "trade_proposals",
     "trades", "portfolio_snapshots", "price_history", "price_history_hourly",
     "news", "watchlist", "universe", "universe_scan", "earnings_events",
-    "market_context", "market_regime_history", "congressional_filings", "fundamental_facts",
+    "market_context", "market_regime_history", "sector_regime_history", "security_regime_history",
+    "congressional_filings", "fundamental_facts",
     "position_trades", "position_lifecycles", "position_lifecycle_symbol_status",
     "rule_adherence_checks",
 ]
