@@ -85,7 +85,7 @@ def test_buy_all_clear_no_violations(ra, conn):
         _mock_account(m, cash=50000.0, portfolio_value=100000.0)
         _mock_positions(m, [])
         results = ra.check_gates(conn, "AAPL", "buy", 5, 100.0)
-    assert len(results) == 6   # circuit_breaker, max_open_positions, earnings_blackout, buy_cooldown, position_sizing, sector_cap
+    assert len(results) == 6   # trading_permission, max_open_positions, earnings_blackout, buy_cooldown, position_sizing, sector_cap
     assert not ra.any_violation(results)
     assert all(r["detail"] is None for r in results)
 
@@ -108,7 +108,7 @@ def test_evaluates_every_gate_even_when_one_fails(ra, conn):
     assert len(results) == 6
     assert _rule(results, "buy_cooldown")["passed"] is False
     # every OTHER gate was still evaluated, not skipped
-    assert _rule(results, "circuit_breaker")["passed"] is True
+    assert _rule(results, "trading_permission")["passed"] is True
     assert _rule(results, "sector_cap")["passed"] is True
 
 
@@ -125,9 +125,9 @@ def test_circuit_breaker_active(ra, conn):
         _mock_account(m, cash=50000.0, portfolio_value=100000.0)
         _mock_positions(m, [])
         results = ra.check_gates(conn, "AAPL", "buy", 5, 100.0)
-    cb = _rule(results, "circuit_breaker")
+    cb = _rule(results, "trading_permission")
     assert cb["passed"] is False
-    assert "circuit_breaker_drawdown" in cb["detail"]
+    assert "portfolio_drawdown_limit" in cb["detail"]
     # Deliberately does NOT insert another portfolio_snapshots row --
     # current_high_water_mark() is read-only, unlike
     # record_snapshot_and_check().

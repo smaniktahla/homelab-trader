@@ -82,6 +82,7 @@ from signals import (compute_rsi, compute_bollinger, compute_atr, detect_regime,
 from market_regime import _classify_trend, _classify_vix, classify_overall, SMA_FAST, SMA_SLOW, VIX_CALM, VIX_FEAR
 from market_regime_history import asof_index
 from risk_engine import evaluate_proposal
+from circuit_breaker import drawdown_pct_of, is_breached, drawdown_size_multiplier
 from db_utils import save_backtest_result
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -252,10 +253,15 @@ def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sec
         p_gated["trade_allocation_pct"] = p["trade_allocation_pct"] * alloc_mod
 
         # ── Mark-to-market + circuit breaker ────────────────────────────
+        # drawdown_pct_of/is_breached (circuit_breaker.py) replace what
+        # used to be this loop's own hand-copy of the same formula --
+        # Risk Engine PR 3 fixed the same duplication in
+        # rule_adherence.py's check_gates(), this is the third and last
+        # independent copy in the codebase.
         current_value = portfolio_value(ledger["cash"], ledger["positions"], lambda s: price_of(s, current_date) or 0)
         high_water_mark = max(high_water_mark, current_value)
-        drawdown_pct = (high_water_mark - current_value) / high_water_mark if high_water_mark else 0.0
-        circuit_breaker_active = drawdown_pct >= p["circuit_breaker_drawdown_pct"]
+        drawdown_pct = drawdown_pct_of(current_value, high_water_mark)
+        circuit_breaker_active = is_breached(drawdown_pct, p["circuit_breaker_drawdown_pct"])
         equity_curve.append({"date": str(current_date), "value": round(current_value, 2)})
 
         # Symbols sold at any point today are never re-bought today — in
@@ -369,9 +375,14 @@ def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sec
             open_risk_dollars = sum(
                 (pos.get("risk_dollars") or 0.0) for pos in ledger["positions"].values()
             )
+            # Risk Engine PR 3: same drawdown-based sizing taper live uses --
+            # loss-streak halting is NOT mirrored here (would need the
+            # backtest to track its own simulated closed-lifecycle streak;
+            # left as a documented gap, not silently diverging).
+            drawdown_mult = drawdown_size_multiplier(drawdown_pct, p["circuit_breaker_drawdown_pct"])
             decision = evaluate_proposal(
                 sym, price, requested_qty, planned_stop, ledger["cash"], cur_value,
-                positions_with_mv, {}, open_risk_dollars, p,
+                positions_with_mv, {}, open_risk_dollars, p, drawdown_multiplier=drawdown_mult,
             )
             qty = decision["approved_quantity"]
             if qty < 1:

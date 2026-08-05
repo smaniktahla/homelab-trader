@@ -14,6 +14,8 @@ import rule_adherence
 from sector_regime import load_latest_sector_regime
 from security_regime import load_latest_security_regime
 import risk_engine
+import trading_permission
+import circuit_breaker
 
 log = logging.getLogger(__name__)
 
@@ -824,12 +826,29 @@ def _clamp_to_risk_engine(conn, cur, context, proposal_id, symbol, requested_qty
     try:
         cash, portfolio_value, positions = fetch_alpaca_portfolio()
         p = load_params(conn)
-        sector_map = load_sector_map(conn, {symbol} | set(positions.keys()))
-        open_risk_dollars = risk_engine.load_open_risk_dollars(conn)
-        decision = risk_engine.evaluate_proposal(
-            symbol, price, requested_qty, planned_initial_stop_price,
-            cash, portfolio_value, positions, sector_map, open_risk_dollars, p,
-        )
+
+        # Risk Engine PR 3: account-level trading permission is checked
+        # first, before any per-trade constraint math -- a paused account
+        # (drawdown or loss-streak) blocks every new BUY regardless of how
+        # much room this specific trade would otherwise have.
+        permission = trading_permission.evaluate_trading_permission(conn, portfolio_value, p)
+        if not permission["new_entries_allowed"]:
+            decision = {
+                "approved_quantity": 0, "outcome": "rejected", "risk_budget_dollars": None,
+                "binding_constraint": "trading_permission:" + ",".join(permission["reasons"]),
+                "constraint_detail": {"trading_permission": permission},
+            }
+        else:
+            sector_map = load_sector_map(conn, {symbol} | set(positions.keys()))
+            open_risk_dollars = risk_engine.load_open_risk_dollars(conn)
+            hwm = circuit_breaker.current_high_water_mark(conn)
+            drawdown_pct = circuit_breaker.drawdown_pct_of(portfolio_value, hwm) if portfolio_value else 0.0
+            drawdown_mult = circuit_breaker.drawdown_size_multiplier(drawdown_pct, p["circuit_breaker_drawdown_pct"])
+            decision = risk_engine.evaluate_proposal(
+                symbol, price, requested_qty, planned_initial_stop_price,
+                cash, portfolio_value, positions, sector_map, open_risk_dollars, p,
+                drawdown_multiplier=drawdown_mult,
+            )
     except Exception as e:
         raise HTTPException(400, f"Risk engine evaluation failed, refusing to size this trade: {e}")
 

@@ -25,7 +25,15 @@ that inserts a portfolio_snapshots row every call, and this module runs at
 unpredictable times (whenever a human trades or approves something), which
 would pollute the once-per-ingest-cycle snapshot cadence other reporting
 (drawdown-duration, portfolio value charting) depends on. Uses
-circuit_breaker.current_high_water_mark()'s read-only peek instead.
+trading_permission.evaluate_trading_permission() instead (Risk Engine PR
+3), which itself only reads via circuit_breaker.current_high_water_mark()'s
+read-only peek, same non-polluting principle.
+
+The "trading_permission" gate below (renamed from "circuit_breaker" as of
+Risk Engine PR 3) mirrors exactly what compute_signals() now enforces --
+account-level drawdown OR loss-streak, aggregated -- not just drawdown
+alone, so a human bypassing a loss-streak pause is caught here too, not
+silently missed.
 
 Only meaningful going forward -- like position_lifecycles.realized_r,
 there is no way to retroactively reconstruct portfolio state at a past
@@ -38,12 +46,12 @@ gate here is evaluated unconditionally -- the point is the full checklist,
 not just the first failure.
 """
 
-from circuit_breaker import current_high_water_mark
 from earnings import earnings_blackout_reason
 from signals import (
     fetch_alpaca_portfolio, load_params, recent_buy_block_reason,
     sector_cap_block_reason, load_sector_map,
 )
+from trading_permission import evaluate_trading_permission
 
 
 def _position_sizing_violation(symbol, qty, price, existing_market_value, portfolio_value, p):
@@ -86,12 +94,10 @@ def check_gates(conn, symbol, side, qty, price):
     p = load_params(conn)
     results = []
 
-    hwm = current_high_water_mark(conn)
-    drawdown_pct = (hwm - portfolio_value) / hwm if hwm and portfolio_value else 0.0
-    cb_active = drawdown_pct >= p["circuit_breaker_drawdown_pct"]
+    permission = evaluate_trading_permission(conn, portfolio_value, p)
     results.append({
-        "rule": "circuit_breaker", "passed": not cb_active,
-        "detail": None if not cb_active else f"circuit_breaker_drawdown:{drawdown_pct*100:.1f}%",
+        "rule": "trading_permission", "passed": permission["new_entries_allowed"],
+        "detail": None if permission["new_entries_allowed"] else "trading_permission:" + ",".join(permission["reasons"]),
     })
 
     open_count = len(positions)

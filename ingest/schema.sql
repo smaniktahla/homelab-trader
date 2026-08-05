@@ -743,3 +743,13 @@ INSERT INTO signal_params (key, value, description) VALUES
     ('risk_per_trade_pct', 0.01, 'Fraction of portfolio value the risk engine budgets as dollar risk on any single new position (1%)'),
     ('max_portfolio_open_risk_pct', 0.06, 'Fraction of portfolio value the risk engine allows as combined dollar risk across all open positions at once (6%)')
 ON CONFLICT (key) DO NOTHING;
+
+-- Risk Engine PR 3: trading-permission aggregation (see
+-- shared/trading_permission.py). loss_streak_limit pauses new BUY entries
+-- account-wide after this many consecutive losing closed position_lifecycles
+-- (net_pnl <= 0) in a row -- never affects sells or existing positions,
+-- same "brake on new risk only" principle circuit_breaker_drawdown_pct
+-- already established.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('loss_streak_limit', 4, 'Pause new BUY entries account-wide after this many consecutive losing closed positions in a row')
+ON CONFLICT (key) DO NOTHING;
