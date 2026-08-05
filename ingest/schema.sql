@@ -630,3 +630,41 @@ CREATE TABLE IF NOT EXISTS rule_adherence_checks (
 CREATE INDEX IF NOT EXISTS idx_rule_adherence_checks_checked_at ON rule_adherence_checks (checked_at);
 CREATE INDEX IF NOT EXISTS idx_rule_adherence_checks_trade_id ON rule_adherence_checks (trade_id);
 CREATE INDEX IF NOT EXISTS idx_rule_adherence_checks_proposal_id ON rule_adherence_checks (proposal_id);
+
+-- Risk engine (see docs/risk-engine-architecture-reconciliation.md). One
+-- row per shared/risk_engine.py::evaluate_proposal() call -- the single
+-- authoritative record of approved_quantity, distinct from
+-- rule_adherence_checks above (which is purely advisory and never
+-- constrains anything). A proposal gets its first risk_decisions row when
+-- compute_signals() creates it (requested_qty = the strategy's own sized
+-- qty); decide_proposal()/execute_trade() re-evaluate at approval time
+-- against then-current portfolio state and clamp to that row's
+-- approved_quantity -- see the two call sites for why a second evaluation
+-- is necessary rather than trusting the proposal-time row (portfolio state
+-- can have moved between proposal and human approval, sometimes by days).
+-- Forward-looking only, same precedent as rule_adherence_checks and
+-- position_lifecycles.realized_r -- no backfill for trades made before
+-- this shipped.
+CREATE TABLE IF NOT EXISTS risk_decisions (
+    id                    BIGSERIAL PRIMARY KEY,
+    decided_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    context               TEXT NOT NULL CHECK (context IN ('proposal_generated', 'proposal_approval', 'manual_trade')),
+    proposal_id           BIGINT REFERENCES trade_proposals(id),
+    symbol                TEXT NOT NULL,
+    side                  TEXT NOT NULL,
+    requested_qty         NUMERIC NOT NULL,
+    approved_quantity     NUMERIC NOT NULL,
+    outcome               TEXT NOT NULL CHECK (outcome IN ('approved', 'reduced', 'rejected')),
+    risk_budget_dollars   NUMERIC,
+    binding_constraint    TEXT,             -- NULL only when outcome = 'approved'
+    constraint_detail     JSONB NOT NULL,   -- every limit checked, not just the binding one
+    market_regime_at_decision TEXT          -- audit only, see reconciliation doc section C.3/D -- never an input to sizing
+);
+
+CREATE INDEX IF NOT EXISTS idx_risk_decisions_decided_at ON risk_decisions (decided_at);
+CREATE INDEX IF NOT EXISTS idx_risk_decisions_proposal_id ON risk_decisions (proposal_id);
+
+INSERT INTO signal_params (key, value, description) VALUES
+    ('risk_per_trade_pct', 0.01, 'Fraction of portfolio value the risk engine budgets as dollar risk on any single new position (1%)'),
+    ('max_portfolio_open_risk_pct', 0.06, 'Fraction of portfolio value the risk engine allows as combined dollar risk across all open positions at once (6%)')
+ON CONFLICT (key) DO NOTHING;
