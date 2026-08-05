@@ -1077,6 +1077,35 @@ function _reviewRuleAdherenceTable(metricSummary) {
   return contextRows + ruleRows;
 }
 
+// Risk Engine PR 2: risk_decisions (shared/risk_engine.py) -- how often
+// the (now-binding, as of Risk Engine PR 1) risk engine reduces or
+// rejects a proposed trade, which single constraint binds most often, and
+// how much of a strategy's requested quantity actually clears. Same
+// two-view shape as the rule-adherence table above (by context, by
+// binding constraint), but distinct semantics -- this reports what the
+// risk engine actually DID, not merely what it flagged.
+function _reviewRiskDecisionTable(metricSummary) {
+  const byContext = (metricSummary || {}).risk_decision_by_context || {};
+  const byConstraint = (metricSummary || {}).risk_decision_by_binding_constraint || {};
+  const contextRows = Object.entries(byContext).map(([ctx, s]) => `
+    <tr>
+      <td style="color:#888">Context: ${ctx}</td>
+      <td>${s.n}</td>
+      <td>${s.n_reduced}</td>
+      <td>${s.n_rejected}</td>
+      <td class="${s.avg_fill_ratio_pct >= 90 ? 'up' : 'down'}">${s.avg_fill_ratio_pct != null ? s.avg_fill_ratio_pct + '%' : '—'}</td>
+    </tr>`).join('');
+  const constraintRows = Object.entries(byConstraint).map(([constraint, s]) => `
+    <tr>
+      <td style="color:#888">Binding: ${constraint}</td>
+      <td>${s.n_binding}</td>
+      <td>—</td>
+      <td>—</td>
+      <td>—</td>
+    </tr>`).join('');
+  return contextRows + constraintRows;
+}
+
 async function loadReviews() {
   const wrap = document.getElementById('reviews-list');
   try {
@@ -1113,6 +1142,14 @@ async function loadReviews() {
              <tbody>${adherenceRows}</tbody>
            </table>`
         : '';
+      const riskDecisionRows = _reviewRiskDecisionTable(r.metric_summary);
+      const riskDecisionTable = riskDecisionRows
+        ? `<div style="margin-top:14px;color:#888;font-size:.78rem">Risk Engine Sizing (risk_decisions -- what the risk engine actually approved/reduced/rejected)</div>
+           <table style="margin-top:6px">
+             <thead><tr><th>Bucket</th><th>N</th><th>Reduced</th><th>Rejected</th><th>Avg Fill %</th></tr></thead>
+             <tbody>${riskDecisionRows}</tbody>
+           </table>`
+        : '';
       return `
       <div class="proposal-row" style="flex-direction:column;align-items:stretch">
         <div class="prop-info">
@@ -1123,6 +1160,7 @@ async function loadReviews() {
           ${bucketTable}
           ${lifecycleTable}
           ${adherenceTable}
+          ${riskDecisionTable}
         </div>
       </div>`;
     }).join('');
