@@ -81,6 +81,7 @@ from signals import (compute_rsi, compute_bollinger, compute_atr, detect_regime,
                       RS_LOOKBACK_DAYS, ATR_PERIOD)
 from market_regime import _classify_trend, _classify_vix, classify_overall, SMA_FAST, SMA_SLOW, VIX_CALM, VIX_FEAR
 from market_regime_history import asof_index
+from risk_engine import evaluate_proposal
 from db_utils import save_backtest_result
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -193,10 +194,13 @@ def portfolio_value(cash, positions, price_lookup):
     return cash + sum(pos["qty"] * price_lookup(sym) for sym, pos in positions.items())
 
 
-def execute_buy(ledger, sym, qty, price, current_date, score, rationale, trade_log):
+def execute_buy(ledger, sym, qty, price, current_date, score, rationale, trade_log, risk_dollars=None):
     cost = qty * price
     ledger["cash"] -= cost
-    ledger["positions"][sym] = {"qty": qty, "avg_entry": price, "entry_date": current_date}
+    ledger["positions"][sym] = {
+        "qty": qty, "avg_entry": price, "entry_date": current_date,
+        "risk_dollars": risk_dollars,  # feeds risk_engine.evaluate_proposal's open_risk_dollars for later buys
+    }
     trade_log.append({"date": str(current_date), "symbol": sym, "side": "buy", "qty": qty,
                        "price": round(price, 2), "score": score, "rationale": rationale})
 
@@ -331,24 +335,50 @@ def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sec
                 continue
             # earnings blackout: skipped (see module docstring)
             cur_value = portfolio_value(ledger["cash"], ledger["positions"], lambda s: price_of(s, current_date) or 0)
-            qty, _sizing_note = calc_buy_qty(price, ledger["cash"], cur_value, 0.0, p_gated)
-            if qty is None:
+            requested_qty, _sizing_note = calc_buy_qty(price, ledger["cash"], cur_value, 0.0, p_gated)
+            if requested_qty is None:
                 continue
             # sector_cap_block_reason (signals.py) expects each position to
             # carry a precomputed market_value, matching the shape
             # get_positions() returns live from Alpaca. The simulated
-            # ledger only stores qty/avg_entry/entry_date, so shape a view
-            # with today's mark-to-market value rather than changing what
-            # the ledger itself stores (avg_entry/entry_date are read
-            # elsewhere assuming the flat shape).
+            # ledger only stores qty/avg_entry/entry_date/risk_dollars, so
+            # shape a view with today's mark-to-market value rather than
+            # changing what the ledger itself stores (avg_entry/entry_date
+            # are read elsewhere assuming the flat shape).
             positions_with_mv = {
                 s: {**pos, "market_value": pos["qty"] * (price_of(s, current_date) or 0)}
                 for s, pos in ledger["positions"].items()
             }
-            sector_block = sector_cap_block_reason(sym, price, qty, sector_map, positions_with_mv, cur_value, p)
+            sector_block = sector_cap_block_reason(sym, price, requested_qty, sector_map, positions_with_mv, cur_value, p)
             if sector_block:
                 continue
-            execute_buy(ledger, sym, qty, price, current_date, buy_score, buy_rationale, trade_log)
+
+            # Risk engine (Platform Improvements: risk engine PR 1) --
+            # calc_buy_qty's allocation-based qty above becomes the
+            # strategy's requested_qty, same as live compute_signals()
+            # treats it; the risk engine may shrink it further on
+            # risk-budget/portfolio-open-risk grounds. sector_map is
+            # deliberately NOT passed here (empty dict) -- the block-if-
+            # would-breach sector_cap_block_reason() check just above
+            # remains the sole sector gate in the backtest, preserving its
+            # exact existing "skip the trade entirely on any breach"
+            # semantics rather than silently switching to the risk
+            # engine's own "reduce qty to fit" sector behavior, which is a
+            # different policy not yet validated for this backtest.
+            planned_stop = price * (1 - p["stop_loss_pct"])
+            open_risk_dollars = sum(
+                (pos.get("risk_dollars") or 0.0) for pos in ledger["positions"].values()
+            )
+            decision = evaluate_proposal(
+                sym, price, requested_qty, planned_stop, ledger["cash"], cur_value,
+                positions_with_mv, {}, open_risk_dollars, p,
+            )
+            qty = decision["approved_quantity"]
+            if qty < 1:
+                continue
+            risk_dollars = (price - planned_stop) * qty
+            execute_buy(ledger, sym, qty, price, current_date, buy_score, buy_rationale, trade_log,
+                        risk_dollars=risk_dollars)
 
     final_value = portfolio_value(ledger["cash"], ledger["positions"], lambda s: price_of(s, end_date) or 0)
     total_return_pct = (final_value - STARTING_CASH) / STARTING_CASH * 100

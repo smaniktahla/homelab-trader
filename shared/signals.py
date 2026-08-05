@@ -4,6 +4,7 @@ Based on backtesting research: mean reversion is the only strategy that broadly 
 rigorous walk-forward validation across all asset classes and market conditions.
 """
 
+import json
 import logging
 import math
 import os
@@ -14,6 +15,7 @@ import requests
 
 from earnings import earnings_blackout_reason
 from circuit_breaker import record_snapshot_and_check
+from risk_engine import evaluate_proposal, load_open_risk_dollars
 from feature_store import record_symbol_feature_snapshot, attach_feature_snapshot, attach_fundamental_score
 from fundamentals import compute_fundamental_score
 from hierarchy_regime import snapshot_hierarchy_for_symbol
@@ -52,6 +54,10 @@ DEFAULTS = {
     "earnings_blackout_days": 3,
     "circuit_breaker_drawdown_pct": 0.15,
     "buy_cooldown_days": 2,
+    # Risk engine (shared/risk_engine.py) -- see
+    # docs/risk-engine-architecture-reconciliation.md
+    "risk_per_trade_pct": 0.01,
+    "max_portfolio_open_risk_pct": 0.06,
 }
 
 # Relative strength vs SPY and ATR-normalized move: score modifiers layered
@@ -449,6 +455,30 @@ def _block_outcome(conn, outcome_id, reason):
     conn.commit()
 
 
+def _record_risk_decision(conn, context, proposal_id, symbol, side, requested_qty, decision, market_overall):
+    """Persist one shared/risk_engine.py::evaluate_proposal() result.
+    Side-effecting only, never branched on here -- compute_signals()'s
+    proposal-creation output (trade_proposals row, qty as the strategy
+    sized it) is unchanged by this; risk_decisions is purely an additional,
+    parallel record. See docs/risk-engine-architecture-reconciliation.md
+    section D for why market_regime_at_decision is audit-only, never an
+    input to evaluate_proposal() itself."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO risk_decisions (
+                context, proposal_id, symbol, side, requested_qty, approved_quantity,
+                outcome, risk_budget_dollars, binding_constraint, constraint_detail,
+                market_regime_at_decision
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (
+            context, proposal_id, symbol, side, requested_qty, decision["approved_quantity"],
+            decision["outcome"], decision["risk_budget_dollars"], decision["binding_constraint"],
+            json.dumps(decision["constraint_detail"]), market_overall,
+        ))
+    conn.commit()
+
+
 def _propose_outcome(conn, outcome_id, proposal_id):
     with conn.cursor() as cur:
         cur.execute("""
@@ -708,6 +738,12 @@ def compute_signals(conn, symbols):
     sector_map = load_sector_map(conn, set(symbols) | set(positions.keys()))
     regime_params = load_regime_scoring_params(conn)
 
+    # Portfolio's total planned dollar risk right now, before any of this
+    # cycle's proposals -- fed into the risk engine's portfolio-open-risk
+    # cap below. Computed once per cycle (same precedent as sector_map
+    # above), not re-queried per symbol.
+    open_risk_dollars = load_open_risk_dollars(conn)
+
     for sym in symbols:
         try:
             closes = fetch_closes(sym, "1y")
@@ -901,6 +937,24 @@ def compute_signals(conn, symbols):
                 conn.commit()
                 log.info(f"PROPOSAL created: {sym} {side} qty={qty} score={score}")
                 _propose_outcome(conn, outcome_id, proposal_id)
+
+                # Risk engine: record what it would approve for this
+                # proposal's requested qty, right now. Side-effecting only
+                # -- never changes qty on the trade_proposals row above.
+                # decide_proposal()/execute_trade() re-evaluate again at
+                # approval time (portfolio state may have moved since),
+                # this is the proposal-time record for audit/comparison.
+                if side == "buy":
+                    try:
+                        decision = evaluate_proposal(
+                            sym, price, qty, planned_initial_stop_price,
+                            cash, portfolio_value, positions, sector_map,
+                            open_risk_dollars, p,
+                        )
+                        _record_risk_decision(conn, "proposal_generated", proposal_id, sym, side,
+                                               qty, decision, market_overall)
+                    except Exception as e:
+                        log.warning(f"Risk engine evaluation failed for {sym}: {e}")
 
         except Exception as e:
             log.warning(f"Signals failed for {sym}: {e}")
