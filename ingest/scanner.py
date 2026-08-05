@@ -25,10 +25,14 @@ PROMOTE_THRESHOLD = 45  # score to auto-promote to watchlist
 DEMOTE_WEAK_HOURS = 12  # hours a watchlist entry can stay weak before demotion
 SCAN_DELAY = 0.25       # seconds between Yahoo Finance requests
 
-# Major ETFs always included in the scan universe
+# Major ETFs always included in the scan universe. "VIX" (no caret) is
+# deliberately absent -- it isn't a tradable equity/ETF (Alpaca and Yahoo
+# both return empty data for it), and volatility is already tracked via
+# the real index symbol "^VIX" in market_regime.py. Including it here
+# seeded a permanent scannable=True universe row with zero price history.
 CORE_ETFS = [
     "SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLV", "XLI", "XLY",
-    "XLP", "XLU", "XLB", "XLRE", "GLD", "SLV", "TLT", "HYG", "EEM", "VIX",
+    "XLP", "XLU", "XLB", "XLRE", "GLD", "SLV", "TLT", "HYG", "EEM",
 ]
 
 
