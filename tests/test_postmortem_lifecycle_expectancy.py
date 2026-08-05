@@ -223,3 +223,60 @@ def test_rule_adherence_segments_empty_when_no_checks_exist(conn):
         metric_summary = cur.fetchone()[0]
     assert metric_summary["rule_adherence_by_context"] == {}
     assert metric_summary["rule_adherence_by_rule"] == {}
+
+
+def _insert_risk_decision(conn, context, outcome, requested_qty, approved_quantity,
+                           binding_constraint=None, symbol="AAPL"):
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO risk_decisions
+                (context, symbol, side, requested_qty, approved_quantity, outcome,
+                 binding_constraint, constraint_detail)
+            VALUES (%s, %s, 'buy', %s, %s, %s, %s, '{}')
+        """, (context, symbol, requested_qty, approved_quantity, outcome, binding_constraint))
+    conn.commit()
+
+
+def test_risk_decision_segments_land_in_metric_summary(conn):
+    """Risk Engine PR 2: a fourth, independent data source merged into the
+    same metric_summary -- present regardless of whether the signal-level
+    sample is sufficient, same principle as the other three segment
+    sources above."""
+    build_position_lifecycles, run_postmortem_review = _import_ingest_modules()
+
+    _insert_risk_decision(conn, "proposal_generated", "approved", 10, 10)
+    _insert_risk_decision(conn, "proposal_generated", "reduced", 100, 20, "position_allocation")
+    _insert_risk_decision(conn, "proposal_approval", "rejected", 10, 0, "insufficient_buying_power")
+
+    build_position_lifecycles(conn)
+    result = run_postmortem_review(conn)
+    assert "Risk engine: 3 sizing decision(s) in window." in result["finding"]
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT metric_summary FROM strategy_review_proposals ORDER BY created_at DESC LIMIT 1")
+        metric_summary = cur.fetchone()[0]
+
+    by_context = metric_summary["risk_decision_by_context"]
+    assert by_context["proposal_generated"]["n"] == 2
+    assert by_context["proposal_generated"]["n_reduced"] == 1
+    assert by_context["proposal_generated"]["n_rejected"] == 0
+    # (10/10=1.0) and (20/100=0.2) averaged -> 0.6 -> 60.0%
+    assert by_context["proposal_generated"]["avg_fill_ratio_pct"] == 60.0
+    assert by_context["proposal_approval"]["n"] == 1
+    assert by_context["proposal_approval"]["n_rejected"] == 1
+    assert by_context["proposal_approval"]["avg_fill_ratio_pct"] is None  # rejection excluded
+
+    by_constraint = metric_summary["risk_decision_by_binding_constraint"]
+    assert by_constraint["position_allocation"]["n_binding"] == 1
+    assert by_constraint["insufficient_buying_power"]["n_binding"] == 1
+
+
+def test_risk_decision_segments_empty_when_no_decisions_exist(conn):
+    build_position_lifecycles, run_postmortem_review = _import_ingest_modules()
+    build_position_lifecycles(conn)
+    run_postmortem_review(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT metric_summary FROM strategy_review_proposals ORDER BY created_at DESC LIMIT 1")
+        metric_summary = cur.fetchone()[0]
+    assert metric_summary["risk_decision_by_context"] == {}
+    assert metric_summary["risk_decision_by_binding_constraint"] == {}

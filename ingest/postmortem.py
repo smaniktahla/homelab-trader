@@ -29,6 +29,13 @@ buy-side gates. Same "always computed, merged in under its own prefixed
 keys" treatment as the lifecycle segments, and for the same reason: a slow
 week for any one of these three data sources says nothing about the other
 two.
+
+Risk Engine PR 2 adds a fourth: risk_decision_by_context/
+risk_decision_by_binding_constraint, aggregating risk_decisions (see
+shared/risk_engine.py) -- how often the (now-binding, as of PR 1) risk
+engine reduces or rejects a proposed trade, which single constraint binds
+most often, and how much of a strategy's requested quantity actually
+clears. Same independent-source treatment as the other three.
 """
 
 import json
@@ -262,6 +269,80 @@ def _rule_adherence_segments(rows):
     }
 
 
+def _fetch_risk_decisions(conn):
+    """All risk_decisions rows (shared/risk_engine.py, Risk Engine PR 1)
+    within WINDOW_DAYS -- same window convention every other independent
+    data source in this file uses."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT context, outcome, binding_constraint, requested_qty, approved_quantity
+            FROM risk_decisions
+            WHERE decided_at >= NOW() - INTERVAL '%s days'
+            ORDER BY decided_at ASC
+        """, (WINDOW_DAYS,))
+        return cur.fetchall()
+
+
+def _risk_decision_segments(rows):
+    """Two views over risk_decisions -- Risk Engine PR 2, same "always
+    computed, independent data source" treatment as lifecycle/adherence
+    segments above:
+
+    risk_decision_by_context: one bucket per context
+    ('proposal_generated' / 'proposal_approval' / 'manual_trade') -- n,
+    n_reduced, n_rejected, and avg_fill_ratio_pct (approved_quantity /
+    requested_qty, averaged over non-rejected decisions only -- a
+    rejection has approved_quantity=0 by definition, which would just
+    drag every context's ratio toward 0 without saying anything new; its
+    rate is already captured by rejected_rate_pct).
+
+    risk_decision_by_binding_constraint: one bucket per constraint name
+    that actually bound a decision (position_allocation, risk_budget,
+    portfolio_open_risk, sector_exposure, buying_power, or a rejection
+    reason like no_portfolio_data) -- counted only over reduced/rejected
+    decisions, since an approved decision has binding_constraint=NULL by
+    definition (see shared/risk_engine.py). Answers "which single
+    constraint most often limits sizing," same shape/intent as
+    rule_adherence_by_rule above but for the binding risk engine instead
+    of the advisory bypass-detection layer.
+    """
+    by_context = {}
+    constraint_counts = Counter()
+
+    for row in rows:
+        b = by_context.setdefault(row["context"], {"n": 0, "n_reduced": 0, "n_rejected": 0, "_fill_ratios": []})
+        b["n"] += 1
+        if row["outcome"] == "rejected":
+            b["n_rejected"] += 1
+        else:
+            if row["outcome"] == "reduced":
+                b["n_reduced"] += 1
+            if row["requested_qty"]:
+                b["_fill_ratios"].append(float(row["approved_quantity"]) / float(row["requested_qty"]))
+
+        if row["binding_constraint"] and row["outcome"] != "approved":
+            constraint_counts[row["binding_constraint"]] += 1
+
+    context_out = {}
+    for context, b in by_context.items():
+        ratios = b["_fill_ratios"]
+        context_out[context] = {
+            "n": b["n"],
+            "n_reduced": b["n_reduced"],
+            "n_rejected": b["n_rejected"],
+            "reduced_rate_pct": round(100 * b["n_reduced"] / b["n"], 1) if b["n"] else None,
+            "rejected_rate_pct": round(100 * b["n_rejected"] / b["n"], 1) if b["n"] else None,
+            "avg_fill_ratio_pct": round(100 * sum(ratios) / len(ratios), 1) if ratios else None,
+        }
+
+    constraint_out = {constraint: {"n_binding": n} for constraint, n in constraint_counts.items()}
+
+    return {
+        "risk_decision_by_context": context_out,
+        "risk_decision_by_binding_constraint": constraint_out,
+    }
+
+
 def _propose_score_threshold_change(conn, score_stats):
     """If low score buckets clearly underperform high buckets with enough N,
     propose raising score_proposal_min to the boundary of the better bucket.
@@ -327,12 +408,20 @@ def run_postmortem_review(conn):
     adherence_segments = _rule_adherence_segments(adherence_rows)
     adherence_note = f" | Rule adherence: {len(adherence_rows)} manual trade/approval check(s) in window."
 
+    # Fourth independent data source (Risk Engine PR 2) -- risk_decisions
+    # is written by shared/risk_engine.py at proposal-generation AND
+    # approval time (two rows per approved buy), so len(risk_rows) counts
+    # decisions, not trades.
+    risk_rows = _fetch_risk_decisions(conn)
+    risk_segments = _risk_decision_segments(risk_rows)
+    risk_note = f" | Risk engine: {len(risk_rows)} sizing decision(s) in window."
+
     if n < MIN_BUCKET_N:
         finding = (
             f"Insufficient data: {n} resolved buy signals in the last {WINDOW_DAYS}d "
             f"(need {MIN_BUCKET_N}+ per bucket). Skipping calibration check."
-        ) + lifecycle_note + adherence_note
-        _insert_review(conn, n, {**lifecycle_segments, **adherence_segments}, finding, None)
+        ) + lifecycle_note + adherence_note + risk_note
+        _insert_review(conn, n, {**lifecycle_segments, **adherence_segments, **risk_segments}, finding, None)
         return {"n_resolved": n, "finding": finding, "proposal": None}
 
     score_rows = [(_score_bucket(float(s)), float(r)) for s, _, _, r, _ in rows if s is not None]
@@ -351,6 +440,7 @@ def run_postmortem_review(conn):
         "approval_status": approval_stats,
         **lifecycle_segments,
         **adherence_segments,
+        **risk_segments,
     }
 
     proposal = _propose_score_threshold_change(conn, score_stats)
@@ -359,11 +449,11 @@ def run_postmortem_review(conn):
         finding = (
             f"Score calibration gap found: {proposal['reason']}. "
             f"Suggest raising score_proposal_min from {proposal['current_value']} to {proposal['proposed_value']}."
-        ) + lifecycle_note + adherence_note
+        ) + lifecycle_note + adherence_note + risk_note
     else:
         finding = (
             f"No calibration change proposed this cycle (N={n} resolved). Bucket stats logged for trend-watching."
-            + lifecycle_note + adherence_note
+            + lifecycle_note + adherence_note + risk_note
         )
 
     _insert_review(conn, n, metric_summary, finding, proposal)
