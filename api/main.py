@@ -887,6 +887,51 @@ def _record_risk_decision(cur, context, proposal_id, symbol, side, requested_qty
         json.dumps(decision["constraint_detail"]), market_overall,
     ))
 
+def cancel_resting_stop_orders(symbol):
+    """Best-effort: cancels any resting protective stop-leg order for this
+    symbol before submitting an UNRELATED sell (thesis_complete/time_stop/
+    overbought/regime_deterioration exits, or a manual sell) -- see
+    Execution: protective stop orders. Alpaca's own docs don't specify
+    whether closing a position through an unrelated order auto-cancels a
+    resting OTO stop-loss child leg, so this defensively cancels first
+    rather than risk a stale stop later trying to fire against an
+    already-closed position. Must run BEFORE any qty_available check for
+    the same symbol -- a resting stop order holds shares "unavailable"
+    at Alpaca, so checking availability first would incorrectly block a
+    legitimate exit that this cancellation would otherwise clear the way
+    for. Failures here are logged, never raised -- a cancel failing must
+    not block the sell it exists to protect against; an unmatched cancel
+    attempt against an order that already filled/expired/was never there
+    is expected and harmless, not an error worth surfacing to the caller."""
+    try:
+        open_orders = alpaca("GET", f"/v2/orders?status=open&symbols={symbol}")
+    except Exception as e:
+        log.warning(f"Could not check resting stop orders for {symbol}: {e}")
+        return
+    for order in open_orders or []:
+        if order.get("type") in ("stop", "stop_limit"):
+            try:
+                alpaca("DELETE", f"/v2/orders/{order['id']}")
+                log.info(f"Canceled resting stop order {order['id']} for {symbol} before unrelated sell")
+            except Exception as e:
+                log.warning(f"Could not cancel resting stop order {order['id']} for {symbol}: {e}")
+
+
+def _stop_price_for_order(ref_price, planned_stop, stop_loss_pct):
+    """The price attached to a buy order's OTO stop_loss leg. Prefers the
+    proposal's own planned_initial_stop_price (the SAME value
+    shared/risk_engine.py's risk-budget sizing already used as
+    risk-per-share, and the same value trades.initial_stop_price /
+    position_lifecycles already assume was the real stop -- using
+    anything else here would make the persisted risk basis a fiction).
+    Falls back to the live stop_loss_pct ratio against the reference
+    price for a manual trade with no linked proposal at all, same
+    formula compute_signals() itself uses for planned_initial_stop_price."""
+    if planned_stop is not None:
+        return round(planned_stop, 2)
+    return round(ref_price * (1 - stop_loss_pct), 2)
+
+
 @app.post("/api/trade")
 def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     if req.side not in ("buy", "sell"):
@@ -896,6 +941,7 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
 
     order_qty = req.qty
     risk_decision = None
+    stop_price_for_order = None
 
     # Risk engine: BUY only, clamps BEFORE the order reaches Alpaca -- see
     # docs/risk-engine-architecture-reconciliation.md section C.1. Opens its
@@ -916,15 +962,33 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
             order_qty, risk_decision = _clamp_to_risk_engine(
                 risk_conn, risk_cur, "manual_trade", req.proposal_id,
                 req.symbol.upper(), req.qty, ref_price, initial_stop_price)
+            stop_loss_pct = load_params(risk_conn)["stop_loss_pct"]
+            stop_price_for_order = _stop_price_for_order(ref_price, initial_stop_price, stop_loss_pct)
+    else:
+        # Execution: protective stop orders -- an unrelated sell must clear
+        # any resting OTO stop-loss child leg BEFORE Alpaca is asked
+        # anything else about this symbol (a resting stop holds shares
+        # "unavailable", which would otherwise look identical to genuinely
+        # having no position).
+        cancel_resting_stop_orders(req.symbol.upper())
 
-    # Submit to Alpaca
-    order = alpaca("POST", "/v2/orders", json={
+    # Submit to Alpaca. BUY orders attach a resting OTO stop-loss child leg
+    # (Execution: protective stop orders) so the broker enforces the stop
+    # in real time rather than relying solely on check_stop_losses()'s
+    # hourly poll-and-propose cycle -- that mechanism stays as a backup
+    # (e.g. for positions opened before this shipped, or if this
+    # submission's stop leg somehow failed to attach).
+    order_payload = {
         "symbol": req.symbol.upper(),
         "qty": str(order_qty),
         "side": req.side,
         "type": "market",
         "time_in_force": "gtc",
-    })
+    }
+    if req.side == "buy" and stop_price_for_order is not None:
+        order_payload["order_class"] = "oto"
+        order_payload["stop_loss"] = {"stop_price": str(stop_price_for_order)}
+    order = alpaca("POST", "/v2/orders", json=order_payload)
 
     filled_price = float(order.get("filled_avg_price") or order.get("limit_price") or 0)
     filled_qty = float(order.get("filled_qty") or 0) or order_qty
@@ -965,16 +1029,18 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
             adherence_results = None
             log.warning(f"Rule-adherence check failed for {req.symbol.upper()} {req.side}: {e}")
 
-        # Platform Improvements PR A: copy the linked proposal's planned
-        # stop price onto the trade, immutably, at fill time -- this is
-        # what makes a lifecycle's risk basis fixed at entry even if
-        # stop_loss_pct or the proposal's own fields change later. NULL
-        # for manual trades with no proposal_id at all.
-        initial_stop_price = None
-        if req.proposal_id:
-            cur.execute("SELECT planned_initial_stop_price FROM trade_proposals WHERE id=%s", (req.proposal_id,))
-            row = cur.fetchone()
-            initial_stop_price = row["planned_initial_stop_price"] if row else None
+        # Platform Improvements PR A: copy the stop price onto the trade,
+        # immutably, at fill time -- this is what makes a lifecycle's risk
+        # basis fixed at entry even if stop_loss_pct or the proposal's own
+        # fields change later. As of Execution: protective stop orders,
+        # this is exactly stop_price_for_order -- the SAME value that was
+        # (for a buy) attached as the order's own OTO stop_loss leg above,
+        # so the persisted risk basis always matches what's actually
+        # protecting the position at the broker, including the
+        # stop_loss_pct-ratio fallback for a manual buy with no linked
+        # proposal (previously NULL/no risk tracking at all for that case).
+        # Still None for sells, same as before.
+        initial_stop_price = stop_price_for_order
         cur.execute("""
             INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, notes, source, status, proposal_id, cost, thesis_id, initial_stop_price)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -1051,6 +1117,7 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
             # filled). Portfolio state may have moved since compute_signals()
             # sized this proposal (sometimes by days), so this is a genuine
             # re-evaluation, not just replaying the proposal-time decision.
+            stop_price_for_order = None
             if p["side"] == "buy":
                 ref_price = p["planned_entry_price"]
                 if not ref_price:
@@ -1060,16 +1127,25 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
                 if not ref_price:
                     raise HTTPException(400, f"No price available for {p['symbol']} -- cannot size this trade")
                 stop_price = p["planned_initial_stop_price"]
+                stop_price = float(stop_price) if stop_price is not None else None
                 trade_qty, risk_decision = _clamp_to_risk_engine(
                     conn, cur, "proposal_approval", proposal_id, p["symbol"],
-                    trade_qty, float(ref_price), float(stop_price) if stop_price is not None else None)
+                    trade_qty, float(ref_price), stop_price)
+                stop_loss_pct = load_params(conn)["stop_loss_pct"]
+                stop_price_for_order = _stop_price_for_order(float(ref_price), stop_price, stop_loss_pct)
 
-            # For sell orders: verify we hold enough *available* (i.e. not already
-            # committed to another open order) long shares to cover the sale.
-            # Selling more than available would either open/deepen a short
-            # position or get rejected by Alpaca with an opaque 403 — check
-            # up front so the rejection reason is clear either way.
+            # For sell orders: cancel any resting protective stop first
+            # (Execution: protective stop orders -- must run before the
+            # qty_available check just below, since a resting stop order
+            # holds shares "unavailable" at Alpaca and would otherwise make
+            # a legitimate exit look like it has no shares to sell), then
+            # verify we hold enough *available* (i.e. not already committed
+            # to another open order) long shares to cover the sale. Selling
+            # more than available would either open/deepen a short position
+            # or get rejected by Alpaca with an opaque 403 — check up front
+            # so the rejection reason is clear either way.
             if p["side"] == "sell":
+                cancel_resting_stop_orders(p["symbol"])
                 try:
                     pos = alpaca("GET", f"/v2/positions/{p['symbol']}")
                     available_qty = float(pos.get("qty_available", pos.get("qty", 0)))
@@ -1083,10 +1159,17 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
                 if trade_qty > available_qty:
                     raise HTTPException(400, f"Sell qty {trade_qty} exceeds available shares {available_qty} for {p['symbol']} (some may be tied up in another pending order). Reduce qty to {available_qty} or less.")
 
-            order = alpaca("POST", "/v2/orders", json={
+            # BUY orders attach a resting OTO stop-loss child leg -- see
+            # execute_trade()'s own comment for why check_stop_losses()
+            # stays as a backup rather than being replaced.
+            order_payload = {
                 "symbol": p["symbol"], "qty": str(trade_qty),
                 "side": p["side"], "type": "market", "time_in_force": "gtc",
-            })
+            }
+            if p["side"] == "buy" and stop_price_for_order is not None:
+                order_payload["order_class"] = "oto"
+                order_payload["stop_loss"] = {"stop_price": str(stop_price_for_order)}
+            order = alpaca("POST", "/v2/orders", json=order_payload)
             filled_price = float(order.get("filled_avg_price") or 0)
             filled_qty = float(order.get("filled_qty") or 0) or float(trade_qty)
             booked_for_next_open = order["status"] not in ("filled", "partially_filled")
@@ -1123,7 +1206,7 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
             """, (p["symbol"], p["side"], filled_qty, filled_price,
                   filled_qty * filled_price, order["id"],
                   datetime.now(timezone.utc), "model_approved", order["status"], proposal_id, cost, p["thesis_id"],
-                  p["planned_initial_stop_price"]))
+                  stop_price_for_order))
             new_trade_id = cur.fetchone()["id"]
             # update proposal qty if it was null
             cur.execute("UPDATE trade_proposals SET qty=%s WHERE id=%s AND qty IS NULL", (trade_qty, proposal_id))

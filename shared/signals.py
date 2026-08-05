@@ -555,7 +555,16 @@ def _open_sell_exists(conn, sym):
 
 
 def check_stop_losses(conn, positions, p, thesis_id):
-    """Create sell proposals for positions that have breached the stop-loss threshold."""
+    """Create sell proposals for positions that have breached the stop-loss
+    threshold. As of "Execution: protective stop orders," buy orders
+    attach a real broker-side OTO stop-loss child leg (api/main.py), which
+    fires in real time and gets reconciled back into the trades ledger by
+    ingest.py's reconcile_broker_stop_fills() -- so in the normal case the
+    broker will have already closed a breached position well before this
+    function's hourly poll even runs. This stays as a backup safety net
+    (positions opened before this shipped with no attached leg, or a case
+    where the leg failed to attach) rather than being removed -- it will
+    usually just find nothing to do."""
     if not positions:
         return
     stop_pct = p["stop_loss_pct"]

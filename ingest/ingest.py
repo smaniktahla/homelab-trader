@@ -8,7 +8,7 @@ from datetime import datetime, timezone, date, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from signals import compute_signals, load_sector_map
+from signals import compute_signals, load_sector_map, mean_reversion_thesis_id
 from scanner import seed_universe, scan_universe, promote_demote
 from market_regime import compute_market_regime, save_market_context
 from market_regime_history import record_today as record_regime_history_today
@@ -376,6 +376,69 @@ def reconcile_orders(conn):
                 log.info(f"Order {order_id}: {status}, qty={filled_qty}, price={filled_price}")
             except Exception as e:
                 log.warning(f"Reconcile failed for order {order_id}: {e}")
+    conn.commit()
+
+
+def reconcile_broker_stop_fills(conn):
+    """Execution: protective stop orders. Buy orders now attach a resting
+    OTO stop-loss child leg (see api/main.py's execute_trade/
+    decide_proposal) -- when Alpaca fires that leg autonomously, it was
+    never submitted through this app's own POST /api/trade or PATCH
+    /api/proposals/{id} code paths, so no trades row exists for it unless
+    this function creates one. Without this, position_lifecycles (built
+    from the trades ledger) would silently diverge from the real Alpaca
+    account the same way the 2026-07-21 thesis_id incident did, just via a
+    different root cause.
+
+    Runs every cycle over a generous 2-hour lookback window (cheap,
+    idempotent via the order_id pre-check below) rather than tracking a
+    resume-point -- same simplicity-over-precision tradeoff
+    reconcile_orders() above already accepts for its own polling."""
+    try:
+        after = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        r = requests.get(f"{ALPACA_BASE}/v2/orders", headers=ALPACA_HEADERS, timeout=10,
+                          params={"status": "closed", "after": after, "direction": "desc", "limit": 200})
+        r.raise_for_status()
+        orders = r.json()
+    except Exception as e:
+        log.warning(f"Broker stop-fill reconciliation: could not fetch orders: {e}")
+        return
+
+    stop_fills = [
+        o for o in orders
+        if o.get("status") == "filled" and o.get("type") in ("stop", "stop_limit")
+        and o.get("side") == "sell" and float(o.get("filled_qty") or 0) > 0
+    ]
+    if not stop_fills:
+        return
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT order_id FROM trades WHERE order_id = ANY(%s)", ([o["id"] for o in stop_fills],))
+        known_ids = {row[0] for row in cur.fetchall()}
+    new_fills = [o for o in stop_fills if o["id"] not in known_ids]
+    if not new_fills:
+        return
+
+    thesis_id = mean_reversion_thesis_id(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM signal_params WHERE key='trade_cost_flat'")
+        row = cur.fetchone()
+        cost = float(row[0]) if row else 0.0
+
+        for o in new_fills:
+            filled_qty = float(o["filled_qty"])
+            filled_price = float(o["filled_avg_price"])
+            traded_at = o.get("filled_at") or o.get("updated_at") or datetime.now(timezone.utc).isoformat()
+            cur.execute("""
+                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at,
+                                     notes, source, status, cost, thesis_id)
+                VALUES (%s,'sell',%s,%s,%s,%s,%s,%s,'broker_stop','filled',%s,%s)
+            """, (
+                o["symbol"], filled_qty, filled_price, filled_qty * filled_price, o["id"], traded_at,
+                "Broker-initiated protective stop-loss fill, auto-reconciled (no proposal/approval)",
+                cost, thesis_id,
+            ))
+            log.warning(f"Broker stop fill reconciled: SELL {filled_qty} {o['symbol']} @ {filled_price} (order {o['id']})")
     conn.commit()
 
 
@@ -1064,6 +1127,7 @@ def run_once(conn, last_universe_scan):
     refresh_fundamentals_if_due(conn, symbols)
     compute_signals(conn, symbols)
     reconcile_orders(conn)
+    reconcile_broker_stop_fills(conn)
     update_signal_outcomes(conn)
 
     # Platform Improvements PR A: derived from the trades ledger every
@@ -1121,6 +1185,7 @@ if __name__ == "__main__":
     try:
         seed_universe(conn)
         reconcile_orders(conn)
+        reconcile_broker_stop_fills(conn)
     except Exception as e:
         log.warning(f"Startup tasks failed: {e}")
     finally:
