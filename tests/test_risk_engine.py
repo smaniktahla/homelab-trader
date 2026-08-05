@@ -13,6 +13,7 @@ other DB-touching function in this codebase's test suite.
 import sys
 import pathlib
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -177,6 +178,25 @@ def test_never_approves_more_than_requested():
     d = re_mod.evaluate_proposal(**_base_kwargs(requested_qty=3, cash=10_000_000.0, portfolio_value=10_000_000.0))
     assert d["approved_quantity"] == 3
     assert d["outcome"] == "approved"
+
+
+def test_decimal_inputs_do_not_crash():
+    """Regression test: api/main.py passes trade_proposals.planned_initial_stop_price
+    straight from a DB row -- psycopg2 returns NUMERIC columns as
+    decimal.Decimal, not float. Mixing that with a float price used to
+    raise "unsupported operand type(s) for -: 'float' and
+    'decimal.Decimal'" inside the risk_per_share calculation. Caught live
+    in production; every numeric input gets the Decimal treatment here to
+    make sure the boundary coercion in evaluate_proposal() covers all of
+    them, not just the one that happened to crash first."""
+    d = re_mod.evaluate_proposal(
+        symbol="AAPL", price=Decimal("100.0"), requested_qty=10,
+        planned_initial_stop_price=Decimal("92.0"),
+        cash=Decimal("100000.0"), portfolio_value=Decimal("100000.0"),
+        positions={}, sector_map={}, open_risk_dollars=Decimal("0.0"), p=P,
+    )
+    assert d["outcome"] == "approved"
+    assert d["approved_quantity"] == 10
 
 
 # ─────────────────────────────────────────────────────────────────────────

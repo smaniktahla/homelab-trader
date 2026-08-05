@@ -200,6 +200,61 @@ def test_proposal_approval_clamps_qty_sent_to_alpaca(api_client, conn):
     assert float(trade["qty"]) == 200.0
 
 
+def test_proposal_approval_with_planned_stop_price_does_not_crash(api_client, conn):
+    """Regression test: a real compute_signals()-generated buy proposal
+    always has planned_initial_stop_price set (unlike every other test in
+    this file, which only sets planned_entry_price) -- psycopg2 returns
+    that NUMERIC column as decimal.Decimal, and the risk engine's
+    price - planned_initial_stop_price crashed with "unsupported operand
+    type(s) for -: 'float' and 'decimal.Decimal'" when planned_stop_price
+    wasn't converted to float before being passed through. Caught live in
+    production (screenshot from the dashboard) -- no existing test had a
+    non-null planned_initial_stop_price on the approval path at all."""
+    thesis_id = _mean_reversion_thesis_id(conn)
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO trade_proposals (symbol, side, qty, thesis_id, planned_entry_price, planned_initial_stop_price)
+            VALUES ('DVA', 'buy', 25, %s, 185.43, 163.28) RETURNING id
+        """, (thesis_id,))
+        proposal_id = cur.fetchone()[0]
+    conn.commit()
+
+    with requests_mock.Mocker() as m:
+        _mock_common_alpaca(m, cash=50000.0, portfolio_value=100000.0)
+        m.post("https://fake-alpaca.test/v2/orders", json={
+            "id": "order-dva", "status": "filled", "filled_avg_price": "185.43", "filled_qty": "25",
+        })
+        r = api_client.patch(f"/api/proposals/{proposal_id}", json={"decision": "approved"}, auth=AUTH)
+
+    assert r.status_code == 200
+    assert r.json()["risk_decision"]["outcome"] in ("approved", "reduced")
+
+
+def test_manual_buy_with_planned_stop_price_does_not_crash(api_client, conn):
+    """Same regression as above, via POST /api/trade's proposal_id path."""
+    thesis_id = _mean_reversion_thesis_id(conn)
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO trade_proposals (symbol, side, qty, thesis_id, planned_entry_price, planned_initial_stop_price)
+            VALUES ('DVA', 'buy', 25, %s, 185.43, 163.28) RETURNING id
+        """, (thesis_id,))
+        proposal_id = cur.fetchone()[0]
+    conn.commit()
+    _seed_price(conn, "DVA", 185.43)
+
+    with requests_mock.Mocker() as m:
+        _mock_common_alpaca(m, cash=50000.0, portfolio_value=100000.0)
+        m.post("https://fake-alpaca.test/v2/orders", json={
+            "id": "order-dva2", "status": "filled", "filled_avg_price": "185.43", "filled_qty": "25",
+        })
+        r = api_client.post("/api/trade", json={
+            "symbol": "DVA", "side": "buy", "qty": 25, "proposal_id": proposal_id,
+        }, auth=AUTH)
+
+    assert r.status_code == 200
+    assert r.json()["risk_decision"]["outcome"] in ("approved", "reduced")
+
+
 def test_proposal_approval_human_override_qty_is_still_clamped(api_client, conn):
     """A human explicitly overriding qty at approval time (body.qty) is the
     exact bypass path section C.1 of the reconciliation doc identifies --

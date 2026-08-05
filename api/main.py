@@ -907,7 +907,7 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
             if req.proposal_id:
                 risk_cur.execute("SELECT planned_initial_stop_price FROM trade_proposals WHERE id=%s", (req.proposal_id,))
                 row = risk_cur.fetchone()
-                initial_stop_price = row["planned_initial_stop_price"] if row else None
+                initial_stop_price = float(row["planned_initial_stop_price"]) if row and row["planned_initial_stop_price"] is not None else None
             risk_cur.execute("SELECT close FROM price_history WHERE symbol=%s ORDER BY ts DESC LIMIT 1", (req.symbol.upper(),))
             row = risk_cur.fetchone()
             ref_price = float(row["close"]) if row else None
@@ -1059,9 +1059,10 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
                     ref_price = row["close"] if row else None
                 if not ref_price:
                     raise HTTPException(400, f"No price available for {p['symbol']} -- cannot size this trade")
+                stop_price = p["planned_initial_stop_price"]
                 trade_qty, risk_decision = _clamp_to_risk_engine(
                     conn, cur, "proposal_approval", proposal_id, p["symbol"],
-                    trade_qty, float(ref_price), p["planned_initial_stop_price"])
+                    trade_qty, float(ref_price), float(stop_price) if stop_price is not None else None)
 
             # For sell orders: verify we hold enough *available* (i.e. not already
             # committed to another open order) long shares to cover the sale.

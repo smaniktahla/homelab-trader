@@ -106,6 +106,21 @@ def evaluate_proposal(symbol, price, requested_qty, planned_initial_stop_price,
     """
     detail = {}
 
+    # Callers sometimes pass DB-sourced values straight through (e.g.
+    # trade_proposals.planned_initial_stop_price is a Decimal from
+    # psycopg2) rather than pre-converting to float -- api/main.py hit
+    # this directly (mixing a float price with a Decimal stop crashes
+    # "price - planned_initial_stop_price" below). Coerced once, here, at
+    # the arithmetic boundary, rather than trusting every current and
+    # future caller to remember to convert first.
+    price = float(price) if price is not None else None
+    cash = float(cash) if cash is not None else None
+    portfolio_value = float(portfolio_value) if portfolio_value is not None else None
+    planned_initial_stop_price = (
+        float(planned_initial_stop_price) if planned_initial_stop_price is not None else None
+    )
+    open_risk_dollars = float(open_risk_dollars) if open_risk_dollars is not None else 0.0
+
     if not cash or not portfolio_value or cash <= 0 or portfolio_value <= 0 or not price or price <= 0:
         return _reject(detail, "no_portfolio_data")
 
