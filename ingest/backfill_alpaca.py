@@ -47,13 +47,26 @@ def get_universe_symbols(conn):
         return [r[0] for r in cur.fetchall()]
 
 
+def _to_alpaca_symbol(symbol):
+    """DB/Yahoo-style share-class tickers use a hyphen (BRK-B, BF-B); Alpaca
+    rejects that form outright (400 invalid symbol) and expects a dot
+    (BRK.B, BF.B). Translate only for the outbound request -- storage keeps
+    the hyphen form so it matches the Yahoo-sourced rows already in
+    price_history."""
+    return symbol.replace("-", ".")
+
+
 def fetch_bars_batch(symbols):
     """Daily bars for a batch of symbols, following pagination if the batch
     exceeds the row cap. split-adjusted (not dividend-adjusted) so historical
     prices don't show an artificial cliff at stock splits when charted
-    alongside the Yahoo-sourced recent window, which is split-adjusted too."""
+    alongside the Yahoo-sourced recent window, which is split-adjusted too.
+
+    Returns bars keyed by the original (DB-form) symbol, not the translated
+    Alpaca-form one."""
+    alpaca_to_db = {_to_alpaca_symbol(s): s for s in symbols}
     params = {
-        "symbols": ",".join(symbols),
+        "symbols": ",".join(alpaca_to_db.keys()),
         "timeframe": "1Day",
         "start": START,
         "limit": 10000,
@@ -70,7 +83,8 @@ def fetch_bars_batch(symbols):
         r.raise_for_status()
         data = r.json()
         for sym, bars in (data.get("bars") or {}).items():
-            all_bars.setdefault(sym, []).extend(bars)
+            db_sym = alpaca_to_db.get(sym, sym)
+            all_bars.setdefault(db_sym, []).extend(bars)
         page_token = data.get("next_page_token")
         if not page_token:
             break
@@ -125,9 +139,21 @@ def main():
         try:
             bars_by_symbol = fetch_bars_batch(batch)
         except Exception as e:
-            log.warning(f"Batch {batch} failed: {e}")
-            time.sleep(SLEEP_BETWEEN_BATCHES)
-            continue
+            # Alpaca rejects the ENTIRE batch request if any one symbol in
+            # it is invalid/unrecognized -- a single bad ticker otherwise
+            # silently drops the other 7 good symbols in the same batch too
+            # (this is exactly how BDX/BEN/BG/BIIB/BKNG/BKR/BLDR lost their
+            # pre-2025 history alongside BF-B, and BLK/BMY/BNY/BR/BRO/BSX/BX
+            # alongside BRK-B). Fall back to one request per symbol so a
+            # poison symbol only costs itself.
+            log.warning(f"Batch {batch} failed: {e} -- retrying symbols individually")
+            bars_by_symbol = {}
+            for sym in batch:
+                try:
+                    bars_by_symbol.update(fetch_bars_batch([sym]))
+                except Exception as e2:
+                    log.warning(f"{sym}: individual fetch also failed: {e2}")
+                time.sleep(SLEEP_BETWEEN_BATCHES)
         for sym in batch:
             bars = bars_by_symbol.get(sym, [])
             if not bars:
