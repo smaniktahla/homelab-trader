@@ -62,6 +62,23 @@ def _mock_common_alpaca(m, cash=50000.0, portfolio_value=100000.0, positions=Non
     })
 
 
+def _seed_price(conn, symbol, close, ts=None):
+    """The risk engine (shared/risk_engine.py, wired into POST /api/trade
+    and PATCH /api/proposals/{id} as of this PR) needs a reference price to
+    size a BUY against -- it queries price_history directly rather than
+    trusting Alpaca's fill price (which arrives only after the order is
+    already submitted). Tests that buy a symbol with no proposal (so no
+    planned_entry_price) must seed this or the endpoint now 400s with
+    "No price history"."""
+    ts = ts or datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO price_history (symbol, ts, close) VALUES (%s, %s, %s)
+            ON CONFLICT (symbol, ts) DO NOTHING
+        """, (symbol, ts, close))
+    conn.commit()
+
+
 def _rule_adherence_row(conn, trade_id=None, proposal_id=None):
     """The `conn` fixture (tests/conftest.py) is a plain tuple-cursor
     connection -- explicit dict cursor here so the tests below can assert
@@ -75,6 +92,7 @@ def _rule_adherence_row(conn, trade_id=None, proposal_id=None):
 
 
 def test_manual_trade_clean_records_no_violation(api_client, conn):
+    _seed_price(conn, "AAPL", 150.0)
     with requests_mock.Mocker() as m:
         _mock_common_alpaca(m)
         m.post("https://fake-alpaca.test/v2/orders", json={
@@ -94,7 +112,16 @@ def test_manual_trade_clean_records_no_violation(api_client, conn):
 def test_manual_trade_flags_a_real_violation(api_client, conn):
     """A buy that blows the position-sizing cap (max_position_pct default
     20%) should land with any_violation=true and the specific rule
-    flagged -- without affecting the trade's own success response."""
+    flagged -- without affecting the trade's own success response.
+
+    The requested 900 shares gets clamped by the risk engine (to well
+    below 900, on the position_allocation constraint) before the order
+    ever reaches Alpaca -- but the Alpaca mock below returns a fixed
+    filled_qty of 900 regardless of what was actually requested, so the
+    rule_adherence advisory check (which reads filled_qty from the order
+    response, not the pre-clamp request) still sees 900 and still flags
+    the same violation this test asserts on."""
+    _seed_price(conn, "AAPL", 100.0)
     with requests_mock.Mocker() as m:
         _mock_common_alpaca(m, cash=50000.0, portfolio_value=100000.0)
         m.post("https://fake-alpaca.test/v2/orders", json={
@@ -146,6 +173,9 @@ def test_proposal_approval_records_proposal_approval_context(api_client, conn):
         """, (thesis_id,))
         proposal_id = cur.fetchone()[0]
     conn.commit()
+    # No planned_entry_price on this proposal -- the risk engine falls back
+    # to the latest price_history close as its sizing reference.
+    _seed_price(conn, "MSFT", 200.0)
 
     with requests_mock.Mocker() as m:
         _mock_common_alpaca(m)

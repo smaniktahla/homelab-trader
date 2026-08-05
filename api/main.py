@@ -7,10 +7,11 @@ from typing import Optional
 import psycopg2, psycopg2.extras, os, requests as http, secrets, time, bisect, json, logging
 from datetime import datetime, timezone
 
-from signals import compute_signals, compute_bollinger
+from signals import compute_signals, compute_bollinger, fetch_alpaca_portfolio, load_params, load_sector_map
 from signal_components import weighted_component_score
 import lifecycle_performance
 import rule_adherence
+import risk_engine
 
 log = logging.getLogger(__name__)
 
@@ -800,6 +801,71 @@ def _record_rule_adherence(cur, context, trade_id, proposal_id, symbol, side, re
         VALUES (%s, %s, %s, %s, %s, %s, %s)
     """, (context, trade_id, proposal_id, symbol, side, json.dumps(results), rule_adherence.any_violation(results)))
 
+
+def _clamp_to_risk_engine(conn, cur, context, proposal_id, symbol, requested_qty, price, planned_initial_stop_price):
+    """BUY-side only. The one place a human-supplied or proposal-default
+    qty gets clamped to what the risk engine actually approves -- see
+    docs/risk-engine-architecture-reconciliation.md section C.1 for why
+    this exists: prior to this, ProposalDecision.qty and TradeRequest.qty
+    could both bypass every sizing constraint entirely, with only an
+    advisory (never-blocking) rule_adherence check after the fact. This
+    function is the binding check.
+
+    Returns (approved_qty, decision_dict). Raises HTTPException(400) if
+    approved_qty is 0 (risk engine rejects the trade outright) --
+    deliberately NOT fail-open like rule_adherence, since this is the
+    authoritative sizing decision, not an advisory record. A risk-engine
+    evaluation failure (e.g. Alpaca unreachable) also raises 400 rather
+    than silently falling back to the unclamped requested_qty -- silently
+    skipping the one binding check this function exists to provide would
+    defeat its entire purpose."""
+    try:
+        cash, portfolio_value, positions = fetch_alpaca_portfolio()
+        p = load_params(conn)
+        sector_map = load_sector_map(conn, {symbol} | set(positions.keys()))
+        open_risk_dollars = risk_engine.load_open_risk_dollars(conn)
+        decision = risk_engine.evaluate_proposal(
+            symbol, price, requested_qty, planned_initial_stop_price,
+            cash, portfolio_value, positions, sector_map, open_risk_dollars, p,
+        )
+    except Exception as e:
+        raise HTTPException(400, f"Risk engine evaluation failed, refusing to size this trade: {e}")
+
+    _record_risk_decision(cur, context, proposal_id, symbol, "buy", requested_qty, decision)
+    # Committed here, immediately, regardless of outcome -- a rejection
+    # must still be recorded. Callers using this within a larger
+    # transaction that later rolls back on an unrelated error would lose
+    # this row too, but that's an acceptable tradeoff: the alternative is
+    # this function silently NOT persisting a rejection, which defeats the
+    # audit purpose of risk_decisions entirely.
+    conn.commit()
+
+    if decision["approved_quantity"] < 1:
+        raise HTTPException(
+            400,
+            f"Risk engine rejected this trade: {decision['binding_constraint']} "
+            f"(requested {requested_qty} shares)"
+        )
+    return decision["approved_quantity"], decision
+
+
+def _record_risk_decision(cur, context, proposal_id, symbol, side, requested_qty, decision):
+    cur.execute("SELECT overall FROM market_context LIMIT 1")
+    row = cur.fetchone()
+    market_overall = row["overall"] if row else None
+    cur.execute("""
+        INSERT INTO risk_decisions (
+            context, proposal_id, symbol, side, requested_qty, approved_quantity,
+            outcome, risk_budget_dollars, binding_constraint, constraint_detail,
+            market_regime_at_decision
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        context, proposal_id, symbol, side, requested_qty, decision["approved_quantity"],
+        decision["outcome"], decision["risk_budget_dollars"], decision["binding_constraint"],
+        json.dumps(decision["constraint_detail"]), market_overall,
+    ))
+
 @app.post("/api/trade")
 def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     if req.side not in ("buy", "sell"):
@@ -807,17 +873,40 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     if req.qty <= 0:
         raise HTTPException(400, "qty must be positive")
 
+    order_qty = req.qty
+    risk_decision = None
+
+    # Risk engine: BUY only, clamps BEFORE the order reaches Alpaca -- see
+    # docs/risk-engine-architecture-reconciliation.md section C.1. Opens its
+    # own short-lived connection since the risk decision must be evaluated
+    # (and, on rejection, raise) before the main DB block below even starts.
+    if req.side == "buy":
+        with db() as risk_conn, risk_conn.cursor() as risk_cur:
+            initial_stop_price = None
+            if req.proposal_id:
+                risk_cur.execute("SELECT planned_initial_stop_price FROM trade_proposals WHERE id=%s", (req.proposal_id,))
+                row = risk_cur.fetchone()
+                initial_stop_price = row["planned_initial_stop_price"] if row else None
+            risk_cur.execute("SELECT close FROM price_history WHERE symbol=%s ORDER BY ts DESC LIMIT 1", (req.symbol.upper(),))
+            row = risk_cur.fetchone()
+            ref_price = float(row["close"]) if row else None
+            if ref_price is None:
+                raise HTTPException(400, f"No price history for {req.symbol.upper()} -- cannot size this trade")
+            order_qty, risk_decision = _clamp_to_risk_engine(
+                risk_conn, risk_cur, "manual_trade", req.proposal_id,
+                req.symbol.upper(), req.qty, ref_price, initial_stop_price)
+
     # Submit to Alpaca
     order = alpaca("POST", "/v2/orders", json={
         "symbol": req.symbol.upper(),
-        "qty": str(req.qty),
+        "qty": str(order_qty),
         "side": req.side,
         "type": "market",
         "time_in_force": "gtc",
     })
 
     filled_price = float(order.get("filled_avg_price") or order.get("limit_price") or 0)
-    filled_qty = float(order.get("filled_qty") or 0) or req.qty
+    filled_qty = float(order.get("filled_qty") or 0) or order_qty
 
     # Market orders placed outside trading hours come back "accepted"/"pending_new",
     # not "filled" — Alpaca queues them for the next open rather than rejecting them.
@@ -845,7 +934,9 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
         # committed first. (The Alpaca order itself already happened by
         # this point, so position-count/sector-cap gates unavoidably see
         # it -- that race is inherent to how fast a market order fills and
-        # isn't fixable the same way.)
+        # isn't fixable the same way. Quantity itself is no longer part of
+        # what this advisory check needs to catch -- the risk engine above
+        # already clamped it bindingly before the order was ever placed.)
         try:
             adherence_results = rule_adherence.check_gates(
                 conn, req.symbol.upper(), req.side, filled_qty, filled_price)
@@ -896,10 +987,16 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     # Market orders fill within seconds — reconcile fill price in the background
     background_tasks.add_task(_reconcile_fill, trade_id, order["id"], filled_qty)
 
-    return {
+    result = {
         "trade_id": trade_id, "order_id": order["id"], "status": order["status"],
         "booked_for_next_open": booked_for_next_open, "next_open": next_open,
     }
+    if risk_decision is not None:
+        result["risk_decision"] = {
+            "requested_qty": req.qty, "approved_quantity": risk_decision["approved_quantity"],
+            "outcome": risk_decision["outcome"], "binding_constraint": risk_decision["binding_constraint"],
+        }
+    return result
 
 class ProposalDecision(BaseModel):
     decision: str          # approved | rejected
@@ -918,11 +1015,32 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
 
         new_trade_id = None
         adherence_results = None
+        risk_decision = None
         if body.decision == "approved":
             # Execute the trade
             trade_qty = body.qty or p["qty"]
             if not trade_qty:
                 raise HTTPException(400, "qty required for approval (proposal has no default qty)")
+
+            # Risk engine: BUY only, clamps BEFORE the order reaches Alpaca --
+            # see docs/risk-engine-architecture-reconciliation.md section C.1.
+            # This is what makes trade_qty binding rather than whatever
+            # body.qty a human supplied (previously unclamped -- only an
+            # advisory rule_adherence check ran, after the order already
+            # filled). Portfolio state may have moved since compute_signals()
+            # sized this proposal (sometimes by days), so this is a genuine
+            # re-evaluation, not just replaying the proposal-time decision.
+            if p["side"] == "buy":
+                ref_price = p["planned_entry_price"]
+                if not ref_price:
+                    cur.execute("SELECT close FROM price_history WHERE symbol=%s ORDER BY ts DESC LIMIT 1", (p["symbol"],))
+                    row = cur.fetchone()
+                    ref_price = row["close"] if row else None
+                if not ref_price:
+                    raise HTTPException(400, f"No price available for {p['symbol']} -- cannot size this trade")
+                trade_qty, risk_decision = _clamp_to_risk_engine(
+                    conn, cur, "proposal_approval", proposal_id, p["symbol"],
+                    trade_qty, float(ref_price), p["planned_initial_stop_price"])
 
             # For sell orders: verify we hold enough *available* (i.e. not already
             # committed to another open order) long shares to cover the sale.
@@ -948,7 +1066,7 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
                 "side": p["side"], "type": "market", "time_in_force": "gtc",
             })
             filled_price = float(order.get("filled_avg_price") or 0)
-            filled_qty = float(order.get("filled_qty") or 0) or float(p["qty"])
+            filled_qty = float(order.get("filled_qty") or 0) or float(trade_qty)
             booked_for_next_open = order["status"] not in ("filled", "partially_filled")
             next_open = None
             if booked_for_next_open:
@@ -1013,6 +1131,11 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
     if body.decision == "approved":
         result["booked_for_next_open"] = booked_for_next_open
         result["next_open"] = next_open
+        if risk_decision is not None:
+            result["risk_decision"] = {
+                "requested_qty": body.qty or p["qty"], "approved_quantity": risk_decision["approved_quantity"],
+                "outcome": risk_decision["outcome"], "binding_constraint": risk_decision["binding_constraint"],
+            }
     return result
 
 
