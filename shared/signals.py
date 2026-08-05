@@ -10,6 +10,7 @@ import math
 import os
 
 import psycopg2.extensions
+from psycopg2.extras import Json
 import requests
 
 from earnings import earnings_blackout_reason
@@ -17,6 +18,8 @@ from circuit_breaker import record_snapshot_and_check
 from risk_engine import evaluate_proposal, load_open_risk_dollars
 from feature_store import record_symbol_feature_snapshot, attach_feature_snapshot, attach_fundamental_score
 from fundamentals import compute_fundamental_score
+from hierarchy_regime import snapshot_hierarchy_for_symbol
+from regime_scoring import load_regime_scoring_params, compute_regime_adjustment
 
 log = logging.getLogger(__name__)
 
@@ -733,6 +736,7 @@ def compute_signals(conn, symbols):
     # Sector map for the sector-concentration cap, covers watchlist + any
     # held position not currently in the watchlist slice being scanned
     sector_map = load_sector_map(conn, set(symbols) | set(positions.keys()))
+    regime_params = load_regime_scoring_params(conn)
 
     # Portfolio's total planned dollar risk right now, before any of this
     # cycle's proposals -- fed into the risk engine's portfolio-open-risk
@@ -763,6 +767,18 @@ def compute_signals(conn, symbols):
             rs_pct = relative_strength_vs_spy(conn, sym)
             ohlc = _load_recent_ohlc_from_db(conn, sym, ATR_PERIOD + 10)
             atr = compute_atr(ohlc)
+
+            # Hierarchical regime snapshot + score adjustment -- also
+            # side-independent (regime doesn't care whether we're scoring a
+            # buy or sell), read from whatever update_hierarchy_regime
+            # already computed/stored this cycle rather than recomputed live.
+            regime_snapshot = snapshot_hierarchy_for_symbol(conn, sym, sector_map.get(sym), market_overall)
+            regime_adj = compute_regime_adjustment(
+                market_overall,
+                regime_snapshot["sector_regime"]["classification"],
+                regime_snapshot["stock_regime"]["vs_sector_classification"],
+                regime_params,
+            )
 
             for side in ("buy", "sell"):
                 score, rationale = score_signal(rsi, price, bb_upper, bb_lower, band_std, bb_middle,
@@ -809,7 +825,12 @@ def compute_signals(conn, symbols):
                 if fundamental_score is not None:
                     attach_fundamental_score(conn, snap_id, outcome_id, fundamental_score)
 
-                if score < effective_proposal_min:
+                # final_score == score whenever regime_scoring_enabled is off
+                # (the default) -- compute_regime_adjustment returns all-zero
+                # adjustments in that case, so this is a no-op gate change.
+                final_score = max(0, min(100, score + regime_adj["total_regime_adjustment"]))
+
+                if final_score < effective_proposal_min:
                     if score_mod > 0:
                         log.info(f"Signal {sym} {side}: score {score} below regime-adjusted threshold {effective_proposal_min:.0f} (market={market_overall}), skipped")
                     _block_outcome(conn, outcome_id, "below_proposal_threshold")
@@ -898,13 +919,20 @@ def compute_signals(conn, symbols):
                         INSERT INTO trade_proposals (
                             symbol, side, qty, rationale, signal_score, exit_reason, thesis_id,
                             planned_entry_price, planned_initial_stop_price,
-                            planned_risk_per_share, planned_risk_dollars
+                            planned_risk_per_share, planned_risk_dollars,
+                            regime_snapshot, hierarchy_alignment, base_strategy_score,
+                            market_regime_adjustment, sector_regime_adjustment,
+                            relative_strength_adjustment, total_regime_adjustment, final_proposal_score
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                     """, (sym, side, qty, rationale, score, exit_reason, thesis_id,
                           planned_entry_price, planned_initial_stop_price,
-                          planned_risk_per_share, planned_risk_dollars))
+                          planned_risk_per_share, planned_risk_dollars,
+                          Json(regime_snapshot), regime_snapshot["hierarchy_alignment"], score,
+                          regime_adj["market_regime_adjustment"], regime_adj["sector_regime_adjustment"],
+                          regime_adj["relative_strength_adjustment"], regime_adj["total_regime_adjustment"],
+                          final_score))
                     proposal_id = cur.fetchone()[0]
                 conn.commit()
                 log.info(f"PROPOSAL created: {sym} {side} qty={qty} score={score}")

@@ -87,6 +87,49 @@ CREATE TABLE IF NOT EXISTS market_regime_history (
 
 CREATE INDEX IF NOT EXISTS idx_market_regime_history_overall ON market_regime_history (overall);
 
+-- Hierarchical regime PR: sector- and stock-level counterparts to
+-- market_regime_history above, one row per trading_date+sector /
+-- trading_date+symbol. component_values holds the individual boolean
+-- trend/relative-strength inputs (see shared/sector_regime.py,
+-- shared/security_regime.py) so a classification can be explained, not
+-- just trusted. calculation_version lets the scoring rules evolve without
+-- silently mixing incompatible historical rows.
+CREATE TABLE IF NOT EXISTS sector_regime_history (
+    trading_date             DATE NOT NULL,
+    sector                   TEXT NOT NULL,
+    benchmark_symbol         TEXT,
+    sector_symbol            TEXT,
+    classification           TEXT,
+    total_score              NUMERIC,
+    absolute_trend_score     NUMERIC,
+    relative_strength_score  NUMERIC,
+    breadth_score            NUMERIC,
+    confidence               NUMERIC,
+    component_values         JSONB,
+    calculation_version      INTEGER NOT NULL DEFAULT 1,
+    computed_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (trading_date, sector)
+);
+
+CREATE TABLE IF NOT EXISTS security_regime_history (
+    trading_date             DATE NOT NULL,
+    symbol                   TEXT NOT NULL,
+    benchmark_symbol         TEXT,
+    sector                   TEXT,
+    classification           TEXT,
+    total_score              NUMERIC,
+    absolute_trend_score     NUMERIC,
+    vs_sector_score          NUMERIC,
+    vs_market_score          NUMERIC,
+    confidence               NUMERIC,
+    component_values         JSONB,
+    calculation_version      INTEGER NOT NULL DEFAULT 1,
+    computed_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (trading_date, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_regime_history_symbol ON security_regime_history (symbol);
+
 -- exit_reason classifies sell proposals by which rule triggered them:
 -- thesis_complete | time_stop | stop_loss | overbought | regime_deterioration | manual
 ALTER TABLE trade_proposals ADD COLUMN IF NOT EXISTS exit_reason TEXT;
@@ -630,6 +673,38 @@ CREATE TABLE IF NOT EXISTS rule_adherence_checks (
 CREATE INDEX IF NOT EXISTS idx_rule_adherence_checks_checked_at ON rule_adherence_checks (checked_at);
 CREATE INDEX IF NOT EXISTS idx_rule_adherence_checks_trade_id ON rule_adherence_checks (trade_id);
 CREATE INDEX IF NOT EXISTS idx_rule_adherence_checks_proposal_id ON rule_adherence_checks (proposal_id);
+
+-- Hierarchical regime PR: per-proposal snapshot of the market/sector/stock
+-- regime hierarchy at proposal time (regime_snapshot mirrors the JSON shape
+-- snapshot_hierarchy_for_symbol() returns), plus the score breakdown that
+-- keeps base_strategy_score separately visible from any regime-driven
+-- adjustment. final_proposal_score == base_strategy_score whenever
+-- regime_scoring_enabled is off (the default) -- see shared/regime_scoring.py.
+ALTER TABLE trade_proposals
+    ADD COLUMN IF NOT EXISTS regime_snapshot             JSONB,
+    ADD COLUMN IF NOT EXISTS hierarchy_alignment          TEXT,
+    ADD COLUMN IF NOT EXISTS base_strategy_score          INTEGER,
+    ADD COLUMN IF NOT EXISTS market_regime_adjustment     INTEGER,
+    ADD COLUMN IF NOT EXISTS sector_regime_adjustment     INTEGER,
+    ADD COLUMN IF NOT EXISTS relative_strength_adjustment INTEGER,
+    ADD COLUMN IF NOT EXISTS total_regime_adjustment      INTEGER,
+    ADD COLUMN IF NOT EXISTS final_proposal_score         INTEGER;
+
+-- Hierarchical regime scoring config -- flat signal_params rows, same
+-- pattern as sector_max_pct etc. above. Disabled by default: existing
+-- proposal generation/gating behavior is unchanged until a human flips
+-- regime_scoring_enabled to 1 via PATCH /api/signal-params/regime_scoring_enabled.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('regime_scoring_enabled', 0, 'Master switch for hierarchical regime score adjustments (0=off, matches pre-PR behavior)'),
+    ('regime_mkt_bull_sector_bull', 15, 'Score adjustment: bullish market + bullish sector'),
+    ('regime_mkt_bull_sector_neutral', 5, 'Score adjustment: bullish market + neutral sector'),
+    ('regime_mkt_bull_sector_bear', -10, 'Score adjustment: bullish market + bearish sector'),
+    ('regime_mkt_bear_sector_bull', 0, 'Score adjustment: bearish market + bullish sector'),
+    ('regime_mkt_bear_sector_neutral', -10, 'Score adjustment: bearish market + neutral sector'),
+    ('regime_mkt_bear_sector_bear', -20, 'Score adjustment: bearish market + bearish sector'),
+    ('regime_stock_outperform_sector', 5, 'Score adjustment: stock outperforming its own sector'),
+    ('regime_stock_underperform_sector', -5, 'Score adjustment: stock underperforming its own sector')
+ON CONFLICT (key) DO NOTHING;
 
 -- Risk engine (see docs/risk-engine-architecture-reconciliation.md). One
 -- row per shared/risk_engine.py::evaluate_proposal() call -- the single
