@@ -74,7 +74,8 @@ def _reject(detail, reason):
 
 
 def evaluate_proposal(symbol, price, requested_qty, planned_initial_stop_price,
-                       cash, portfolio_value, positions, sector_map, open_risk_dollars, p):
+                       cash, portfolio_value, positions, sector_map, open_risk_dollars, p,
+                       drawdown_multiplier=1.0):
     """
     Evaluate one BUY sizing request and return a risk decision dict:
       {
@@ -94,6 +95,14 @@ def evaluate_proposal(symbol, price, requested_qty, planned_initial_stop_price,
     allocation/sector sizing only.
     open_risk_dollars: caller-supplied (see load_open_risk_dollars above)
     -- this function has no DB access itself.
+    drawdown_multiplier: Risk Engine PR 3 -- caller-supplied (see
+    shared/circuit_breaker.py::drawdown_size_multiplier()), tapers
+    risk_budget_dollars down as portfolio drawdown approaches the circuit
+    breaker's hard-stop threshold. Deliberately does NOT touch
+    position_allocation/sector_exposure/buying_power -- those are pure
+    exposure caps unrelated to recent performance; only the risk-taking
+    knob (how much NEW risk to add per trade) shrinks under stress.
+    Defaults to 1.0 (no tapering) so existing callers/tests are unaffected.
     """
     detail = {}
 
@@ -119,13 +128,14 @@ def evaluate_proposal(symbol, price, requested_qty, planned_initial_stop_price,
     if planned_initial_stop_price is not None and price > planned_initial_stop_price:
         risk_per_share = price - planned_initial_stop_price
 
-    # ── Per-trade risk budget ───────────────────────────────────────────────
-    risk_budget_dollars = portfolio_value * p["risk_per_trade_pct"]
+    # ── Per-trade risk budget (tapered by drawdown_multiplier) ─────────────
+    risk_budget_dollars = portfolio_value * p["risk_per_trade_pct"] * drawdown_multiplier
     risk_qty = None
     if risk_per_share:
         risk_qty = math.floor(risk_budget_dollars / risk_per_share)
         detail["risk_budget"] = {
             "risk_per_trade_pct": p["risk_per_trade_pct"],
+            "drawdown_multiplier": drawdown_multiplier,
             "risk_budget_dollars": risk_budget_dollars,
             "risk_per_share": risk_per_share, "qty": risk_qty,
         }

@@ -12,6 +12,7 @@ from signals import compute_signals, load_sector_map
 from scanner import seed_universe, scan_universe, promote_demote
 from market_regime import compute_market_regime, save_market_context
 from market_regime_history import record_today as record_regime_history_today
+from circuit_breaker import is_breached
 from hierarchy_regime import update_hierarchy_regime
 from sector_mapping import get_sector_etf
 from outcomes import update_signal_outcomes
@@ -874,7 +875,7 @@ def check_alerts(conn, cfg):
                 r2 = cur.fetchone()
             threshold = float(r2[0]) if r2 else 0.15
 
-            if drawdown_pct >= threshold and not alert_throttled(conn, "circuit_breaker", hours=12):
+            if is_breached(drawdown_pct, threshold) and not alert_throttled(conn, "circuit_breaker", hours=12):
                 pct_str = f"{drawdown_pct*100:.1f}%"
                 subject = f"🛑 Circuit Breaker: Portfolio down {pct_str} from peak"
                 html = f"""

@@ -14,8 +14,9 @@ from psycopg2.extras import Json
 import requests
 
 from earnings import earnings_blackout_reason
-from circuit_breaker import record_snapshot_and_check
+from circuit_breaker import record_snapshot_and_check, drawdown_size_multiplier
 from risk_engine import evaluate_proposal, load_open_risk_dollars
+from trading_permission import evaluate_trading_permission
 from feature_store import record_symbol_feature_snapshot, attach_feature_snapshot, attach_fundamental_score
 from fundamentals import compute_fundamental_score
 from hierarchy_regime import snapshot_hierarchy_for_symbol
@@ -58,6 +59,7 @@ DEFAULTS = {
     # docs/risk-engine-architecture-reconciliation.md
     "risk_per_trade_pct": 0.01,
     "max_portfolio_open_risk_pct": 0.06,
+    "loss_streak_limit": 4,
 }
 
 # Relative strength vs SPY and ATR-normalized move: score modifiers layered
@@ -718,10 +720,20 @@ def compute_signals(conn, symbols):
         log.info(f"Portfolio: cash=${cash:.2f} total=${portfolio_value:.2f} positions={list(positions.keys())}")
 
     # Circuit breaker: record this cycle's snapshot against the all-time
-    # high-water mark. If drawdown exceeds threshold, buys pause below —
-    # sells are never affected, and nothing is liquidated automatically.
-    circuit_breaker_active, hwm, drawdown_pct = record_snapshot_and_check(
+    # high-water mark, and the resulting drawdown_pct. Whether that alone
+    # pauses buys is now decided by trading_permission below (Risk Engine
+    # PR 3), not this call's own breaker_active/hwm return values directly.
+    _breach_ignored, _hwm_ignored, drawdown_pct = record_snapshot_and_check(
         conn, portfolio_value, p["circuit_breaker_drawdown_pct"])
+
+    # Risk Engine PR 3: the one aggregation point for account-level trading
+    # permission -- combines the circuit-breaker drawdown check above with
+    # the loss-streak check (shared/trading_permission.py), read-only
+    # (doesn't insert its own portfolio_snapshots row, reuses the HWM the
+    # call above just recorded). new_entries_allowed replaces the old bare
+    # circuit_breaker_active as the buy-gating condition below.
+    trading_permission = evaluate_trading_permission(conn, portfolio_value, p)
+    drawdown_mult = drawdown_size_multiplier(drawdown_pct or 0.0, p["circuit_breaker_drawdown_pct"])
 
     # Stop-loss check on existing positions
     check_stop_losses(conn, positions, p, thesis_id)
@@ -851,10 +863,10 @@ def compute_signals(conn, symbols):
                 qty = None
                 sizing_note = ""
                 if side == "buy":
-                    if circuit_breaker_active:
-                        log.info(f"Skipping buy proposal for {sym}: circuit breaker active "
-                                 f"(drawdown {drawdown_pct*100:.1f}% from HWM ${hwm:,.2f})")
-                        _block_outcome(conn, outcome_id, f"circuit_breaker_drawdown:{drawdown_pct*100:.1f}%")
+                    if not trading_permission["new_entries_allowed"]:
+                        reasons = ",".join(trading_permission["reasons"])
+                        log.info(f"Skipping buy proposal for {sym}: trading permission denied ({reasons})")
+                        _block_outcome(conn, outcome_id, f"trading_permission_denied:{reasons}")
                         continue
                     if open_position_count >= int(p["max_open_positions"]):
                         log.info(
@@ -949,7 +961,7 @@ def compute_signals(conn, symbols):
                         decision = evaluate_proposal(
                             sym, price, qty, planned_initial_stop_price,
                             cash, portfolio_value, positions, sector_map,
-                            open_risk_dollars, p,
+                            open_risk_dollars, p, drawdown_multiplier=drawdown_mult,
                         )
                         _record_risk_decision(conn, "proposal_generated", proposal_id, sym, side,
                                                qty, decision, market_overall)

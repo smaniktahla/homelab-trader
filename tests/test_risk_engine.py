@@ -85,6 +85,33 @@ def test_reduced_by_risk_budget():
     assert d["approved_quantity"] == 125
 
 
+def test_drawdown_multiplier_tapers_risk_budget():
+    # Same setup as test_reduced_by_risk_budget, but a 0.5 drawdown_multiplier
+    # halves the $1000 budget to $500 -> 500/8 = 62 shares (Risk Engine PR 3).
+    d = re_mod.evaluate_proposal(**_base_kwargs(requested_qty=10_000), drawdown_multiplier=0.5)
+    assert d["binding_constraint"] == "risk_budget"
+    assert d["approved_quantity"] == 62
+    assert d["constraint_detail"]["risk_budget"]["drawdown_multiplier"] == 0.5
+
+
+def test_drawdown_multiplier_defaults_to_full_size():
+    """Existing callers/tests that don't pass drawdown_multiplier at all
+    must see identical behavior to before Risk Engine PR 3."""
+    with_default = re_mod.evaluate_proposal(**_base_kwargs(requested_qty=10_000))
+    explicit_full = re_mod.evaluate_proposal(**_base_kwargs(requested_qty=10_000), drawdown_multiplier=1.0)
+    assert with_default == explicit_full
+
+
+def test_drawdown_multiplier_does_not_affect_position_allocation_or_sector():
+    """Only the risk-taking knob (risk_budget) tapers under drawdown --
+    position_allocation/sector_exposure are pure exposure caps, unrelated
+    to recent performance (see shared/risk_engine.py's own docstring)."""
+    d = re_mod.evaluate_proposal(**_base_kwargs(
+        requested_qty=10_000, planned_initial_stop_price=None), drawdown_multiplier=0.5)
+    assert d["constraint_detail"]["position_allocation"]["qty"] == 200
+    assert d["binding_constraint"] == "position_allocation"
+
+
 def test_reduced_by_portfolio_open_risk():
     # max_portfolio_open_risk_pct 6% of 100k = $6000 cap; already $5900 open
     # -> only $100 of room left / $8 risk-per-share = 12 shares.

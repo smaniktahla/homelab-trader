@@ -16,6 +16,42 @@ import psycopg2.extensions
 log = logging.getLogger(__name__)
 
 
+def drawdown_pct_of(portfolio_value, hwm):
+    """Pure. (high_water_mark - portfolio_value) / high_water_mark, or 0.0
+    if hwm is falsy -- extracted so record_snapshot_and_check() below and
+    shared/trading_permission.py compute this identically instead of each
+    hand-copying the formula (this file's own is_breached() had two
+    independent implementations of exactly this before Risk Engine PR 3:
+    this function and rule_adherence.check_gates()'s inline copy)."""
+    return (hwm - portfolio_value) / hwm if hwm else 0.0
+
+
+def is_breached(drawdown_pct, drawdown_threshold):
+    """Pure. The single predicate every drawdown-gated check in this
+    codebase should call instead of hand-copying `>=` -- see
+    drawdown_pct_of() above for the other half of the formula this
+    replaces two independent copies of."""
+    return drawdown_pct >= drawdown_threshold
+
+
+def drawdown_size_multiplier(drawdown_pct, drawdown_threshold, floor=0.5):
+    """Pure. Linear taper from 1.0 (no drawdown) down to `floor` as
+    drawdown_pct approaches drawdown_threshold -- risk_engine.py's
+    per-trade risk budget shrinks smoothly on the way toward the circuit
+    breaker's hard stop, rather than jumping straight from full size to
+    a total halt exactly at the threshold. is_breached() (the hard stop)
+    is a SEPARATE, harder line: once actually breached, trading_permission
+    blocks new entries outright regardless of this multiplier -- this
+    function only tapers sizing on approach, it never itself blocks
+    anything. Clamped to [floor, 1.0] so a drawdown beyond the threshold
+    (still possible for one cycle before the hard stop is observed
+    elsewhere) doesn't produce a negative or >1.0 multiplier."""
+    if drawdown_threshold <= 0 or drawdown_pct <= 0:
+        return 1.0
+    taper = 1.0 - (1.0 - floor) * (drawdown_pct / drawdown_threshold)
+    return max(floor, min(1.0, taper))
+
+
 def record_snapshot_and_check(conn, portfolio_value, drawdown_threshold):
     """Record a portfolio_snapshots row and return
     (breaker_active, high_water_mark, drawdown_pct). Explicit tuple cursor
@@ -31,7 +67,7 @@ def record_snapshot_and_check(conn, portfolio_value, drawdown_threshold):
         prior_hwm = float(row[0]) if row and row[0] is not None else 0.0
 
     hwm = max(prior_hwm, portfolio_value)
-    drawdown_pct = (hwm - portfolio_value) / hwm if hwm else 0.0
+    drawdown_pct = drawdown_pct_of(portfolio_value, hwm)
 
     with conn.cursor() as cur:
         cur.execute("""
@@ -40,7 +76,7 @@ def record_snapshot_and_check(conn, portfolio_value, drawdown_threshold):
         """, (portfolio_value, hwm, drawdown_pct))
     conn.commit()
 
-    breaker_active = drawdown_pct >= drawdown_threshold
+    breaker_active = is_breached(drawdown_pct, drawdown_threshold)
     if breaker_active:
         log.warning(
             f"Circuit breaker ACTIVE: drawdown {drawdown_pct*100:.1f}% from "
