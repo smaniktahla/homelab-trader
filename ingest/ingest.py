@@ -14,6 +14,7 @@ from market_regime import compute_market_regime, save_market_context
 from market_regime_history import record_today as record_regime_history_today
 from circuit_breaker import is_breached
 from hierarchy_regime import update_hierarchy_regime
+from market_structure import update_market_structure
 from sector_mapping import get_sector_etf
 from outcomes import update_signal_outcomes
 from build_position_lifecycles import build_position_lifecycles
@@ -1122,6 +1123,13 @@ def run_once(conn, last_universe_scan):
         update_hierarchy_regime(conn, symbols)
     except Exception as e:
         log.warning(f"Hierarchical regime update failed: {e}")
+
+    # Market Structure Engine, one computation per cycle -- snapshot-only
+    # (see shared/market_structure.py), not yet wired into scoring/gating.
+    try:
+        update_market_structure(conn, symbols)
+    except Exception as e:
+        log.warning(f"Market structure update failed: {e}")
 
     sync_earnings_calendar(conn)
     refresh_fundamentals_if_due(conn, symbols)

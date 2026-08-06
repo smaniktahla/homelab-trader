@@ -30,6 +30,19 @@ def load_daily_series(conn, symbol):
     return [r[0] for r in rows], [float(r[1]) for r in rows]
 
 
+def load_daily_ohlc(conn, symbol):
+    """Full (date, open, high, low, close) bars ascending -- sibling to
+    load_daily_series, for callers that need the whole bar (e.g. swing/
+    structure detection in market_structure.py) rather than just closes."""
+    with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
+        cur.execute("""
+            SELECT DATE(ts), open, high, low, close FROM price_history
+            WHERE symbol=%s ORDER BY ts ASC
+        """, (symbol,))
+        rows = cur.fetchall()
+    return [(r[0], float(r[1]), float(r[2]), float(r[3]), float(r[4])) for r in rows]
+
+
 def asof_index(dates, target_date):
     """Index of the last date <= target_date, or None if no such date."""
     idx = bisect.bisect_right(dates, target_date) - 1

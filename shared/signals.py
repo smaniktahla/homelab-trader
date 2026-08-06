@@ -21,6 +21,7 @@ from feature_store import record_symbol_feature_snapshot, attach_feature_snapsho
 from fundamentals import compute_fundamental_score
 from hierarchy_regime import snapshot_hierarchy_for_symbol
 from regime_scoring import load_regime_scoring_params, compute_regime_adjustment
+from market_structure import snapshot_market_structure_for_symbol
 
 log = logging.getLogger(__name__)
 
@@ -801,6 +802,12 @@ def compute_signals(conn, symbols):
                 regime_params,
             )
 
+            # Market Structure Engine snapshot -- also side-independent,
+            # read from whatever update_market_structure already computed/
+            # stored this cycle. Data-only: does not feed score_signal() or
+            # any gate below (see shared/market_structure.py docstring).
+            market_structure_snapshot = snapshot_market_structure_for_symbol(conn, sym)
+
             for side in ("buy", "sell"):
                 score, rationale = score_signal(rsi, price, bb_upper, bb_lower, band_std, bb_middle,
                                                  regime, side, p, rs_pct=rs_pct, atr=atr)
@@ -943,9 +950,10 @@ def compute_signals(conn, symbols):
                             planned_risk_per_share, planned_risk_dollars,
                             regime_snapshot, hierarchy_alignment, base_strategy_score,
                             market_regime_adjustment, sector_regime_adjustment,
-                            relative_strength_adjustment, total_regime_adjustment, final_proposal_score
+                            relative_strength_adjustment, total_regime_adjustment, final_proposal_score,
+                            market_structure_snapshot, structure_trend, structure_confidence
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                     """, (sym, side, qty, rationale, score, exit_reason, thesis_id,
                           planned_entry_price, planned_initial_stop_price,
@@ -953,7 +961,9 @@ def compute_signals(conn, symbols):
                           Json(regime_snapshot), regime_snapshot["hierarchy_alignment"], score,
                           regime_adj["market_regime_adjustment"], regime_adj["sector_regime_adjustment"],
                           regime_adj["relative_strength_adjustment"], regime_adj["total_regime_adjustment"],
-                          final_score))
+                          final_score,
+                          Json(market_structure_snapshot), market_structure_snapshot["trend"],
+                          int(round(market_structure_snapshot["confidence"]))))
                     proposal_id = cur.fetchone()[0]
                 conn.commit()
                 log.info(f"PROPOSAL created: {sym} {side} qty={qty} score={score}")
