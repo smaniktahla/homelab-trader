@@ -83,6 +83,8 @@ from market_regime import _classify_trend, _classify_vix, classify_overall, SMA_
 from market_regime_history import asof_index
 from risk_engine import evaluate_proposal
 from circuit_breaker import drawdown_pct_of, is_breached, drawdown_size_multiplier
+from security_regime import classify_security_regime
+from sector_mapping import get_sector_etf
 from db_utils import save_backtest_result
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -119,6 +121,19 @@ def get_sector_map(conn):
         return {r[0]: r[1] for r in cur.fetchall()}
 
 
+def load_sector_series(conn, sector_map, load_series_fn):
+    """etf symbol -> series, one load per distinct sector ETF actually
+    represented in sector_map. Only needed by callers that pass an
+    rs_policy to run_single_backtest() (relative-strength gating/sizing) --
+    harmless to load unconditionally, it's just 10-15 ETF series."""
+    sector_series = {}
+    for sector in set(sector_map.values()):
+        etf = get_sector_etf(sector)
+        if etf and etf not in sector_series:
+            sector_series[etf] = load_series_fn(conn, etf)
+    return sector_series
+
+
 def load_series(conn, symbol):
     """dates (ascending, python date objects), closes, highs, lows."""
     with conn.cursor() as cur:
@@ -147,6 +162,28 @@ def relative_strength(idx, closes, spy_dates, spy_closes, current_date, lookback
     sym_ret = (closes[idx] - closes[idx - lookback]) / closes[idx - lookback] * 100
     spy_ret = (spy_closes[spy_pos] - spy_closes[spy_pos - lookback]) / spy_closes[spy_pos - lookback] * 100
     return sym_ret - spy_ret
+
+
+def vs_sector_classification(sym, idx, dates, closes, sector_map, sector_series, spy_series):
+    """As-of stock-vs-sector relative strength, via the exact pure
+    classify_security_regime() the live hierarchical regime system and
+    Experiments 007/009 already use -- same function, fed a historical
+    slice instead of a live/backfilled DB read. "unknown" (never gated/
+    resized) whenever the sector is unmapped or its ETF has no series."""
+    sector = sector_map.get(sym)
+    etf = get_sector_etf(sector) if sector else None
+    if not etf or etf not in sector_series:
+        return "unknown"
+    sector_dates, sector_closes, _, _ = sector_series[etf]
+    spy_dates, spy_closes, _, _ = spy_series
+    target_date = dates[idx]
+    stock_closes_upto = closes[:idx + 1]
+    sec_i = asof_index(sector_dates, target_date)
+    sector_closes_upto = sector_closes[:sec_i + 1] if sec_i is not None else []
+    spy_i = asof_index(spy_dates, target_date)
+    spy_closes_upto = spy_closes[:spy_i + 1] if spy_i is not None else []
+    ctx = classify_security_regime(stock_closes_upto, sector_closes_upto, spy_closes_upto)
+    return ctx["vs_sector_classification"]
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -220,7 +257,20 @@ def execute_sell(ledger, sym, price, current_date, reason, trade_log):
 # Single walk-forward run
 # ─────────────────────────────────────────────────────────────────────────
 
-def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sector_map, p, start_i, horizon_days):
+def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sector_map, p, start_i, horizon_days,
+                         rs_policy=None, sector_series=None):
+    """rs_policy=None (default) reproduces Experiment 003's exact existing
+    behavior byte-for-byte -- every line below that references rs_policy is
+    a no-op in that case. rs_policy is an optional dict enabling a
+    relative-strength gate/resize on top of the identical baseline pipeline
+    (same score threshold, same sector cap, same risk engine, same exits):
+      {"mode": "gate"} -- skip any BUY where the stock is underperforming
+        its own sector (vs_sector_classification) entirely.
+      {"mode": "reduce_size", "size_multiplier": 0.5} -- still buy, but at
+        `size_multiplier` of the size the identical baseline sizing/risk-
+        engine pipeline would have produced.
+    sector_series (etf -> series) is required whenever rs_policy is set;
+    see load_sector_series()."""
     spy_dates, spy_closes, _, _ = spy_series
     qqq_dates, qqq_closes, _, _ = qqq_series
     vix_dates, vix_closes, _, _ = vix_series
@@ -258,11 +308,24 @@ def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sec
         # Risk Engine PR 3 fixed the same duplication in
         # rule_adherence.py's check_gates(), this is the third and last
         # independent copy in the codebase.
-        current_value = portfolio_value(ledger["cash"], ledger["positions"], lambda s: price_of(s, current_date) or 0)
+        positions_mv = {s: pos["qty"] * (price_of(s, current_date) or 0) for s, pos in ledger["positions"].items()}
+        current_value = ledger["cash"] + sum(positions_mv.values())
         high_water_mark = max(high_water_mark, current_value)
         drawdown_pct = drawdown_pct_of(current_value, high_water_mark)
         circuit_breaker_active = is_breached(drawdown_pct, p["circuit_breaker_drawdown_pct"])
-        equity_curve.append({"date": str(current_date), "value": round(current_value, 2)})
+        # cash + per-sector exposure recorded alongside value -- purely
+        # additive vs. Experiment 003's original equity_curve shape (extra
+        # dict keys), needed downstream for capital-deployed/sector-
+        # concentration metrics without re-deriving them from trade_log.
+        sector_exposure = {}
+        for s, mv in positions_mv.items():
+            sec = sector_map.get(s, "Unknown")
+            sector_exposure[sec] = sector_exposure.get(sec, 0.0) + mv
+        equity_curve.append({
+            "date": str(current_date), "value": round(current_value, 2),
+            "cash": round(ledger["cash"], 2),
+            "sector_exposure": {k: round(v, 2) for k, v in sector_exposure.items()},
+        })
 
         # Symbols sold at any point today are never re-bought today — in
         # production, a sell only ever becomes a PROPOSAL mid-cycle (a human
@@ -340,10 +403,28 @@ def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sec
             if buy_score < effective_proposal_min:
                 continue
             # earnings blackout: skipped (see module docstring)
+
+            # Relative-strength gate/resize -- no-op (rs_size_multiplier
+            # stays 1.0) unless rs_policy was explicitly passed in. Placed
+            # right after the score gate and before sizing/sector-cap/risk-
+            # engine, same "another gate in the pipeline" position as every
+            # other check here -- the rest of the pipeline is byte-for-byte
+            # identical to the rs_policy=None baseline either way.
+            rs_size_multiplier = 1.0
+            if rs_policy is not None:
+                vs_sector = vs_sector_classification(sym, idx, dates, closes, sector_map, sector_series, spy_series)
+                if vs_sector == "underperforming_sector":
+                    if rs_policy["mode"] == "gate":
+                        continue
+                    elif rs_policy["mode"] == "reduce_size":
+                        rs_size_multiplier = rs_policy.get("size_multiplier", 0.5)
+
             cur_value = portfolio_value(ledger["cash"], ledger["positions"], lambda s: price_of(s, current_date) or 0)
             requested_qty, _sizing_note = calc_buy_qty(price, ledger["cash"], cur_value, 0.0, p_gated)
             if requested_qty is None:
                 continue
+            if rs_size_multiplier != 1.0:
+                requested_qty = max(1, int(requested_qty * rs_size_multiplier))
             # sector_cap_block_reason (signals.py) expects each position to
             # carry a precomputed market_value, matching the shape
             # get_positions() returns live from Alpaca. The simulated
@@ -412,6 +493,7 @@ def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sec
         "excess_vs_spy_pct": round(total_return_pct - spy_return_pct, 2) if spy_return_pct is not None else None,
         "n_trades": len(trade_log), "max_drawdown_pct": round(max_drawdown_pct, 2),
         "trade_log": trade_log,
+        "equity_curve": equity_curve,
     }
 
 
