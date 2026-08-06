@@ -782,12 +782,24 @@ CREATE INDEX IF NOT EXISTS idx_market_structure_history_symbol ON market_structu
 -- Per-proposal snapshot of market structure at proposal time, same
 -- "computed once per cycle by update_market_structure(), read back (not
 -- recomputed live) at proposal time" pattern as regime_snapshot above.
--- Snapshot-only for now -- market_structure_snapshot/structure_trend/
--- structure_confidence do not feed score_signal() or any gate yet (see
--- shared/market_structure.py's module docstring); a follow-up PR wires
--- that in behind its own disabled-by-default signal_params flag, same
--- precedent as regime_scoring_enabled.
+-- structure_score_adjustment mirrors total_regime_adjustment (see
+-- shared/structure_scoring.py) -- 0 for every proposal until a human
+-- explicitly flips structure_scoring_enabled on.
 ALTER TABLE trade_proposals
     ADD COLUMN IF NOT EXISTS market_structure_snapshot JSONB,
     ADD COLUMN IF NOT EXISTS structure_trend            TEXT,
-    ADD COLUMN IF NOT EXISTS structure_confidence        INTEGER;
+    ADD COLUMN IF NOT EXISTS structure_confidence        INTEGER,
+    ADD COLUMN IF NOT EXISTS structure_score_adjustment  INTEGER;
+
+-- Market Structure Engine scoring config -- flat signal_params rows, same
+-- pattern/precedent as the hierarchical regime scoring keys above.
+-- Disabled by default: existing proposal generation/gating behavior is
+-- unchanged until a human flips structure_scoring_enabled to 1 via
+-- PATCH /api/signal-params/structure_scoring_enabled.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('structure_scoring_enabled', 0, 'Master switch for Market Structure Engine score adjustments (0=off, matches pre-PR behavior)'),
+    ('structure_trend_bullish', 10, 'Score adjustment when top-down (monthly+weekly) structure trend is bullish'),
+    ('structure_trend_bearish', -10, 'Score adjustment when top-down (monthly+weekly) structure trend is bearish'),
+    ('structure_choch_penalty', -10, 'Score adjustment when a change-of-character warning is active on daily or weekly structure'),
+    ('structure_bos_bonus', 5, 'Score adjustment when a break-of-structure confirmation is active on daily or weekly structure')
+ON CONFLICT (key) DO NOTHING;

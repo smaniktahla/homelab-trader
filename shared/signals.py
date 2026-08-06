@@ -22,6 +22,7 @@ from fundamentals import compute_fundamental_score
 from hierarchy_regime import snapshot_hierarchy_for_symbol
 from regime_scoring import load_regime_scoring_params, compute_regime_adjustment
 from market_structure import snapshot_market_structure_for_symbol
+from structure_scoring import load_structure_scoring_params, compute_structure_adjustment
 
 log = logging.getLogger(__name__)
 
@@ -759,6 +760,7 @@ def compute_signals(conn, symbols):
     # held position not currently in the watchlist slice being scanned
     sector_map = load_sector_map(conn, set(symbols) | set(positions.keys()))
     regime_params = load_regime_scoring_params(conn)
+    structure_params = load_structure_scoring_params(conn)
 
     # Portfolio's total planned dollar risk right now, before any of this
     # cycle's proposals -- fed into the risk engine's portfolio-open-risk
@@ -804,9 +806,12 @@ def compute_signals(conn, symbols):
 
             # Market Structure Engine snapshot -- also side-independent,
             # read from whatever update_market_structure already computed/
-            # stored this cycle. Data-only: does not feed score_signal() or
-            # any gate below (see shared/market_structure.py docstring).
+            # stored this cycle. structure_adj is all-zero unless a human
+            # has explicitly flipped structure_scoring_enabled on (default
+            # off, same precedent as regime_scoring_enabled) -- see
+            # shared/structure_scoring.py.
             market_structure_snapshot = snapshot_market_structure_for_symbol(conn, sym)
+            structure_adj = compute_structure_adjustment(market_structure_snapshot, structure_params)
 
             for side in ("buy", "sell"):
                 score, rationale = score_signal(rsi, price, bb_upper, bb_lower, band_std, bb_middle,
@@ -853,10 +858,12 @@ def compute_signals(conn, symbols):
                 if fundamental_score is not None:
                     attach_fundamental_score(conn, snap_id, outcome_id, fundamental_score)
 
-                # final_score == score whenever regime_scoring_enabled is off
-                # (the default) -- compute_regime_adjustment returns all-zero
+                # final_score == score whenever regime_scoring_enabled AND
+                # structure_scoring_enabled are both off (the default) --
+                # both compute_*_adjustment functions return all-zero
                 # adjustments in that case, so this is a no-op gate change.
-                final_score = max(0, min(100, score + regime_adj["total_regime_adjustment"]))
+                final_score = max(0, min(100, score + regime_adj["total_regime_adjustment"]
+                                          + structure_adj["total_structure_adjustment"]))
 
                 if final_score < effective_proposal_min:
                     if score_mod > 0:
@@ -951,9 +958,10 @@ def compute_signals(conn, symbols):
                             regime_snapshot, hierarchy_alignment, base_strategy_score,
                             market_regime_adjustment, sector_regime_adjustment,
                             relative_strength_adjustment, total_regime_adjustment, final_proposal_score,
-                            market_structure_snapshot, structure_trend, structure_confidence
+                            market_structure_snapshot, structure_trend, structure_confidence,
+                            structure_score_adjustment
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                     """, (sym, side, qty, rationale, score, exit_reason, thesis_id,
                           planned_entry_price, planned_initial_stop_price,
@@ -963,7 +971,8 @@ def compute_signals(conn, symbols):
                           regime_adj["relative_strength_adjustment"], regime_adj["total_regime_adjustment"],
                           final_score,
                           Json(market_structure_snapshot), market_structure_snapshot["trend"],
-                          int(round(market_structure_snapshot["confidence"]))))
+                          int(round(market_structure_snapshot["confidence"])),
+                          structure_adj["total_structure_adjustment"]))
                     proposal_id = cur.fetchone()[0]
                 conn.commit()
                 log.info(f"PROPOSAL created: {sym} {side} qty={qty} score={score}")

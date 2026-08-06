@@ -165,3 +165,62 @@ def test_proposal_gets_real_snapshot_when_structure_precomputed_this_cycle(conn,
     snapshot, structure_trend, structure_confidence = row
     assert structure_trend == persisted["trend"]
     assert snapshot["trend"] == persisted["trend"]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# structure_scoring_enabled wiring -- same "prove disabled changes nothing,
+# enabled shifts the score" shape as
+# test_hierarchy_regime_integration.py's regime_scoring_enabled tests.
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_final_score_equals_base_when_structure_scoring_disabled(conn, alpaca_base):
+    closes = _bullish_buy_closes()
+    _set_low_threshold_gate_params(conn)
+    _set_signal_param(conn, "structure_scoring_enabled", 0)
+    _seed_signal_fixture(conn, "AAPL", closes)
+    ms.store_market_structure_day(conn, date.today(), "AAPL", dict(_STRUCTURE_CTX, trend="bullish"))
+
+    _run_compute_signals(conn, alpaca_base, closes)
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT base_strategy_score, final_proposal_score, structure_score_adjustment, structure_trend
+            FROM trade_proposals WHERE symbol='AAPL' AND side='buy'
+        """)
+        row = cur.fetchone()
+    assert row is not None
+    base_score, final_score, structure_adj, structure_trend = row
+    assert structure_adj == 0
+    assert final_score == base_score
+    assert structure_trend == "bullish"  # snapshot still recorded even though it isn't scored
+
+
+def test_final_score_diverges_when_structure_scoring_enabled(conn, alpaca_base):
+    closes = _bullish_buy_closes()
+    _set_low_threshold_gate_params(conn)
+    _set_signal_param(conn, "structure_scoring_enabled", 1)
+    _seed_signal_fixture(conn, "AAPL", closes)
+    ms.store_market_structure_day(conn, date.today(), "AAPL", dict(_STRUCTURE_CTX, trend="bullish"))
+
+    _run_compute_signals(conn, alpaca_base, closes)
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT base_strategy_score, final_proposal_score, structure_score_adjustment
+            FROM trade_proposals WHERE symbol='AAPL' AND side='buy'
+        """)
+        row = cur.fetchone()
+    assert row is not None
+    base_score, final_score, structure_adj = row
+    assert structure_adj == 10  # structure_trend_bullish default
+    assert final_score == min(100, base_score + 10)
+    assert final_score != base_score
+
+
+_STRUCTURE_CTX = {
+    "trend": "bullish", "confidence": 80, "trend_strength": "strong", "volatility": "normal",
+    "bos": False, "choch": False, "risk": "low", "summary": "test",
+    "monthly": {"trend_direction": "higher_highs_higher_lows"},
+    "weekly": {"trend_direction": "higher_highs_higher_lows"},
+    "daily": {"trend_direction": "higher_highs_higher_lows"},
+}
