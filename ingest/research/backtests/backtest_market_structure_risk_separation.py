@@ -1,33 +1,46 @@
 #!/usr/bin/env python3
-"""Experiment 009: Market Structure Engine risk-separation test.
+"""Experiment 009: risk-separation test, Market Structure Engine AND
+hierarchical regime groupings.
 
 Research artifact, not production logic. Follow-up to Experiment 008
-(backtest_market_structure_significance.py), which found no significant
-MEAN excess-return difference between structure-trend/CHoCH/BOS groups.
-That result only rules out one hypothesis -- that structure predicts
-better/worse average return. It says nothing about a genuinely different
-hypothesis, raised in review: structure could reduce RISK (volatility,
-tail outcomes, stop-out rate) while leaving mean return roughly flat.
-This experiment tests that hypothesis directly, on the exact same real
-episode pool and the exact same as-of-safe structure classification
-Experiment 008 used (classify_episode_structure imported directly from
-that module -- zero duplication, zero drift risk).
+(backtest_market_structure_significance.py) and Experiment 007
+(backtest_hierarchy_regime_significance.py), both of which found no
+significant MEAN excess-return difference between their respective
+groups. That result only rules out one hypothesis -- that a label
+predicts better/worse average return. It says nothing about a genuinely
+different hypothesis, raised in review: a label could reduce RISK
+(volatility, tail outcomes, stop-out rate) while leaving mean return
+roughly flat. This experiment tests that directly, on the exact same
+real episode pool and the exact same as-of-safe classification logic
+both prior experiments used (classify_episode_structure and
+classify_episode_regime imported directly, not reimplemented -- zero
+duplication, zero drift risk) -- a clean extension of the existing
+research, not a fresh universe.
 
-Seven risk/dispersion metrics per group, same real mean-reversion buy
-episodes as Experiment 008 (backtest_score_calibration.backtest_symbol's
-stop-loss-aware outcome already computes all of these per episode --
-nothing new to compute at the episode level, just grouped differently):
+Five groupings, one shared risk-metric battery:
+  - structure trend: bullish vs bearish (Experiment 008)
+  - structure CHoCH: present vs absent (Experiment 008)
+  - structure BOS: present vs absent (Experiment 008)
+  - hierarchy alignment: market x sector aligned vs misaligned (Experiment 007)
+  - relative strength: stock outperforming vs underperforming its sector (Experiment 007)
+
+Eight risk/dispersion metrics per group, same real mean-reversion buy
+episodes every prior experiment here used
+(backtest_score_calibration.backtest_symbol's stop-loss-aware outcome
+already computes all of these per episode -- nothing new to compute at
+the episode level, just grouped differently):
   - stopped_out_rate       -- fraction of episodes that hit the stop
   - avg_mae                -- average maximum adverse excursion
-  - avg_mfe                -- average maximum favorable excursion
-  - realized_return_stdev  -- dispersion of the stop-loss-aware outcome
+  - worst_loss_magnitude   -- single worst realized_return in the group
+  - downside_deviation     -- semi-deviation of realized_return below 0
   - realized_return_p5     -- 5th percentile (downside tail)
   - realized_return_p10    -- 10th percentile (downside tail)
-  - downside_deviation     -- semi-deviation of realized_return below 0
+  - realized_return_stdev  -- dispersion of the stop-loss-aware outcome
+  - avg_mfe                -- average maximum favorable excursion (context only)
 
 Same permutation-test method as Experiment 007/008 (shuffle group labels,
 hold real per-episode outcomes fixed, compare the real group-stat gap
-against the shuffled null distribution) but computing all seven stats
+against the shuffled null distribution) but computing all eight stats
 from ONE shuffle per permutation rather than reshuffling independently
 per metric -- meaningfully cheaper at these group sizes (up to ~8,600
 episodes) without changing what's being tested.
@@ -52,9 +65,13 @@ from backtest_score_calibration import (
     WINDOW, FORWARD_DAYS,
 )
 from backtest_market_structure_significance import classify_episode_structure
-from backtest_hierarchy_regime_significance import MIN_GROUP_N
-from signals import load_params
-from regime_common import load_daily_ohlc
+from backtest_hierarchy_regime_significance import (
+    classify_episode_regime, load_market_regime_history_asof, MIN_GROUP_N,
+)
+from signals import load_params, load_sector_map
+from sector_mapping import get_sector_etf
+from regime_scoring import bucket_market_trend, bucket_sector_trend
+from regime_common import load_daily_ohlc, load_daily_series
 from db_utils import save_backtest_result
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -95,6 +112,7 @@ def _compute_all_stats(episodes):
     return {
         "stopped_out_rate": statistics.mean(stopped),
         "avg_mae": statistics.mean(maes),
+        "worst_loss_magnitude": min(rets) if rets else 0.0,
         "avg_mfe": statistics.mean(mfes),
         "realized_return_stdev": statistics.pstdev(rets) if len(rets) > 1 else 0.0,
         "realized_return_p5": _percentile(rets, 5),
@@ -175,16 +193,31 @@ def main():
     log.info(f"Live params: score_proposal_min={params['score_proposal_min']}")
 
     symbols = get_universe_symbols(conn)
+    sector_map = load_sector_map(conn, symbols)
     spy_dates, spy_closes, _, _ = load_series(conn, "SPY")
+    market_dates, market_overalls = load_market_regime_history_asof(conn)
     if not spy_closes:
         log.error("No SPY history -- aborting")
         conn.close()
         return
+    if not market_dates:
+        log.error("market_regime_history is empty -- run ingest/backfill_market_regime_history.py first")
+        conn.close()
+        return
+
+    sector_series = {}  # etf symbol -> (dates, closes), loaded once per distinct sector
+    for sector in set(sector_map.values()):
+        etf = get_sector_etf(sector)
+        if etf and etf not in sector_series:
+            sector_series[etf] = load_daily_series(conn, etf)
+    log.info(f"Loaded {len(sector_series)} sector ETF series: {sorted(sector_series)}")
 
     groups = {
         "trend": {"bullish": [], "bearish": []},
         "choch": {"choch": [], "no_choch": []},
         "bos": {"bos": [], "no_bos": []},
+        "hierarchy_alignment": {"aligned": [], "misaligned": []},
+        "relative_strength": {"outperforming_sector": [], "underperforming_sector": []},
     }
     n_symbols_used = 0
 
@@ -211,6 +244,10 @@ def main():
         daily_ohlc_all = load_daily_ohlc(conn, sym)
         daily_dates_all = [b[0] for b in daily_ohlc_all]
 
+        sector = sector_map.get(sym)
+        etf = get_sector_etf(sector) if sector else None
+        sector_dates, sector_closes = sector_series.get(etf, (None, None)) if etf else (None, None)
+
         for ep in episodes:
             combined = classify_episode_structure(ep["date"], daily_ohlc_all, daily_dates_all)
 
@@ -222,6 +259,23 @@ def main():
             (groups["choch"]["choch"] if combined["choch"] else groups["choch"]["no_choch"]).append(ep)
             (groups["bos"]["bos"] if combined["bos"] else groups["bos"]["no_bos"]).append(ep)
 
+            regime = classify_episode_regime(
+                ep["date"], dates, closes, sector_dates, sector_closes,
+                spy_dates, spy_closes, market_dates, market_overalls,
+            )
+            m = bucket_market_trend(regime["market_overall"])
+            s = bucket_sector_trend(regime["sector_classification"])
+            if m and s and m == s:
+                groups["hierarchy_alignment"]["aligned"].append(ep)
+            elif m and s and m != s and s != "neutral":
+                groups["hierarchy_alignment"]["misaligned"].append(ep)
+
+            vs_sector = regime["stock_vs_sector_classification"]
+            if vs_sector == "outperforming_sector":
+                groups["relative_strength"]["outperforming_sector"].append(ep)
+            elif vs_sector == "underperforming_sector":
+                groups["relative_strength"]["underperforming_sector"].append(ep)
+
         if (idx + 1) % 50 == 0:
             log.info(f"...{idx + 1}/{len(symbols)} symbols processed")
 
@@ -229,12 +283,22 @@ def main():
     log.info(
         f"Episodes: trend bullish={len(groups['trend']['bullish'])} bearish={len(groups['trend']['bearish'])} "
         f"| choch={len(groups['choch']['choch'])} no_choch={len(groups['choch']['no_choch'])} "
-        f"| bos={len(groups['bos']['bos'])} no_bos={len(groups['bos']['no_bos'])}"
+        f"| bos={len(groups['bos']['bos'])} no_bos={len(groups['bos']['no_bos'])} "
+        f"| aligned={len(groups['hierarchy_alignment']['aligned'])} "
+        f"misaligned={len(groups['hierarchy_alignment']['misaligned'])} "
+        f"| outperforming={len(groups['relative_strength']['outperforming_sector'])} "
+        f"underperforming={len(groups['relative_strength']['underperforming_sector'])}"
     )
 
     trend_result = run_group_comparison(groups["trend"]["bullish"], groups["trend"]["bearish"], N_PERMUTATIONS, RANDOM_SEED)
     choch_result = run_group_comparison(groups["choch"]["choch"], groups["choch"]["no_choch"], N_PERMUTATIONS, RANDOM_SEED + 1)
     bos_result = run_group_comparison(groups["bos"]["bos"], groups["bos"]["no_bos"], N_PERMUTATIONS, RANDOM_SEED + 2)
+    alignment_result = run_group_comparison(
+        groups["hierarchy_alignment"]["aligned"], groups["hierarchy_alignment"]["misaligned"],
+        N_PERMUTATIONS, RANDOM_SEED + 3)
+    relstrength_result = run_group_comparison(
+        groups["relative_strength"]["outperforming_sector"], groups["relative_strength"]["underperforming_sector"],
+        N_PERMUTATIONS, RANDOM_SEED + 4)
 
     report = {
         "experiment_id": EXPERIMENT_ID,
@@ -251,6 +315,8 @@ def main():
         "structure_trend": trend_result,
         "choch_warning": choch_result,
         "bos_confirmation": bos_result,
+        "hierarchy_alignment": alignment_result,
+        "relative_strength": relstrength_result,
     }
 
     with open("/tmp/backtest_results_009.json", "w") as f:
@@ -270,7 +336,9 @@ def main():
         summary=(
             f"trend flagged={_flagged_metrics(trend_result)} "
             f"| choch flagged={_flagged_metrics(choch_result)} "
-            f"| bos flagged={_flagged_metrics(bos_result)}"
+            f"| bos flagged={_flagged_metrics(bos_result)} "
+            f"| alignment flagged={_flagged_metrics(alignment_result)} "
+            f"| relative_strength flagged={_flagged_metrics(relstrength_result)}"
         ),
     )
     log.info("Results also saved to backtest_results table")
@@ -295,17 +363,19 @@ def main():
                 print(f"    -> real-sized gap but not yet significant -- candidate for more data, not dismissal")
         print()
 
-    _print_group("Top-down structure trend", trend_result, "bullish", "bearish")
-    _print_group("CHoCH warning", choch_result, "present", "absent")
-    _print_group("BOS confirmation", bos_result, "present", "absent")
+    _print_group("Structure trend", trend_result, "bullish", "bearish")
+    _print_group("Structure CHoCH warning", choch_result, "present", "absent")
+    _print_group("Structure BOS confirmation", bos_result, "present", "absent")
+    _print_group("Hierarchy market x sector alignment", alignment_result, "aligned", "misaligned")
+    _print_group("Stock vs sector relative strength", relstrength_result, "outperforming", "underperforming")
 
-    print("Interpretation: each row tests whether that RISK metric (not mean return -- see Experiment 008 for")
+    print("Interpretation: each row tests whether that RISK metric (not mean return -- see Experiments 007/008 for")
     print("that) differs between the two groups more than random label-shuffling would produce. p < 0.05 means")
-    print("the structure label carries real information about that specific risk dimension. 'effect' is the raw")
-    print(f"gap size independent of p-value (stopped_out_rate: notable >={_NOTABLE_PP:.0f}pp, negligible <{_NEGLIGIBLE_PP:.0f}pp;")
+    print("the label carries real information about that specific risk dimension. 'effect' is the raw gap size")
+    print(f"independent of p-value (stopped_out_rate: notable >={_NOTABLE_PP:.0f}pp, negligible <{_NEGLIGIBLE_PP:.0f}pp;")
     print(f"return-based metrics: notable >={_NOTABLE_PCT:.1f}pp, negligible <{_NEGLIGIBLE_PCT:.1f}pp) -- a metric can be")
     print("significant-but-negligible (real but not worth acting on) or notable-but-not-yet-significant (worth")
-    print("more data before concluding either way). A metric can be significant here even though Experiment 008")
+    print("more data before concluding either way). A metric can be significant here even though Experiments 007/008")
     print("found no mean-return difference -- that's exactly the \"reduces risk without changing average return\"")
     print("hypothesis this experiment exists to test. Still not proof of a tradeable edge after costs, and still")
     print("subject to the same caveats Experiment 007/008 note (single historical window, episodes not fully")
