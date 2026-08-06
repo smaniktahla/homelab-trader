@@ -1,12 +1,16 @@
 """
-Market Structure Engine, phase 1: pure, deterministic top-down trend/
-structure classification for Monthly/Weekly/Daily timeframes. No I/O, no
-DB, no strategy wiring here -- see docs/session-handoff-2026-08-05.md's
-follow-on plan for the persistence layer (compute_market_structure(),
-market_structure_history) and strategy integration, sequenced as separate
-PRs on purpose (same staged-rollout discipline as shared/sector_regime.py
-/shared/security_regime.py/shared/hierarchy_regime.py, all merged inert
-before anything downstream depended on them).
+Market Structure Engine. Phase 1 (this file's top section): pure,
+deterministic top-down trend/structure classification for Monthly/
+Weekly/Daily timeframes -- no I/O, no DB. Phase 2 (bottom section,
+mirrors shared/sector_regime.py's single-file "pure classify + I/O
+compute/store/load" pattern exactly): compute_market_structure() resamples
+real price_history into the three timeframes and persists one row per
+symbol per day to market_structure_history, same as sector_regime_history/
+security_regime_history. Strategy/scoring integration is still a
+follow-up PR -- this snapshot is computed and queryable but not yet
+load-bearing for any score or gate, same staged-rollout discipline as
+shared/sector_regime.py/shared/security_regime.py/shared/hierarchy_regime.py,
+all merged inert before anything downstream depended on them.
 
 4H/1H timeframes are deliberately NOT supported by this module.
 price_history_hourly only has a few weeks of history for a subset of
@@ -27,14 +31,22 @@ bar's actual calendar position and support/resistance zones are priced
 off highs/lows, not just closes.
 """
 
+import logging
 import sys
 import pathlib
+from datetime import date as date_cls
+
+from psycopg2.extras import Json, RealDictCursor
 
 _here = pathlib.Path(__file__).resolve().parent
 if str(_here) not in sys.path:
     sys.path.insert(0, str(_here))
 
-from regime_common import score_inputs  # noqa: E402
+from regime_common import score_inputs, load_daily_ohlc, asof_index  # noqa: E402
+
+log = logging.getLogger(__name__)
+
+CALCULATION_VERSION = 1
 
 EMA_FAST = 20
 EMA_MID = 50
@@ -473,3 +485,186 @@ def combine_timeframe_structures(monthly, weekly, daily):
         "risk": risk,
         "summary": summary,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Phase 2: resampling + I/O (load price_history, persist to
+# market_structure_history, snapshot for trade_proposals). Mirrors
+# shared/sector_regime.py's single-file "pure classify, then compute/
+# store/load" layout.
+# ─────────────────────────────────────────────────────────────────────────
+
+MIN_DAILY_BARS = 2 * SWING_K + 1
+
+
+def _resample(ohlc, key_fn):
+    """Group consecutive bars sharing key_fn(date) into one bar: open of
+    the first, close of the last, high/low across the group, dated to the
+    group's last bar. Pure function, no I/O -- used for both weekly and
+    monthly so there's exactly one grouping/aggregation implementation."""
+    groups, order = {}, []
+    for bar in ohlc:
+        k = key_fn(bar[0])
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(bar)
+    resampled = []
+    for k in order:
+        bars = groups[k]
+        resampled.append((
+            bars[-1][0],
+            bars[0][1],
+            max(b[2] for b in bars),
+            min(b[3] for b in bars),
+            bars[-1][4],
+        ))
+    return resampled
+
+
+def resample_weekly(ohlc):
+    return _resample(ohlc, lambda d: d.isocalendar()[:2])
+
+
+def resample_monthly(ohlc):
+    return _resample(ohlc, lambda d: (d.year, d.month))
+
+
+def _json_safe(obj):
+    """Recursively convert date objects (swing-point dates, S/R zone
+    last_touched dates) to ISO strings so the combined structure dict can
+    go straight into a JSONB column via Json() -- psycopg2's default JSON
+    encoder can't serialize datetime.date on its own."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, date_cls):
+        return obj.isoformat()
+    return obj
+
+
+def compute_market_structure(conn, symbol, as_of_date=None):
+    """I/O orchestrator: load symbol's daily price_history, as-of slice
+    (no lookahead), resample to weekly/monthly, classify all three, combine.
+    Never raises -- insufficient history degrades to the "insufficient_data"
+    shape classify_timeframe_structure/combine_timeframe_structures already
+    produce, same convention as compute_sector_regime/compute_security_regime."""
+    target_date = as_of_date or date_cls.today()
+    try:
+        daily_all = load_daily_ohlc(conn, symbol)
+    except Exception:
+        daily_all = []
+
+    dates = [b[0] for b in daily_all]
+    idx = asof_index(dates, target_date)
+    daily_ohlc = daily_all[:idx + 1] if idx is not None else []
+
+    weekly_ohlc = resample_weekly(daily_ohlc)
+    monthly_ohlc = resample_monthly(daily_ohlc)
+
+    daily = classify_timeframe_structure(daily_ohlc)
+    weekly = classify_timeframe_structure(weekly_ohlc)
+    monthly = classify_timeframe_structure(monthly_ohlc)
+
+    combined = combine_timeframe_structures(monthly, weekly, daily)
+    combined["symbol"] = symbol
+    return combined
+
+
+def store_market_structure_day(conn, trading_date, symbol, ctx):
+    """Upsert one day's market structure classification. component_values
+    holds the full combined dict (per-timeframe breakdown + summary) --
+    same "flat queryable columns + full JSONB detail" split as
+    sector_regime_history/security_regime_history."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO market_structure_history
+                (trading_date, symbol, trend, confidence, trend_strength, volatility,
+                 bos, choch, risk, component_values, calculation_version, computed_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            ON CONFLICT (trading_date, symbol) DO UPDATE SET
+                trend=EXCLUDED.trend,
+                confidence=EXCLUDED.confidence,
+                trend_strength=EXCLUDED.trend_strength,
+                volatility=EXCLUDED.volatility,
+                bos=EXCLUDED.bos,
+                choch=EXCLUDED.choch,
+                risk=EXCLUDED.risk,
+                component_values=EXCLUDED.component_values,
+                calculation_version=EXCLUDED.calculation_version,
+                computed_at=NOW()
+        """, (
+            trading_date, symbol, ctx.get("trend"), ctx.get("confidence"),
+            ctx.get("trend_strength"), ctx.get("volatility"), ctx.get("bos"), ctx.get("choch"),
+            ctx.get("risk"), Json(_json_safe(ctx)), CALCULATION_VERSION,
+        ))
+    conn.commit()
+
+
+def load_latest_market_structure(conn, symbol):
+    """Latest persisted market structure row for symbol, or None."""
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT * FROM market_structure_history
+                WHERE symbol=%s ORDER BY trading_date DESC LIMIT 1
+            """, (symbol,))
+            row = cur.fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def _f(v):
+    """NUMERIC columns come back as Decimal via psycopg2 -- cast to plain
+    float (None stays None) before it goes anywhere JSON-serialized. Same
+    helper shared/hierarchy_regime.py uses for the same reason."""
+    return float(v) if v is not None else None
+
+
+def snapshot_market_structure_for_symbol(conn, symbol):
+    """Assembles the per-proposal market structure snapshot from whatever's
+    latest-persisted (not recomputed live) -- update_market_structure is
+    expected to have already run this cycle, same "compute once, snapshot
+    read at proposal time" split as hierarchy_regime.snapshot_hierarchy_for_symbol.
+    Missing data degrades to an explicit insufficient_data/unknown shape
+    rather than blocking snapshot assembly."""
+    row = load_latest_market_structure(conn, symbol)
+    if not row:
+        return {
+            "symbol": symbol, "trend": "insufficient_data", "confidence": 0,
+            "trend_strength": "insufficient_data", "volatility": "insufficient_data",
+            "bos": False, "choch": False, "risk": "unknown",
+            "summary": "No market structure data yet",
+        }
+    component_values = row.get("component_values") or {}
+    return {
+        "symbol": symbol,
+        "trend": row.get("trend"),
+        "confidence": _f(row.get("confidence")),
+        "trend_strength": row.get("trend_strength"),
+        "volatility": row.get("volatility"),
+        "bos": row.get("bos"),
+        "choch": row.get("choch"),
+        "risk": row.get("risk"),
+        "summary": component_values.get("summary"),
+    }
+
+
+def update_market_structure(conn, symbols):
+    """Compute + persist today's market structure for every symbol. Each
+    symbol is isolated in its own try/except -- one bad symbol must never
+    stop the rest, mirroring hierarchy_regime.update_hierarchy_regime's
+    per-item isolation."""
+    today = date_cls.today()
+    for symbol in symbols:
+        try:
+            ctx = compute_market_structure(conn, symbol)
+            store_market_structure_day(conn, today, symbol, ctx)
+        except Exception as e:
+            log.warning(f"Market structure update failed for {symbol}: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass

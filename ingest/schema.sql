@@ -753,3 +753,41 @@ ON CONFLICT (key) DO NOTHING;
 INSERT INTO signal_params (key, value, description) VALUES
     ('loss_streak_limit', 4, 'Pause new BUY entries account-wide after this many consecutive losing closed positions in a row')
 ON CONFLICT (key) DO NOTHING;
+
+-- Market Structure Engine PR 2 (see shared/market_structure.py). One row
+-- per symbol per trading_date, same trading_date+key PRIMARY KEY /
+-- component_values-JSONB-plus-flat-columns / calculation_version split as
+-- sector_regime_history and security_regime_history above.
+-- component_values holds the full combined per-timeframe (monthly/weekly/
+-- daily) breakdown so a classification can be explained, not just
+-- trusted -- not just the flat columns duplicated here for querying.
+CREATE TABLE IF NOT EXISTS market_structure_history (
+    trading_date          DATE NOT NULL,
+    symbol                TEXT NOT NULL,
+    trend                 TEXT,
+    confidence             NUMERIC,
+    trend_strength        TEXT,
+    volatility            TEXT,
+    bos                   BOOLEAN,
+    choch                 BOOLEAN,
+    risk                  TEXT,
+    component_values      JSONB,
+    calculation_version   INTEGER NOT NULL DEFAULT 1,
+    computed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (trading_date, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_structure_history_symbol ON market_structure_history (symbol);
+
+-- Per-proposal snapshot of market structure at proposal time, same
+-- "computed once per cycle by update_market_structure(), read back (not
+-- recomputed live) at proposal time" pattern as regime_snapshot above.
+-- Snapshot-only for now -- market_structure_snapshot/structure_trend/
+-- structure_confidence do not feed score_signal() or any gate yet (see
+-- shared/market_structure.py's module docstring); a follow-up PR wires
+-- that in behind its own disabled-by-default signal_params flag, same
+-- precedent as regime_scoring_enabled.
+ALTER TABLE trade_proposals
+    ADD COLUMN IF NOT EXISTS market_structure_snapshot JSONB,
+    ADD COLUMN IF NOT EXISTS structure_trend            TEXT,
+    ADD COLUMN IF NOT EXISTS structure_confidence        INTEGER;
