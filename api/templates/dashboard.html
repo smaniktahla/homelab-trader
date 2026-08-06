@@ -215,6 +215,26 @@
   .regime-badge.insufficient_data { background:#1a1d27; color:#555; }
   .regime-badge.adj            { background:#22283a; color:#8fb4f7; }
 
+  /* Market Structure Engine badges -- separate class from .regime-badge
+     since the vocabulary differs (trend: bullish/bearish/mixed/
+     insufficient_data; trend_strength: weak/moderate/strong; risk:
+     low/medium/high) even where colors intentionally echo the same
+     bullish=green/bearish=red/neutral=gray semantics. Informational only
+     -- see shared/market_structure.py, not yet wired into scoring. */
+  .structure-badges { margin-top:4px; display:flex; flex-wrap:wrap; gap:4px; }
+  .structure-badge { display:inline-block; padding:1px 8px; border-radius:10px;
+    font-size:.68rem; font-weight:600; background:#1a1d27; color:#888; }
+  .structure-badge.bullish, .structure-badge.strong, .structure-badge.risk-low
+    { background:#1e2f22; color:#7fd99a; }
+  .structure-badge.bearish, .structure-badge.expansion, .structure-badge.risk-high,
+  .structure-badge.choch  { background:#2e1a10; color:#f0a060; }
+  .structure-badge.mixed, .structure-badge.moderate, .structure-badge.risk-medium
+    { background:#2a2410; color:#e0c060; }
+  .structure-badge.weak, .structure-badge.compression { background:#222; color:#888; }
+  .structure-badge.insufficient_data,
+  .structure-badge.unknown         { background:#1a1d27; color:#555; }
+  .structure-badge.bos             { background:#22283a; color:#8fb4f7; }
+
   .mkt-regime-wrap { position:relative; display:inline-flex; align-items:center; }
   .mkt-regime-wrap .mkt-tip {
     display:none; position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%);
@@ -770,6 +790,17 @@ async function loadProposals() {
           <span class="regime-badge ${rs.stock_regime?.classification || 'unknown'}">stock: ${(rs.stock_regime?.classification || 'unknown').replace(/_/g,' ')}</span>
           ${p.total_regime_adjustment ? `<span class="regime-badge adj">score ${p.total_regime_adjustment > 0 ? '+' : ''}${p.total_regime_adjustment}</span>` : ''}
         </div>` : '';
+      const ms = p.market_structure_snapshot;
+      const structureTip = 'Deterministic Monthly/Weekly/Daily swing structure -- informational, not yet used for scoring unless structure_scoring_enabled is on.';
+      const structureBadges = ms ? `
+        <div class="structure-badges" title="${structureTip}">
+          <span class="structure-badge ${ms.trend || 'insufficient_data'}">structure: ${(ms.trend || 'insufficient_data').replace(/_/g,' ')}</span>
+          ${ms.trend_strength && ms.trend_strength !== 'insufficient_data' ? `<span class="structure-badge ${ms.trend_strength}">${ms.trend_strength} trend</span>` : ''}
+          ${ms.risk && ms.risk !== 'unknown' ? `<span class="structure-badge risk-${ms.risk}">risk: ${ms.risk}</span>` : ''}
+          ${ms.bos ? `<span class="structure-badge bos">BOS</span>` : ''}
+          ${ms.choch ? `<span class="structure-badge choch">CHoCH</span>` : ''}
+          ${p.structure_score_adjustment ? `<span class="structure-badge bos">score ${p.structure_score_adjustment > 0 ? '+' : ''}${p.structure_score_adjustment}</span>` : ''}
+        </div>` : '';
       return `
       <div class="proposal-row">
         <div class="prop-info">
@@ -779,6 +810,7 @@ async function loadProposals() {
           ${estCost ? `<span style="color:#f7c94f;font-size:.82rem;margin-left:8px">${estCost}</span>` : ''}
           <div class="prop-meta">${cleanRationale || 'No rationale'}</div>
           ${regimeBadges}
+          ${structureBadges}
         </div>
         <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
           ${p.qty == null ? `<input id="prop-qty-${p.id}" type="number" min="0.001" step="0.001" placeholder="qty" style="width:70px;padding:4px 6px;background:#12151f;border:1px solid #4f8ef7;border-radius:4px;color:#e8eaf6;font-size:.85rem">` : ''}
