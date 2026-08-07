@@ -803,3 +803,19 @@ INSERT INTO signal_params (key, value, description) VALUES
     ('structure_choch_penalty', -10, 'Score adjustment when a change-of-character warning is active on daily or weekly structure'),
     ('structure_bos_bonus', 5, 'Score adjustment when a break-of-structure confirmation is active on daily or weekly structure')
 ON CONFLICT (key) DO NOTHING;
+
+-- Relative-strength risk eligibility filter (see shared/relative_strength_risk.py).
+-- RISK CONTROL ONLY, never a score adjustment -- backed by backtest_results
+-- experiment_ids 009/010/011: stock-vs-sector underperformance is
+-- associated with a materially higher stop-out rate and worse max
+-- drawdown, replicated across an independent window resample and an
+-- alternate relative-strength definition. Total return/Sharpe/Sortino
+-- improvements from gating did NOT replicate -- do not describe this
+-- feature as a return/alpha enhancement anywhere (dashboard, docs, PRs).
+-- Disabled by default: existing proposal generation/gating behavior is
+-- unchanged until a human flips relative_strength_risk_mode to 1 (gate)
+-- via PATCH /api/signal-params/relative_strength_risk_mode.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('relative_strength_risk_mode', 0, 'Relative-strength risk eligibility filter for mean_reversion buys: 0=off, 1=gate (reject underperforming_sector buys), 2=size_reduce (reserved, not implemented -- currently a no-op). Risk control only, never a score adjustment.'),
+    ('relative_strength_risk_size_reduce_pct', 0.5, 'Reserved for relative_strength_risk_mode=2 (size_reduce), not implemented yet')
+ON CONFLICT (key) DO NOTHING;

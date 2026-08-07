@@ -23,6 +23,9 @@ from hierarchy_regime import snapshot_hierarchy_for_symbol
 from regime_scoring import load_regime_scoring_params, compute_regime_adjustment
 from market_structure import snapshot_market_structure_for_symbol
 from structure_scoring import load_structure_scoring_params, compute_structure_adjustment
+from relative_strength_risk import load_relative_strength_risk_params, evaluate_relative_strength_risk
+from sector_mapping import get_sector_etf
+from regime_common import load_daily_series, pct_return
 
 log = logging.getLogger(__name__)
 
@@ -459,6 +462,33 @@ def _block_outcome(conn, outcome_id, reason):
     conn.commit()
 
 
+def _relative_strength_risk_detail(conn, sym, sector, vs_sector_classification):
+    """Human-readable diagnostic for a relative-strength gate rejection --
+    "Rejected proposals should remain visible in diagnostics/research
+    output, not silently discarded." Deliberately only computed on an
+    actual rejection (rare path, evaluate_relative_strength_risk already
+    filtered out everything else) rather than for every eligible symbol
+    every cycle -- the classification itself is already free (read from
+    the hierarchy snapshot computed once per cycle), this only adds one
+    extra DB read for the sector ETF's series, and only when actually
+    needed. Fails open to a shorter detail string, never raises."""
+    etf = get_sector_etf(sector) if sector else None
+    if not etf:
+        return f"sector={sector or 'unknown'} classification={vs_sector_classification}"
+    try:
+        _stock_dates, stock_closes = load_daily_series(conn, sym)
+        _sector_dates, sector_closes = load_daily_series(conn, etf)
+        stock_r20 = pct_return(stock_closes, 20)
+        sector_r20 = pct_return(sector_closes, 20)
+        if stock_r20 is not None and sector_r20 is not None:
+            rel = stock_r20 - sector_r20
+            return (f"sector={sector} etf={etf} classification={vs_sector_classification} "
+                    f"relative_strength_vs_{etf}={rel:+.1f}%")
+    except Exception as e:
+        log.warning(f"Relative-strength detail computation failed for {sym}: {e}")
+    return f"sector={sector} etf={etf} classification={vs_sector_classification}"
+
+
 def _record_risk_decision(conn, context, proposal_id, symbol, side, requested_qty, decision, market_overall):
     """Persist one shared/risk_engine.py::evaluate_proposal() result.
     Side-effecting only, never branched on here -- compute_signals()'s
@@ -761,6 +791,7 @@ def compute_signals(conn, symbols):
     sector_map = load_sector_map(conn, set(symbols) | set(positions.keys()))
     regime_params = load_regime_scoring_params(conn)
     structure_params = load_structure_scoring_params(conn)
+    rs_risk_params = load_relative_strength_risk_params(conn)
 
     # Portfolio's total planned dollar risk right now, before any of this
     # cycle's proposals -- fed into the risk engine's portfolio-open-risk
@@ -812,6 +843,16 @@ def compute_signals(conn, symbols):
             # shared/structure_scoring.py.
             market_structure_snapshot = snapshot_market_structure_for_symbol(conn, sym)
             structure_adj = compute_structure_adjustment(market_structure_snapshot, structure_params)
+
+            # Relative-strength risk eligibility filter (shared/relative_strength_risk.py)
+            # -- risk control only, never touches score/final_score. Also
+            # side-independent (reuses the classification already sitting
+            # in regime_snapshot from the hierarchy-regime read above, no
+            # extra computation for the common case); only applied on the
+            # buy side below. Backed by backtest_results 009/010/011 --
+            # see that module's docstring before changing the default.
+            vs_sector_classification = regime_snapshot["stock_regime"]["vs_sector_classification"]
+            rs_risk_decision = evaluate_relative_strength_risk(vs_sector_classification, rs_risk_params)
 
             for side in ("buy", "sell"):
                 score, rationale = score_signal(rsi, price, bb_upper, bb_lower, band_std, bb_middle,
@@ -907,6 +948,12 @@ def compute_signals(conn, symbols):
                     if cd_block:
                         log.info(f"Skipping buy proposal for {sym}: {cd_block}")
                         _block_outcome(conn, outcome_id, cd_block)
+                        continue
+                    if rs_risk_decision["reject"]:
+                        detail = _relative_strength_risk_detail(
+                            conn, sym, sector_map.get(sym), vs_sector_classification)
+                        log.info(f"Skipping buy proposal for {sym}: {rs_risk_decision['reason']} ({detail})")
+                        _block_outcome(conn, outcome_id, f"{rs_risk_decision['reason']}:{detail}")
                         continue
                     existing_mv = positions.get(sym, {}).get("market_value", 0.0)
                     qty, sizing_note = calc_buy_qty(price, cash, portfolio_value, existing_mv, p_gated)
