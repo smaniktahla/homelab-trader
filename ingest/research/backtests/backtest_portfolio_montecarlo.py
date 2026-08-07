@@ -164,12 +164,18 @@ def relative_strength(idx, closes, spy_dates, spy_closes, current_date, lookback
     return sym_ret - spy_ret
 
 
-def vs_sector_classification(sym, idx, dates, closes, sector_map, sector_series, spy_series):
-    """As-of stock-vs-sector relative strength, via the exact pure
+def vs_sector_classification(sym, idx, dates, closes, sector_map, sector_series, spy_series, classify_fn=None):
+    """As-of stock-vs-sector relative strength. Defaults to the exact pure
     classify_security_regime() the live hierarchical regime system and
     Experiments 007/009 already use -- same function, fed a historical
-    slice instead of a live/backfilled DB read. "unknown" (never gated/
-    resized) whenever the sector is unmapped or its ETF has no series."""
+    slice instead of a live/backfilled DB read. classify_fn is an optional
+    override with the same (stock_closes, sector_closes, market_closes) ->
+    {"vs_sector_classification": ...} signature, for Experiment 011's
+    definition-sensitivity check (alternate lookback windows/thresholds) --
+    None (the default everywhere else) always uses the real production
+    classifier. "unknown" (never gated/resized) whenever the sector is
+    unmapped or its ETF has no series."""
+    classify_fn = classify_fn or classify_security_regime
     sector = sector_map.get(sym)
     etf = get_sector_etf(sector) if sector else None
     if not etf or etf not in sector_series:
@@ -182,7 +188,7 @@ def vs_sector_classification(sym, idx, dates, closes, sector_map, sector_series,
     sector_closes_upto = sector_closes[:sec_i + 1] if sec_i is not None else []
     spy_i = asof_index(spy_dates, target_date)
     spy_closes_upto = spy_closes[:spy_i + 1] if spy_i is not None else []
-    ctx = classify_security_regime(stock_closes_upto, sector_closes_upto, spy_closes_upto)
+    ctx = classify_fn(stock_closes_upto, sector_closes_upto, spy_closes_upto)
     return ctx["vs_sector_classification"]
 
 
@@ -258,7 +264,7 @@ def execute_sell(ledger, sym, price, current_date, reason, trade_log):
 # ─────────────────────────────────────────────────────────────────────────
 
 def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sector_map, p, start_i, horizon_days,
-                         rs_policy=None, sector_series=None):
+                         rs_policy=None, sector_series=None, rs_classify_fn=None):
     """rs_policy=None (default) reproduces Experiment 003's exact existing
     behavior byte-for-byte -- every line below that references rs_policy is
     a no-op in that case. rs_policy is an optional dict enabling a
@@ -270,7 +276,11 @@ def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sec
         `size_multiplier` of the size the identical baseline sizing/risk-
         engine pipeline would have produced.
     sector_series (etf -> series) is required whenever rs_policy is set;
-    see load_sector_series()."""
+    see load_sector_series(). rs_classify_fn optionally overrides the
+    real classify_security_regime used to derive vs_sector_classification
+    (see vs_sector_classification()'s own docstring) -- None (the default)
+    uses the real production classifier; Experiment 011 passes an
+    alternate one to test definition sensitivity."""
     spy_dates, spy_closes, _, _ = spy_series
     qqq_dates, qqq_closes, _, _ = qqq_series
     vix_dates, vix_closes, _, _ = vix_series
@@ -412,7 +422,8 @@ def run_single_backtest(symbols, series, spy_series, qqq_series, vix_series, sec
             # identical to the rs_policy=None baseline either way.
             rs_size_multiplier = 1.0
             if rs_policy is not None:
-                vs_sector = vs_sector_classification(sym, idx, dates, closes, sector_map, sector_series, spy_series)
+                vs_sector = vs_sector_classification(sym, idx, dates, closes, sector_map, sector_series, spy_series,
+                                                       classify_fn=rs_classify_fn)
                 if vs_sector == "underperforming_sector":
                     if rs_policy["mode"] == "gate":
                         continue
