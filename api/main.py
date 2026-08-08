@@ -346,13 +346,50 @@ def _realized_pnl_by_trade_id(cur):
     return pnl
 
 
+def _lifecycle_dates_by_trade_id(cur):
+    """opened_at/closed_at of the position_lifecycles row each trade
+    belongs to, keyed by trade_id (covers both entry and exit trades) --
+    lets Trade History show a sell's paired entry date without
+    re-deriving FIFO matching. match_lifecycles() (shared/position_lifecycles.py)
+    already did that work, materialized every ingest cycle by
+    ingest/build_position_lifecycles.py; this is a pure read-side join via
+    position_trades, same pattern _all_closed_lifecycles/_open_lifecycle
+    already use. DISTINCT ON ... ORDER BY pl.id ASC picks one (the
+    earliest) lifecycle per trade_id for display purposes -- a trade
+    belonging to more than one lifecycle is a pyramiding/partial-fill edge
+    case the UI doesn't need to enumerate exhaustively.
+    Returns {trade_id: {"opened_at": dt, "closed_at": dt|None, "status": str}}."""
+    cur.execute("""
+        SELECT DISTINCT ON (pt.trade_id)
+               pt.trade_id, pl.opened_at, pl.closed_at, pl.status
+        FROM position_trades pt
+        JOIN position_lifecycles pl ON pl.id = pt.position_lifecycle_id
+        ORDER BY pt.trade_id, pl.id ASC
+    """)
+    return {r["trade_id"]: {"opened_at": r["opened_at"], "closed_at": r["closed_at"], "status": r["status"]}
+            for r in cur.fetchall()}
+
+
 @app.get("/api/trades")
-def get_trades(limit: int = 200):
+def get_trades(limit: int = 200, start: Optional[str] = None, end: Optional[str] = None):
+    """start/end (ISO datetimes) filter to a calendar period -- end is
+    exclusive so callers can pass [periodStart, nextPeriodStart) with no
+    off-by-one adjustment. limit stays an independent safety cap alongside
+    the date window, not a replacement for it."""
     with db() as conn, conn.cursor() as cur:
         pnl_by_id = _realized_pnl_by_trade_id(cur)
-        cur.execute("""
-            SELECT * FROM trades ORDER BY traded_at DESC LIMIT %s
-        """, (limit,))
+        lifecycle_by_id = _lifecycle_dates_by_trade_id(cur)
+        if start or end:
+            cur.execute("""
+                SELECT * FROM trades
+                WHERE (%(start)s IS NULL OR traded_at >= %(start)s)
+                  AND (%(end)s IS NULL OR traded_at < %(end)s)
+                ORDER BY traded_at DESC LIMIT %(limit)s
+            """, {"start": start, "end": end, "limit": limit})
+        else:
+            cur.execute("""
+                SELECT * FROM trades ORDER BY traded_at DESC LIMIT %s
+            """, (limit,))
         trades = cur.fetchall()
         for t in trades:
             realized = pnl_by_id.get(t["id"])
@@ -361,6 +398,10 @@ def get_trades(limit: int = 200):
             # Cost basis is only known for part of the sale (e.g. shares held
             # before trade logging started) when this is less than t["qty"].
             t["realized_qty"] = realized[2] if realized else None
+            lc = lifecycle_by_id.get(t["id"])
+            t["lifecycle_opened_at"] = lc["opened_at"] if lc else None
+            t["lifecycle_closed_at"] = lc["closed_at"] if lc else None
+            t["lifecycle_status"] = lc["status"] if lc else None
         return trades
 
 _PORTFOLIO_HISTORY_RANGE_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365, "3y": 1095, "5y": 1825}

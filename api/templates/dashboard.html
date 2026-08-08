@@ -571,7 +571,20 @@
 
   <!-- Trade History -->
   <div id="page-history" style="display:none">
-  <h2>Trade History</h2>
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px">
+    <h2 style="margin:0">Trade History</h2>
+    <div style="display:flex;align-items:center;gap:14px">
+      <div style="display:flex;align-items:center;gap:6px">
+        <button onclick="shiftTradeHistoryPeriod(-1)" style="background:transparent;border:1px solid #2a2d3a;color:#888;border-radius:4px;padding:2px 8px;cursor:pointer">&lt;</button>
+        <span id="trade-history-period-label" style="font-size:.85rem;color:#ccc;min-width:170px;text-align:center"></span>
+        <button onclick="shiftTradeHistoryPeriod(1)" style="background:transparent;border:1px solid #2a2d3a;color:#888;border-radius:4px;padding:2px 8px;cursor:pointer">&gt;</button>
+      </div>
+      <div class="range-btns" style="margin-bottom:0">
+        <button class="range-btn active" id="th-gran-week" onclick="setTradeHistoryGranularity('week')">Week</button>
+        <button class="range-btn" id="th-gran-month" onclick="setTradeHistoryGranularity('month')">Month</button>
+      </div>
+    </div>
+  </div>
   <table>
     <thead><tr>
       <th>Time</th><th>Symbol</th><th>Side</th><th>Status</th>
@@ -1166,6 +1179,59 @@ async function loadLeaderboard() {
 }
 
 // ── Trade History ──────────────────────────────────────────────────
+// Week/Month calendar-period navigation -- distinct from the Portfolio
+// chart's trailing-range picker (range-btns reused for the toggle's look,
+// but this pages backward/forward through specific calendar periods
+// rather than "last N days from now"). Plain Date arithmetic, no library.
+let tradeHistoryGranularity = 'week';   // 'week' | 'month'
+let tradeHistoryPeriodStart = null;     // Date, normalized to period start
+
+function _startOfWeek(d) {  // Monday-anchored
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const dow = (x.getDay() + 6) % 7;  // Mon=0 .. Sun=6
+  x.setDate(x.getDate() - dow);
+  return x;
+}
+function _startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
+function _periodBounds(granularity, start) {
+  const s = new Date(start);
+  const e = new Date(s);
+  if (granularity === 'week') e.setDate(e.getDate() + 7);
+  else e.setMonth(e.getMonth() + 1);
+  return [s, e];
+}
+function _periodLabel(granularity, start) {
+  const [s, e] = _periodBounds(granularity, start);
+  if (granularity === 'month') return s.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const endIncl = new Date(e);
+  endIncl.setDate(endIncl.getDate() - 1);
+  const fmtDay = d => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  // A week can straddle a year boundary (e.g. Dec 28 - Jan 3) -- show both
+  // years rather than silently mislabeling the later date.
+  const years = s.getFullYear() === endIncl.getFullYear()
+    ? `${s.getFullYear()}`
+    : `${s.getFullYear()}–${endIncl.getFullYear()}`;
+  return `Week of ${fmtDay(s)} – ${fmtDay(endIncl)}, ${years}`;
+}
+
+function setTradeHistoryGranularity(g) {
+  if (g === tradeHistoryGranularity) return;
+  tradeHistoryGranularity = g;
+  const now = new Date();
+  tradeHistoryPeriodStart = g === 'week' ? _startOfWeek(now) : _startOfMonth(now);
+  document.getElementById('th-gran-week').classList.toggle('active', g === 'week');
+  document.getElementById('th-gran-month').classList.toggle('active', g === 'month');
+  loadTrades();
+}
+
+function shiftTradeHistoryPeriod(dir) {
+  const s = new Date(tradeHistoryPeriodStart);
+  if (tradeHistoryGranularity === 'week') s.setDate(s.getDate() + 7 * dir);
+  else s.setMonth(s.getMonth() + dir);
+  tradeHistoryPeriodStart = s;
+  loadTrades();
+}
+
 // Groups all trades for a symbol together (oldest first within the group,
 // so a buy always sits above a later sell of the same symbol) rather than
 // one flat time-ordered list. Groups themselves stay ordered by their most
@@ -1186,9 +1252,13 @@ function _groupTradesBySymbol(trades) {
 
 async function loadTrades() {
   const tbody = document.getElementById('trades-body');
+  if (!tradeHistoryPeriodStart) tradeHistoryPeriodStart = _startOfWeek(new Date());
+  const [start, end] = _periodBounds(tradeHistoryGranularity, tradeHistoryPeriodStart);
+  document.getElementById('trade-history-period-label').textContent = _periodLabel(tradeHistoryGranularity, tradeHistoryPeriodStart);
   try {
-    const trades = await fetch('/api/trades?limit=50').then(r => r.json());
-    if (!trades.length) { tbody.innerHTML = '<tr><td colspan="9" class="no-data">No trades yet.</td></tr>'; return; }
+    const url = `/api/trades?limit=500&start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}`;
+    const trades = await fetch(url).then(r => r.json());
+    if (!trades.length) { tbody.innerHTML = '<tr><td colspan="9" class="no-data">No trades in this period.</td></tr>'; return; }
 
     const groups = _groupTradesBySymbol(trades);
     tbody.innerHTML = groups.map((g, gi) => {
@@ -1207,8 +1277,19 @@ async function loadTrades() {
         const pnlBadge = (t.side === 'sell' && t.realized_pnl != null)
           ? ` <span class="badge ${t.realized_pnl > 0 ? 'badge-win' : 'badge-loss'}" ${partialNote ? `title="Cost basis only known for ${fmt(t.realized_qty,0)} of the ${fmt(t.qty,0)} shares sold — the rest were likely held before trade logging started"` : ''}>${t.realized_pnl > 0 ? 'WIN' : 'LOSS'} ${t.realized_pnl >= 0 ? '+' : ''}${fmtUSD(t.realized_pnl)} (${t.realized_pnl_pct >= 0 ? '+' : ''}${t.realized_pnl_pct}%)${partialNote}</span>`
           : '';
+        // Pairs a sell with the entry date of the position_lifecycle it
+        // closed/reduced (shared/position_lifecycles.py's already-computed
+        // FIFO match, joined in via GET /api/trades' lifecycle_* fields) --
+        // sell-rows only, since a buy row already IS the "bought" event.
+        const pairingLine = (t.side === 'sell' && t.lifecycle_opened_at)
+          ? `<div style="font-size:.72rem;color:#666;margin-top:2px">Bought ${new Date(t.lifecycle_opened_at).toLocaleDateString()} → ${
+              t.lifecycle_status === 'closed' && t.lifecycle_closed_at
+                ? `Sold ${new Date(t.lifecycle_closed_at).toLocaleDateString()} (${Math.round((new Date(t.lifecycle_closed_at) - new Date(t.lifecycle_opened_at)) / 86400000)}d)`
+                : 'still open'
+            }</div>`
+          : '';
         return `<tr class="${rowClass}">
-          <td style="color:#555">${new Date(t.traded_at).toLocaleString()}</td>
+          <td style="color:#555">${new Date(t.traded_at).toLocaleString()}${pairingLine}</td>
           <td>${symbolCell}</td>
           <td class="${dir}" style="font-weight:600">${t.side.toUpperCase()}</td>
           <td style="font-size:.8rem">${statusBadge(t.status)}${pnlBadge}</td>
