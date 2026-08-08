@@ -61,8 +61,21 @@
      triggers, the existing counter-trend penalty, ATR dislocation, sizing)
      -- kept at full visual weight, directly below the headline. */
   .decision-factors { margin-top: 4px; }
+  .decision-factors-label { font-size: .65rem; text-transform: uppercase; letter-spacing: .04em;
+    color: #556; margin-bottom: 3px; }
   .decision-factor { font-size: .78rem; color: #aaa; line-height: 1.5; }
   .decision-factor.warn { color: #e0a050; }
+  .decision-factor.sizing { color: #f7c94f; margin-top: 2px; }
+
+  /* Sub-headers inside Trade Thesis: separates the positive triggers that
+     earned the score from the penalties already netted into that same
+     score, so a heavily-penalized-but-still-qualifying proposal doesn't
+     visually read as "mostly warnings, no real reason to buy." */
+  .thesis-group-label { font-size: .62rem; text-transform: uppercase; letter-spacing: .04em;
+    margin: 8px 0 2px; }
+  .thesis-group-label.positive { color: #5a9c72; }
+  .thesis-group-label.caution { color: #b58a52; }
+  .thesis-group-label:first-child { margin-top: 2px; }
 
   /* Market Context: research signals (hierarchy regime, Market Structure
      trend/BOS/CHoCH) -- collected and displayed, but not wired into score/
@@ -251,6 +264,32 @@
   .structure-badge.insufficient_data,
   .structure-badge.unknown         { background:#1a1d27; color:#555; }
   .structure-badge.bos             { background:#22283a; color:#8fb4f7; }
+
+  /* Portfolio-aware proposal priority/clustering (shared/proposal_ranking.py)
+     -- reorders and labels proposals already returned by GET /api/proposals,
+     never blocks/rejects anything (approve/reject stays fully manual).
+     Colors intentionally echo .regime-badge's bullish=green/neutral=amber/
+     bearish=red semantics for a consistent visual language. */
+  .priority-stars { color:#f7c94f; font-size:.85rem; letter-spacing:1px; }
+  .action-badge { display:inline-block; font-size:.7rem; font-weight:700;
+    padding:2px 9px; border-radius:12px; margin-left:6px; }
+  .action-badge.action-strong-buy { background:#1a3a2a; color:#3ecf6e; }
+  .action-badge.action-buy        { background:#1e2f22; color:#7fd99a; }
+  .action-badge.action-watch      { background:#2a2410; color:#e0c060; }
+  .action-badge.action-skip       { background:#1a1d27; color:#888; }
+  .action-badge.action-sell       { background:#2e1a10; color:#f0a060; }
+  .competes-with { font-size:.72rem; color:#888; margin-top:4px; font-style:italic; }
+
+  .proposal-cluster { margin-bottom:14px; }
+  .proposal-cluster:last-child { margin-bottom:0; }
+  .cluster-header { font-size:.68rem; text-transform:uppercase; letter-spacing:.04em;
+    color:#888; margin-bottom:4px; }
+  .cluster-alternatives-toggle { font-size:.75rem; color:#4f8ef7; cursor:pointer;
+    padding:4px 0; user-select:none; }
+  .cluster-alternatives { display:none; }
+  .cluster-alternatives.open { display:block; }
+  .proposal-row.compact { padding:6px 0; opacity:.85; }
+  .proposal-row.compact .prop-info strong { font-size:.85rem; }
 
   .mkt-regime-wrap { position:relative; display:inline-flex; align-items:center; }
   .mkt-regime-wrap .mkt-tip {
@@ -777,105 +816,208 @@ async function generateRecommendations() {
   loadProposals();
 }
 
-async function loadProposals() {
+// propRows/propBuyingPower hold the last successful fetch; renderProposals()
+// does all sort/group/render work off of them -- same fetch/store/render
+// split the Leaderboard (lbRows/renderLeaderboard) and Positions
+// (posRows/renderPositions) sections already use.
+let propRows = [];
+let propBuyingPower = null;
+
+function _proposalCard(p, expanded) {
+  const estCost = (p.qty != null && p.current_price != null)
+    ? `~$${(p.qty * p.current_price).toLocaleString('en-US', {maximumFractionDigits:0})} @ $${parseFloat(p.current_price).toFixed(2)}`
+    : '';
+  const priorityStars = p.priority_stars
+    ? `<span class="priority-stars" title="${p.priority_label || ''}">${p.priority_stars}</span>` : '';
+  const actionSlug = (p.recommended_action || '').toLowerCase().replace(/\s+/g, '-');
+  const actionBadge = p.recommended_action
+    ? `<span class="action-badge action-${actionSlug}">${p.recommended_action}</span>` : '';
+
+  if (!expanded) {
+    // Collapsed cluster alternative: one compact line, no decision-factors/
+    // market-context detail -- expand the top pick instead to see those.
+    return `
+    <div class="proposal-row compact">
+      <div class="prop-info">
+        <strong>${p.qty ?? '?'} <a href="/symbol/${p.symbol}">${p.symbol}</a></strong>
+        ${priorityStars} ${actionBadge}
+        ${estCost ? `<span style="color:#888;font-size:.78rem;margin-left:8px">${estCost}</span>` : ''}
+      </div>
+      <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
+        <button class="btn-sm btn-buy" onclick="approveProposal(${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
+        <button class="btn-sm btn-sell" onclick="rejectProposal(${p.id})">Reject</button>
+      </div>
+    </div>`;
+  }
+
+  const exitTag = p.exit_reason ? `<span style="font-size:.75rem;padding:2px 6px;border-radius:3px;margin-left:6px;background:#2a2d3e;color:#aaa">${p.exit_reason.replace('_',' ')}</span>` : '';
+  // Strip the stale dollar amount from the rationale tail (everything after "; sized")
+  const cleanRationale = (p.rationale || '').replace(/;\s*sized.*$/, '');
+  const rs = p.regime_snapshot;
+  const ms = p.market_structure_snapshot;
+
+  // Trade Thesis vs Market Context: score_signal()'s rationale string IS
+  // the literal, currently-weighted evidence that produced this score
+  // (RSI/BB triggers, the existing dual-SMA counter-trend penalty, ATR
+  // dislocation) -- these are real decision inputs today. Everything in
+  // regimeBadges/structureBadges below (hierarchy regime, Market Structure
+  // trend/BOS/CHoCH) is collected, displayed, and NOT wired into score/
+  // gating/sizing unless regime_scoring_enabled/structure_scoring_enabled
+  // are explicitly flipped on (both stay off by default) -- research
+  // signals, not decision signals, shown with visibly lower priority so
+  // the card stops implying they're equally load-bearing.
+  //
+  // Split into "why this qualifies" (the positive triggers that actually
+  // earned the score) vs "penalties already applied" (counter-trend/
+  // dislocation/relative-strength deductions netted INTO that same score,
+  // not independent red flags against the trade) -- a flat mixed list
+  // made low-scoring, correctly-penalized proposals read as "mostly
+  // warnings, no real reason to buy" even when the positive triggers were
+  // there the whole time. ok/caution classification is a soft heuristic
+  // (keyword match on score_signal's own wording, e.g. "penalized"), not
+  // a new scoring signal -- purely presentational.
+  const WARN_KEYWORDS = ['penalized', 'possible fundamental weakness', 'reduces', 'override',
+                          'less meaningful', 'catch-falling-knife', 'large dislocation'];
+  const rawFactors = (cleanRationale || '').split(/;\s*/).filter(f => f.trim());
+  const positiveFactors = rawFactors.filter(f => !WARN_KEYWORDS.some(k => f.toLowerCase().includes(k)));
+  const cautionFactors = rawFactors.filter(f => WARN_KEYWORDS.some(k => f.toLowerCase().includes(k)));
+  const rsExperimentalWarn = rs?.stock_regime?.vs_sector_classification === 'underperforming_sector';
+  if (rsExperimentalWarn) {
+    cautionFactors.push('Experimental: stock underperforming its sector (relative_strength_risk_mode gate not yet enabled)');
+  }
+  const sizingLine = (p.qty != null && estCost) ? `Position sized: ${p.qty} shares (${estCost})` : null;
+  const decisionFactorsHtml = (positiveFactors.length || cautionFactors.length) ? `
+    <div class="decision-factors">
+      <div class="decision-factors-label">Trade Thesis</div>
+      ${positiveFactors.length ? `
+        <div class="thesis-group-label positive">Why this qualifies</div>
+        ${positiveFactors.map(f => `<div class="decision-factor ok">✓ ${f}</div>`).join('')}` : ''}
+      ${cautionFactors.length ? `
+        <div class="thesis-group-label caution">Penalties already applied to this score</div>
+        ${cautionFactors.map(f => `<div class="decision-factor warn">⚠ ${f}</div>`).join('')}` : ''}
+      ${sizingLine ? `<div class="decision-factor sizing">${sizingLine}</div>` : ''}
+    </div>` : `<div class="prop-meta">No rationale</div>`;
+
+  const regimeTip = 'Reflects recent measured conditions, not a prediction. Research signal -- not wired into score/gating unless regime_scoring_enabled is on (off by default).';
+  const regimeBadges = rs ? `
+    <div class="regime-badges" title="${regimeTip}">
+      <span class="regime-badge ${rs.market_regime?.classification || 'unknown'}">mkt: ${(rs.market_regime?.classification || 'unknown').replace(/_/g,' ')}</span>
+      <span class="regime-badge ${rs.sector_regime?.classification || 'unknown'}">sector: ${(rs.sector_regime?.classification || 'unknown').replace(/_/g,' ')}</span>
+      <span class="regime-badge ${rs.stock_regime?.classification || 'unknown'}">stock: ${(rs.stock_regime?.classification || 'unknown').replace(/_/g,' ')}</span>
+      ${p.total_regime_adjustment ? `<span class="regime-badge adj">score ${p.total_regime_adjustment > 0 ? '+' : ''}${p.total_regime_adjustment}</span>` : ''}
+    </div>` : '';
+  const structureTip = 'Deterministic Monthly/Weekly/Daily swing structure -- research signal, not wired into score unless structure_scoring_enabled is on (off by default).';
+  const structureBadges = ms ? `
+    <div class="structure-badges" title="${structureTip}">
+      <span class="structure-badge ${ms.trend || 'insufficient_data'}">structure: ${(ms.trend || 'insufficient_data').replace(/_/g,' ')}</span>
+      ${ms.trend_strength && ms.trend_strength !== 'insufficient_data' ? `<span class="structure-badge ${ms.trend_strength}">${ms.trend_strength} trend</span>` : ''}
+      ${ms.risk && ms.risk !== 'unknown' ? `<span class="structure-badge risk-${ms.risk}">risk: ${ms.risk}</span>` : ''}
+      ${ms.bos ? `<span class="structure-badge bos">BOS</span>` : ''}
+      ${ms.choch ? `<span class="structure-badge choch">CHoCH</span>` : ''}
+      ${p.structure_score_adjustment ? `<span class="structure-badge bos">score ${p.structure_score_adjustment > 0 ? '+' : ''}${p.structure_score_adjustment}</span>` : ''}
+    </div>` : '';
+  const marketContextHtml = (rs || ms) ? `
+    <div class="market-context">
+      <div class="market-context-label" title="Collected for research; not yet demonstrated to improve proposal quality -- see backtest_results experiments 007/008/009.">Market Context (research, not decision inputs)</div>
+      ${regimeBadges}
+      ${structureBadges}
+    </div>` : '';
+  const opportunityCostHtml = p.opportunity_cost_note
+    ? `<div class="competes-with">${p.opportunity_cost_note}</div>` : '';
+
+  return `
+  <div class="proposal-row">
+    <div class="prop-info">
+      <strong>${p.side.toUpperCase()} ${p.qty ?? '?'} <a href="/symbol/${p.symbol}">${p.symbol}</a></strong>
+      ${exitTag}
+      &nbsp;<span style="color:#888;font-size:.8rem">score ${p.signal_score ?? '—'}</span>
+      ${priorityStars} ${actionBadge}
+      ${estCost ? `<span style="color:#f7c94f;font-size:.82rem;margin-left:8px">${estCost}</span>` : ''}
+      ${opportunityCostHtml}
+      ${decisionFactorsHtml}
+      ${marketContextHtml}
+    </div>
+    <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
+      ${p.qty == null ? `<input id="prop-qty-${p.id}" type="number" min="0.001" step="0.001" placeholder="qty" style="width:70px;padding:4px 6px;background:#12151f;border:1px solid #4f8ef7;border-radius:4px;color:#e8eaf6;font-size:.85rem">` : ''}
+      <button class="btn-sm btn-buy" onclick="approveProposal(${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
+      <button class="btn-sm btn-sell" onclick="rejectProposal(${p.id})">Reject</button>
+    </div>
+  </div>`;
+}
+
+function _proposalScore(p) {
+  // Mirrors shared/proposal_ranking.py::_proposal_score -- prefer the
+  // regime/structure-adjusted score when present, else the base score.
+  if (p.final_proposal_score != null) return Number(p.final_proposal_score);
+  if (p.signal_score != null) return Number(p.signal_score);
+  return 0;
+}
+
+function renderProposals() {
   const wrap = document.getElementById('proposals-wrap');
   const list = document.getElementById('proposals-list');
+  wrap.style.display = 'block';
+
+  if (!propRows.length) { _renderNoProposalsState('No pending recommendations.'); return; }
+
+  _updateCashBar(propBuyingPower, propRows);
+
+  const sells = propRows.filter(p => p.side === 'sell');
+  const buys = propRows.filter(p => p.side === 'buy');
+
+  // Group buys that share a cluster_id (sector clusters with >1 member);
+  // everything else (singletons, unmapped sectors) renders as a normal
+  // standalone card.
+  const clusters = new Map();
+  const singles = [];
+  for (const p of buys) {
+    if (p.cluster_id) {
+      if (!clusters.has(p.cluster_id)) clusters.set(p.cluster_id, []);
+      clusters.get(p.cluster_id).push(p);
+    } else {
+      singles.push(p);
+    }
+  }
+
+  // Render clusters and standalone singles as one strongest-to-weakest
+  // list, keyed off each unit's best/only proposal -- a high-priority
+  // single symbol must not get buried below a lower-priority sector
+  // cluster just because clusters used to render as a separate block.
+  const units = [];
+  for (const members of clusters.values()) {
+    members.sort((a, b) => (a.cluster_rank ?? 0) - (b.cluster_rank ?? 0));
+    const best = members[0];
+    units.push({ tier: best.priority_tier ?? 99, score: _proposalScore(best), symbol: best.symbol, members });
+  }
+  for (const p of singles) {
+    units.push({ tier: p.priority_tier ?? 99, score: _proposalScore(p), symbol: p.symbol, members: [p] });
+  }
+  units.sort((a, b) => (a.tier - b.tier) || (b.score - a.score) || a.symbol.localeCompare(b.symbol));
+
+  const unitsHtml = units.map(({ members }) => {
+    const best = members[0];
+    const rest = members.slice(1);
+    if (!rest.length) return _proposalCard(best, true);
+    const toggleId = `cluster-alts-${best.id}`;
+    return `
+    <div class="proposal-cluster">
+      <div class="cluster-header">${best.cluster_label || ''}</div>
+      ${_proposalCard(best, true)}
+      <div class="cluster-alternatives-toggle" onclick="document.getElementById('${toggleId}').classList.toggle('open')">${rest.length} more in ${(best.cluster_label || '').split(' (')[0]} ▾</div>
+      <div class="cluster-alternatives" id="${toggleId}">${rest.map(p => _proposalCard(p, false)).join('')}</div>
+    </div>`;
+  }).join('');
+
+  list.innerHTML = unitsHtml + sells.map(p => _proposalCard(p, true)).join('');
+}
+
+async function loadProposals() {
+  const wrap = document.getElementById('proposals-wrap');
   try {
     const resp = await fetch('/api/proposals').then(r => r.json());
-    const proposals = resp.proposals ?? resp;  // backwards compat
-    const buyingPower = resp.buying_power ?? null;
-
-    wrap.style.display = 'block';
-
-    if (!proposals.length) { _renderNoProposalsState('No pending recommendations.'); return; }
-
-    _updateCashBar(buyingPower, proposals);
-
-    list.innerHTML = proposals.map(p => {
-      const estCost = (p.qty != null && p.current_price != null)
-        ? `~$${(p.qty * p.current_price).toLocaleString('en-US', {maximumFractionDigits:0})} @ $${parseFloat(p.current_price).toFixed(2)}`
-        : '';
-      const exitTag = p.exit_reason ? `<span style="font-size:.75rem;padding:2px 6px;border-radius:3px;margin-left:6px;background:#2a2d3e;color:#aaa">${p.exit_reason.replace('_',' ')}</span>` : '';
-      // Strip the stale dollar amount from the rationale tail (everything after "; sized")
-      const cleanRationale = (p.rationale || '').replace(/;\s*sized.*$/, '');
-      const rs = p.regime_snapshot;
-      const ms = p.market_structure_snapshot;
-
-      // Decision Factors vs Market Context: score_signal()'s rationale
-      // string IS the literal, currently-weighted evidence that produced
-      // this score (RSI/BB triggers, the existing dual-SMA counter-trend
-      // penalty, ATR dislocation) -- these are real decision inputs today.
-      // Everything in regimeBadges/structureBadges below (hierarchy
-      // regime, Market Structure trend/BOS/CHoCH) is collected, displayed,
-      // and NOT wired into score/gating/sizing unless regime_scoring_enabled/
-      // structure_scoring_enabled are explicitly flipped on (both stay off
-      // by default) -- research signals, not decision signals, and shown
-      // with visibly lower priority so the card stops implying they're
-      // equally load-bearing. Fragment-level ok/warn is a soft heuristic
-      // (keyword match on score_signal's own wording, e.g. "penalized"),
-      // not a new scoring signal -- purely presentational.
-      const WARN_KEYWORDS = ['penalized', 'possible fundamental weakness', 'reduces', 'override',
-                              'less meaningful', 'catch-falling-knife', 'large dislocation'];
-      const decisionFactors = (cleanRationale || '').split(/;\s*/).filter(f => f.trim()).map(f => ({
-        text: f, warn: WARN_KEYWORDS.some(k => f.toLowerCase().includes(k)),
-      }));
-      if (p.qty != null && estCost) {
-        decisionFactors.push({ text: `Position sized: ${p.qty} shares (${estCost})`, warn: false });
-      }
-      const rsExperimentalWarn = rs?.stock_regime?.vs_sector_classification === 'underperforming_sector';
-      if (rsExperimentalWarn) {
-        decisionFactors.push({
-          text: 'Experimental: stock underperforming its sector (relative_strength_risk_mode gate not yet enabled)',
-          warn: true,
-        });
-      }
-      const decisionFactorsHtml = decisionFactors.length ? `
-        <div class="decision-factors">
-          ${decisionFactors.map(d => `<div class="decision-factor ${d.warn ? 'warn' : 'ok'}">${d.warn ? '⚠' : '✓'} ${d.text}</div>`).join('')}
-        </div>` : `<div class="prop-meta">No rationale</div>`;
-
-      const regimeTip = 'Reflects recent measured conditions, not a prediction. Research signal -- not wired into score/gating unless regime_scoring_enabled is on (off by default).';
-      const regimeBadges = rs ? `
-        <div class="regime-badges" title="${regimeTip}">
-          <span class="regime-badge ${rs.market_regime?.classification || 'unknown'}">mkt: ${(rs.market_regime?.classification || 'unknown').replace(/_/g,' ')}</span>
-          <span class="regime-badge ${rs.sector_regime?.classification || 'unknown'}">sector: ${(rs.sector_regime?.classification || 'unknown').replace(/_/g,' ')}</span>
-          <span class="regime-badge ${rs.stock_regime?.classification || 'unknown'}">stock: ${(rs.stock_regime?.classification || 'unknown').replace(/_/g,' ')}</span>
-          ${p.total_regime_adjustment ? `<span class="regime-badge adj">score ${p.total_regime_adjustment > 0 ? '+' : ''}${p.total_regime_adjustment}</span>` : ''}
-        </div>` : '';
-      const structureTip = 'Deterministic Monthly/Weekly/Daily swing structure -- research signal, not wired into score unless structure_scoring_enabled is on (off by default).';
-      const structureBadges = ms ? `
-        <div class="structure-badges" title="${structureTip}">
-          <span class="structure-badge ${ms.trend || 'insufficient_data'}">structure: ${(ms.trend || 'insufficient_data').replace(/_/g,' ')}</span>
-          ${ms.trend_strength && ms.trend_strength !== 'insufficient_data' ? `<span class="structure-badge ${ms.trend_strength}">${ms.trend_strength} trend</span>` : ''}
-          ${ms.risk && ms.risk !== 'unknown' ? `<span class="structure-badge risk-${ms.risk}">risk: ${ms.risk}</span>` : ''}
-          ${ms.bos ? `<span class="structure-badge bos">BOS</span>` : ''}
-          ${ms.choch ? `<span class="structure-badge choch">CHoCH</span>` : ''}
-          ${p.structure_score_adjustment ? `<span class="structure-badge bos">score ${p.structure_score_adjustment > 0 ? '+' : ''}${p.structure_score_adjustment}</span>` : ''}
-        </div>` : '';
-      const marketContextHtml = (rs || ms) ? `
-        <div class="market-context">
-          <div class="market-context-label" title="Collected for research; not yet demonstrated to improve proposal quality -- see backtest_results experiments 007/008/009.">Market Context (research, not decision inputs)</div>
-          ${regimeBadges}
-          ${structureBadges}
-        </div>` : '';
-
-      return `
-      <div class="proposal-row">
-        <div class="prop-info">
-          <strong>${p.side.toUpperCase()} ${p.qty ?? '?'} <a href="/symbol/${p.symbol}">${p.symbol}</a></strong>
-          ${exitTag}
-          &nbsp;<span style="color:#888;font-size:.8rem">score ${p.signal_score ?? '—'}</span>
-          ${estCost ? `<span style="color:#f7c94f;font-size:.82rem;margin-left:8px">${estCost}</span>` : ''}
-          ${decisionFactorsHtml}
-          ${marketContextHtml}
-        </div>
-        <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
-          ${p.qty == null ? `<input id="prop-qty-${p.id}" type="number" min="0.001" step="0.001" placeholder="qty" style="width:70px;padding:4px 6px;background:#12151f;border:1px solid #4f8ef7;border-radius:4px;color:#e8eaf6;font-size:.85rem">` : ''}
-          <button class="btn-sm btn-buy" onclick="approveProposal(${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
-          <button class="btn-sm btn-sell" onclick="rejectProposal(${p.id})">Reject</button>
-        </div>
-      </div>`;
-    }).join('');
+    propRows = resp.proposals ?? resp;  // backwards compat
+    propBuyingPower = resp.buying_power ?? null;
+    renderProposals();
   } catch(e) {
     wrap.style.display = 'none';
   }

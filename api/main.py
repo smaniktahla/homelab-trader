@@ -16,6 +16,7 @@ from security_regime import load_latest_security_regime
 import risk_engine
 import trading_permission
 import circuit_breaker
+import proposal_ranking
 
 log = logging.getLogger(__name__)
 
@@ -668,13 +669,57 @@ def get_account():
         "total_trade_cost": total_cost,
     }
 
+def _build_proposal_price_map(cur, proposals, alpaca_positions, pending_orders):
+    """Best-known price per symbol touched by proposal ranking: a
+    proposal's own current_price (already the freshest price_history
+    join) wins first, falls back to the symbol's live Alpaca position
+    price, falls back to a price_history lookup for pending-order-only
+    symbols with no other source. Symbols with genuinely no price
+    anywhere are simply absent -- proposal_ranking.py treats that as
+    unknown-cost and fails open, never guesses."""
+    price_map = {}
+    for p in proposals:
+        if p.get("current_price") is not None:
+            price_map[p["symbol"]] = float(p["current_price"])
+    for pos in alpaca_positions:
+        price_map.setdefault(pos["symbol"], float(pos["current_price"]))
+    missing = {o["symbol"] for o in pending_orders} - set(price_map)
+    if missing:
+        cur.execute("""
+            SELECT DISTINCT ON (symbol) symbol, close
+            FROM price_history WHERE symbol = ANY(%s)
+            ORDER BY symbol, ts DESC
+        """, (list(missing),))
+        for r in cur.fetchall():
+            price_map[r["symbol"]] = float(r["close"])
+    return price_map
+
+
+def _load_latest_risk_decisions(cur, proposal_ids):
+    """Latest context='proposal_generated' risk_decisions row per proposal
+    -- a read-only signal for proposal_ranking.py, never recomputed or
+    overridden here."""
+    if not proposal_ids:
+        return {}
+    cur.execute("""
+        SELECT DISTINCT ON (proposal_id) proposal_id, outcome, binding_constraint
+        FROM risk_decisions
+        WHERE proposal_id = ANY(%s) AND context = 'proposal_generated'
+        ORDER BY proposal_id, id DESC
+    """, (proposal_ids,))
+    return {r["proposal_id"]: {"outcome": r["outcome"], "binding_constraint": r["binding_constraint"]}
+            for r in cur.fetchall()}
+
+
 @app.get("/api/proposals")
 def get_proposals():
     # Fetch live buying power so the frontend can show a running cash balance
     buying_power = None
+    portfolio_value = None
     try:
         acct = alpaca("GET", "/v2/account")
         buying_power = float(acct.get("buying_power", acct.get("cash", 0)))
+        portfolio_value = float(acct.get("portfolio_value", 0)) or None
     except Exception:
         pass
 
@@ -692,6 +737,36 @@ def get_proposals():
             ORDER BY tp.proposed_at DESC
         """)
         proposals = cur.fetchall()
+
+        ranking_params = proposal_ranking.load_proposal_ranking_params(conn)
+        ranking_params["sector_max_pct"] = load_params(conn).get("sector_max_pct")
+        if proposals and ranking_params.get("proposal_ranking_enabled"):
+            try:
+                alpaca_positions = alpaca("GET", "/v2/positions")
+            except Exception:
+                alpaca_positions = []
+            try:
+                open_orders = alpaca("GET", "/v2/orders", params={"status": "open"})
+            except Exception:
+                open_orders = []
+            positions = {p["symbol"]: {"market_value": float(p["market_value"])} for p in alpaca_positions}
+            pending_orders = [{"symbol": o["symbol"], "side": o["side"], "qty": float(o["qty"]),
+                                "status": o["status"]} for o in open_orders]
+
+            all_symbols = {p["symbol"] for p in proposals} | set(positions) | {o["symbol"] for o in pending_orders}
+            sector_map = load_sector_map(conn, all_symbols)
+            price_map = _build_proposal_price_map(cur, proposals, alpaca_positions, pending_orders)
+            proposal_ids = [p["id"] for p in proposals if p["side"] == "buy"]
+            risk_decisions_by_proposal_id = _load_latest_risk_decisions(cur, proposal_ids)
+
+            try:
+                proposals = proposal_ranking.rank_proposals(
+                    proposals, positions, pending_orders, sector_map,
+                    buying_power, portfolio_value, price_map,
+                    risk_decisions_by_proposal_id, ranking_params,
+                )
+            except Exception as e:
+                log.warning(f"Proposal ranking failed, returning unranked proposals: {e}")
 
     return {"buying_power": buying_power, "proposals": proposals}
 
