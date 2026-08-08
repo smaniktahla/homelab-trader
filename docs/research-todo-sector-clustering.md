@@ -43,4 +43,18 @@ question -- distinct from the relative-strength risk filter
 (`shared/relative_strength_risk.py`), which is about whether to buy a
 *specific* symbol at all, not about concurrency across a sector.
 
-Not started. No code changes implied by this note.
+**Update (2026-08-07)**: the *presentation* half of this shipped --
+`shared/proposal_ranking.py` now clusters same-sector buy proposals in
+the dashboard (best candidate expanded, alternatives collapsed under
+"N more in <Sector>"), assigns each a 1-5 priority tier, and shows an
+opportunity-cost note on lower-ranked cluster members. This is a
+read-time ranking/labeling layer only -- it does not change which
+proposals get generated, does not block/reject anything (approve/reject
+is still 100% manual), and does NOT answer the open question above. It
+still reflects today's actual behavior: a human can still approve every
+member of a cluster if they choose to. The backtest comparing basket vs.
+strongest-only policies (below) remains open and unstarted -- shipping
+the UI does not constitute evidence either way.
+
+Not started. No code changes implied by this note beyond the presentation
+layer already shipped.
