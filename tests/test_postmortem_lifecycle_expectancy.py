@@ -36,16 +36,39 @@ def _mean_reversion_thesis_id(conn):
         return cur.fetchone()[0]
 
 
-def _insert_proposal(conn, symbol, side, qty, exit_reason=None):
+def _insert_proposal(conn, symbol, side, qty, exit_reason=None, trade_thesis_id=None):
     thesis_id = _mean_reversion_thesis_id(conn)
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO trade_proposals (symbol, side, qty, exit_reason, thesis_id)
-            VALUES (%s, %s, %s, %s, %s) RETURNING id
-        """, (symbol, side, qty, exit_reason, thesis_id))
+            INSERT INTO trade_proposals (symbol, side, qty, exit_reason, thesis_id, trade_thesis_id)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+        """, (symbol, side, qty, exit_reason, thesis_id, trade_thesis_id))
         proposal_id = cur.fetchone()[0]
     conn.commit()
     return proposal_id
+
+
+def _insert_trade_thesis(conn, symbol, hypothesis_type):
+    from trade_thesis import TradeThesis, record_trade_thesis
+    thesis_id = _mean_reversion_thesis_id(conn)
+    thesis = TradeThesis(
+        thesis_id=thesis_id,
+        symbol=symbol,
+        hypothesis_type=hypothesis_type,
+        hypothesis_text="test seed",
+        entry_conditions={"feature": "technical.rsi_14", "op": "lt", "value": 30},
+        invalidation_spec={"feature": "technical.close", "op": "lt", "value": 1.0},
+        success_spec={"feature": "technical.bb_pct_b", "op": "gte", "value": 0.5},
+        evidence_context={
+            "as_of": "2026-06-01",
+            "providers": {"technical": {"source": "symbol_features", "feature_version": "v1"}},
+        },
+        provenance={"entry_conditions": "explicit"},
+        as_of=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    row_id = record_trade_thesis(conn, thesis)
+    assert row_id is not None
+    return row_id
 
 
 def _insert_signal_outcome(conn, symbol, proposal_id, market_regime):
@@ -67,14 +90,16 @@ def _insert_universe(conn, symbol, sector):
     conn.commit()
 
 
-def _insert_trade(conn, symbol, side, qty, price, cost, traded_at, proposal_id=None, initial_stop_price=None):
+def _insert_trade(conn, symbol, side, qty, price, cost, traded_at, proposal_id=None,
+                   initial_stop_price=None, trade_thesis_id=None):
     thesis_id = _mean_reversion_thesis_id(conn)
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO trades (symbol, side, qty, price, notional, traded_at, cost,
-                                 status, thesis_id, proposal_id, initial_stop_price)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'filled', %s, %s, %s)
-        """, (symbol, side, qty, price, qty * price, traded_at, cost, thesis_id, proposal_id, initial_stop_price))
+                                 status, thesis_id, proposal_id, initial_stop_price, trade_thesis_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'filled', %s, %s, %s, %s)
+        """, (symbol, side, qty, price, qty * price, traded_at, cost, thesis_id, proposal_id,
+              initial_stop_price, trade_thesis_id))
     conn.commit()
 
 
@@ -280,3 +305,58 @@ def test_risk_decision_segments_empty_when_no_decisions_exist(conn):
         metric_summary = cur.fetchone()[0]
     assert metric_summary["risk_decision_by_context"] == {}
     assert metric_summary["risk_decision_by_binding_constraint"] == {}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PR 11 (Hypothesis-Driven Trading Architecture epic): lifecycle_hypothesis_type
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_lifecycle_hypothesis_type_segments_by_trade_thesis(conn):
+    build_position_lifecycles, run_postmortem_review = _import_ingest_modules()
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    trade_thesis_id = _insert_trade_thesis(conn, "AAPL", "mean_reversion_oversold")
+    buy_proposal = _insert_proposal(conn, "AAPL", "buy", 10, trade_thesis_id=trade_thesis_id)
+    sell_proposal = _insert_proposal(conn, "AAPL", "sell", 10, exit_reason="thesis_complete")
+
+    # trade_thesis_id copied onto the BUY trade only, same as api/main.py's
+    # real copy-down (PR 9) -- sells don't get one from this thesis.
+    _insert_trade(conn, "AAPL", "buy", 10, 100.0, 0.0, base,
+                   proposal_id=buy_proposal, initial_stop_price=90.0, trade_thesis_id=trade_thesis_id)
+    _insert_trade(conn, "AAPL", "sell", 10, 120.0, 0.0, base + timedelta(days=3), proposal_id=sell_proposal)
+
+    build_position_lifecycles(conn)
+    run_postmortem_review(conn)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT metric_summary FROM strategy_review_proposals ORDER BY created_at DESC LIMIT 1")
+        metric_summary = cur.fetchone()[0]
+
+    hyp_stats = metric_summary["lifecycle_hypothesis_type"]["mean_reversion_oversold"]
+    assert hyp_stats["n"] == 1
+    assert hyp_stats["expectancy_dollars"] == 200.0  # 10 * (120 - 100)
+
+    # thesis_slug segmentation (strategy family, pre-existing) is unaffected --
+    # both axes coexist, neither shadows the other.
+    assert metric_summary["lifecycle_thesis"]["mean_reversion"]["n"] == 1
+
+
+def test_lifecycle_without_linked_trade_thesis_excluded_from_hypothesis_type_not_other_dimensions(conn):
+    """A lifecycle with no trade_thesis link (instantiation was off, or
+    predates PR 4) must be skipped by lifecycle_hypothesis_type -- same
+    'skip unresolved' convention every other dimension already uses --
+    without affecting any other segment."""
+    build_position_lifecycles, run_postmortem_review = _import_ingest_modules()
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    _insert_trade(conn, "MSFT", "buy", 5, 200.0, 0.0, base)
+    _insert_trade(conn, "MSFT", "sell", 5, 210.0, 0.0, base + timedelta(days=1))
+    build_position_lifecycles(conn)
+    run_postmortem_review(conn)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT metric_summary FROM strategy_review_proposals ORDER BY created_at DESC LIMIT 1")
+        metric_summary = cur.fetchone()[0]
+
+    assert metric_summary["lifecycle_hypothesis_type"] == {}
+    assert metric_summary["lifecycle_symbol"]["MSFT"]["n"] == 1
