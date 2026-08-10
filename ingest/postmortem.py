@@ -111,21 +111,31 @@ def _fetch_closed_lifecycles(conn):
     segmentation dimensions the lifecycle table itself doesn't carry:
     thesis slug, sector (from universe), market_regime (from the first
     entry trade's originating signal_outcomes row, if any -- NULL for
-    manual trades or ones with no linked signal), and exit_reason (from the
-    final exit trade's originating trade_proposals row, if any). Explicit
-    dict cursor regardless of the caller's connection default -- same
-    discipline ingest/build_position_lifecycles.py already established,
-    since ingest.py's own connections default to plain tuple cursors."""
+    manual trades or ones with no linked signal), exit_reason (from the
+    final exit trade's originating trade_proposals row, if any), and (PR 11,
+    Hypothesis-Driven Trading Architecture epic) hypothesis_type from the
+    lifecycle's linked trade_thesis, if any -- thesis_slug above is the
+    STRATEGY FAMILY (theses.slug, e.g. 'mean_reversion'), hypothesis_type
+    is the falsifiable per-opportunity hypothesis a single strategy family
+    can instantiate more than one of (e.g. 'mean_reversion_oversold' vs.
+    'mean_reversion_overbought', per shared/trade_thesis.py's
+    HYPOTHESIS_TYPES) -- a genuinely different, finer-grained axis, not a
+    duplicate of thesis_slug. Explicit dict cursor regardless of the
+    caller's connection default -- same discipline
+    ingest/build_position_lifecycles.py already established, since
+    ingest.py's own connections default to plain tuple cursors."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
             SELECT
                 pl.symbol, pl.opened_at, pl.closed_at, pl.net_pnl, pl.realized_r,
                 th.slug AS thesis_slug,
+                tt.hypothesis_type,
                 u.sector,
                 first_entry.market_regime,
                 last_exit.exit_reason
             FROM position_lifecycles pl
             LEFT JOIN theses th ON th.id = pl.thesis_id
+            LEFT JOIN trade_theses tt ON tt.id = pl.trade_thesis_id
             LEFT JOIN universe u ON u.symbol = pl.symbol
             LEFT JOIN LATERAL (
                 SELECT so.market_regime
@@ -181,6 +191,14 @@ def _lifecycle_segments(rows):
 
     return {
         "lifecycle_thesis": expectancy.bucket_stats(_rows_for(lambda r: r["thesis_slug"])),
+        # PR 11: hypothesis_type (per-opportunity, e.g. 'mean_reversion_oversold'),
+        # not trade_thesis_id itself -- a trade_thesis instance is
+        # per-opportunity (§3 of docs/trade-thesis-architecture-reconciliation.md),
+        # so bucketing by its raw id would put ~one lifecycle in every
+        # bucket and never accumulate the sample size expectancy.bucket_stats
+        # needs to say anything. hypothesis_type is the axis multiple
+        # lifecycles actually share.
+        "lifecycle_hypothesis_type": expectancy.bucket_stats(_rows_for(lambda r: r["hypothesis_type"])),
         "lifecycle_symbol": expectancy.bucket_stats(_rows_for(lambda r: r["symbol"])),
         "lifecycle_exit_reason": expectancy.bucket_stats(_rows_for(lambda r: r["exit_reason"])),
         "lifecycle_market_regime": expectancy.bucket_stats(_rows_for(lambda r: r["market_regime"])),
