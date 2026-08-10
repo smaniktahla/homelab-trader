@@ -52,7 +52,7 @@ OPERATORS = frozenset({"gt", "lt", "gte", "lte", "eq", "between"})
 COMBINATORS = frozenset({"and", "or", "not"})
 
 # Fields whose grammar is a recursive condition tree, validated identically.
-_CONDITION_TREE_FIELDS = ("entry_conditions", "invalidation_spec", "success_spec")
+CONDITION_TREE_FIELDS = ("entry_conditions", "invalidation_spec", "success_spec")
 
 # Fields frozen at construction -- never legal to mutate after a TradeThesis
 # is created (see docs/trade-thesis-architecture-reconciliation.md §4).
@@ -195,7 +195,7 @@ class TradeThesis:
         if self.confidence is not None and not (0 <= self.confidence <= 1):
             raise GrammarError(f"confidence must be between 0 and 1, got {self.confidence}")
 
-        for field_name in _CONDITION_TREE_FIELDS:
+        for field_name in CONDITION_TREE_FIELDS:
             validate_condition_tree(getattr(self, field_name), field_name)
         validate_evidence_context(self.evidence_context)
 
