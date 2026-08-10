@@ -25,6 +25,7 @@ from market_structure import snapshot_market_structure_for_symbol
 from structure_scoring import load_structure_scoring_params, compute_structure_adjustment
 from relative_strength_risk import load_relative_strength_risk_params, evaluate_relative_strength_risk
 from sector_mapping import get_sector_etf
+from trade_thesis_stop_resolver import load_stop_resolver_params, resolve_initial_stop_price
 # trade_thesis_engine is imported lazily inside compute_signals(), not here at
 # module level -- feature_registry.py (which trade_thesis_engine.py imports)
 # itself imports compute_rsi/compute_bollinger from this module, so a
@@ -800,6 +801,7 @@ def compute_signals(conn, symbols):
     structure_params = load_structure_scoring_params(conn)
     rs_risk_params = load_relative_strength_risk_params(conn)
     trade_thesis_engine_params = load_trade_thesis_engine_params(conn)
+    stop_resolver_params = load_stop_resolver_params(conn)
 
     # Portfolio's total planned dollar risk right now, before any of this
     # cycle's proposals -- fed into the risk engine's portfolio-open-risk
@@ -1002,7 +1004,20 @@ def compute_signals(conn, symbols):
                 planned_risk_dollars = None
                 if side == "buy":
                     planned_entry_price = price
-                    planned_initial_stop_price = price * (1 - p["stop_loss_pct"])
+                    percentage_stop_price = price * (1 - p["stop_loss_pct"])
+
+                    # PR 6 (Structure-Aware Stop Resolver): dark unless a human has
+                    # explicitly flipped structure_aware_stop_enabled on (default
+                    # off, same precedent as structure_scoring_enabled). Off ->
+                    # planned_initial_stop_price is exactly the percentage
+                    # calculation this line always did. See
+                    # shared/trade_thesis_stop_resolver.py.
+                    if stop_resolver_params["structure_aware_stop_enabled"]:
+                        planned_initial_stop_price = resolve_initial_stop_price(
+                            conn, sym, price, percentage_stop_price, stop_resolver_params)["stop_price"]
+                    else:
+                        planned_initial_stop_price = percentage_stop_price
+
                     planned_risk_per_share = price - planned_initial_stop_price
                     planned_risk_dollars = planned_risk_per_share * qty
 

@@ -879,3 +879,15 @@ ALTER TABLE trades          ADD COLUMN IF NOT EXISTS trade_thesis_id BIGINT REFE
 INSERT INTO signal_params (key, value, description) VALUES
     ('trade_thesis_instantiation_enabled', 0, 'Master switch for creating a trade_theses row alongside a qualifying BUY trade_proposals row (0=off, matches pre-PR-4 behavior)')
 ON CONFLICT (key) DO NOTHING;
+
+-- Structure-Aware Stop Resolver (PR 6, shared/trade_thesis_stop_resolver.py)
+-- -- derives planned_initial_stop_price from the Market Structure Engine's
+-- already-persisted nearest support zone instead of a flat percentage,
+-- when a sane one exists. Disabled by default: existing BUY proposal
+-- planned_initial_stop_price is byte-for-byte unchanged until a human
+-- flips structure_aware_stop_enabled to 1, same precedent as
+-- structure_scoring_enabled/trade_thesis_instantiation_enabled above.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('structure_aware_stop_enabled', 0, 'Master switch for deriving planned_initial_stop_price from Market Structure Engine support zones instead of a flat percentage (0=off, matches pre-PR-6 behavior)'),
+    ('max_structure_stop_multiple', 2.5, 'Sanity cap: a structure support zone more than this many times farther from price than the plain percentage stop falls back to the percentage stop instead')
+ON CONFLICT (key) DO NOTHING;
