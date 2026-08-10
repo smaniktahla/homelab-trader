@@ -8,12 +8,13 @@ def _day(n):
 
 
 def _t(id, symbol, side, qty, price, cost=0.0, traded_at=None, thesis_id=1,
-       initial_stop_price=None, planned_entry_price=None,
+       trade_thesis_id=None, initial_stop_price=None, planned_entry_price=None,
        planned_initial_stop_price=None, planned_risk_per_share=None,
        planned_risk_dollars=None):
     return {
         "id": id, "symbol": symbol, "side": side, "qty": qty, "price": price,
         "cost": cost, "traded_at": traded_at or _day(0), "thesis_id": thesis_id,
+        "trade_thesis_id": trade_thesis_id,
         "initial_stop_price": initial_stop_price,
         "planned_entry_price": planned_entry_price,
         "planned_initial_stop_price": planned_initial_stop_price,
@@ -129,6 +130,70 @@ def test_cross_thesis_concurrent_symbol_flagged_not_resolved():
     assert lc.status == "open"
     assert lc.thesis_id is None
     assert "concurrent_multi_thesis_symbol" in lc.data_quality_flags
+
+
+# --- trade_thesis_id (PR 9) ----------------------------------------------
+
+def test_single_trade_thesis_id_resolves_unambiguously():
+    trades = [_t(1, "AAPL", "buy", 10, 100.0, traded_at=_day(0), trade_thesis_id=42)]
+    result = pl.match_lifecycles(trades)
+    lc = result["AAPL"]["lifecycles"][0]
+    assert lc.trade_thesis_id == 42
+    assert "concurrent_multi_trade_thesis_position" not in lc.data_quality_flags
+
+
+def test_no_trade_thesis_id_stays_none_without_flag():
+    # No fill ever carried a trade_thesis_id (instantiation was off, or
+    # predates PR 4) -- must read as "no thesis," not as ambiguity.
+    trades = [_t(1, "AAPL", "buy", 10, 100.0, traded_at=_day(0))]
+    result = pl.match_lifecycles(trades)
+    lc = result["AAPL"]["lifecycles"][0]
+    assert lc.trade_thesis_id is None
+    assert lc.data_quality_flags == []
+
+
+def test_one_real_trade_thesis_id_among_untracked_fills_resolves_unambiguously():
+    # Pyramided position: first entry carried a trade_thesis_id, a later
+    # add-on didn't (e.g. instantiation was toggled off in between). This
+    # must resolve to the one real value, not read as ambiguous just
+    # because the fills disagree on presence.
+    trades = [
+        _t(1, "AAPL", "buy", 10, 100.0, traded_at=_day(0), trade_thesis_id=42),
+        _t(2, "AAPL", "buy", 5, 102.0, traded_at=_day(1), trade_thesis_id=None),
+    ]
+    result = pl.match_lifecycles(trades)
+    lc = result["AAPL"]["lifecycles"][0]
+    assert lc.trade_thesis_id == 42
+    assert "concurrent_multi_trade_thesis_position" not in lc.data_quality_flags
+
+
+def test_distinct_trade_thesis_ids_flagged_and_unresolved():
+    # A genuine pyramid across two separate opportunities -- real
+    # ambiguity, distinct from the "some fills just have no data" case above.
+    trades = [
+        _t(1, "AAPL", "buy", 10, 100.0, traded_at=_day(0), trade_thesis_id=42),
+        _t(2, "AAPL", "buy", 5, 102.0, traded_at=_day(1), trade_thesis_id=43),
+    ]
+    result = pl.match_lifecycles(trades)
+    lc = result["AAPL"]["lifecycles"][0]
+    assert lc.trade_thesis_id is None
+    assert "concurrent_multi_trade_thesis_position" in lc.data_quality_flags
+
+
+def test_trade_thesis_id_independent_of_strategy_thesis_id_ambiguity():
+    # Same strategy family (thesis_id=1 both times, unambiguous) but two
+    # distinct trade_thesis_id values -- the two flags are independent;
+    # only the trade_thesis one should fire here.
+    trades = [
+        _t(1, "AAPL", "buy", 10, 100.0, traded_at=_day(0), thesis_id=1, trade_thesis_id=42),
+        _t(2, "AAPL", "buy", 5, 102.0, traded_at=_day(1), thesis_id=1, trade_thesis_id=43),
+    ]
+    result = pl.match_lifecycles(trades)
+    lc = result["AAPL"]["lifecycles"][0]
+    assert lc.thesis_id == 1
+    assert "concurrent_multi_thesis_symbol" not in lc.data_quality_flags
+    assert lc.trade_thesis_id is None
+    assert "concurrent_multi_trade_thesis_position" in lc.data_quality_flags
 
 
 def test_missing_risk_data_stays_none_never_zero():

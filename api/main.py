@@ -693,6 +693,22 @@ def _resolve_thesis_id(cur, proposal_id: Optional[int] = None):
     row = cur.fetchone()
     return row["id"] if row else None
 
+
+def _resolve_trade_thesis_id(cur, proposal_id: Optional[int] = None):
+    """trades.trade_thesis_id (PR 9, Hypothesis-Driven Trading Architecture
+    epic) -- copied immutably from trade_proposals.trade_thesis_id at fill
+    time, same pattern as _resolve_thesis_id above and trades.
+    initial_stop_price. Unlike thesis_id there is no mean_reversion-style
+    default: a manual trade with no linked proposal, or a proposal from
+    before PR 4 / with instantiation disabled, simply has no trade_thesis
+    to attribute to -- stays NULL, per §2a's best-effort-hint contract."""
+    if proposal_id:
+        cur.execute("SELECT trade_thesis_id FROM trade_proposals WHERE id=%s", (proposal_id,))
+        row = cur.fetchone()
+        if row:
+            return row["trade_thesis_id"]
+    return None
+
 @app.get("/api/account")
 def get_account():
     a = alpaca("GET", "/v2/account")
@@ -1123,6 +1139,7 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     with db() as conn, conn.cursor() as cur:
         cost = _current_trade_cost_flat(cur)
         thesis_id = _resolve_thesis_id(cur, req.proposal_id)
+        trade_thesis_id = _resolve_trade_thesis_id(cur, req.proposal_id)
 
         # Platform Improvements PR C: rule-adherence bypass detection.
         # POST /api/trade enforces none of compute_signals()'s six
@@ -1158,14 +1175,14 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
         # Still None for sells, same as before.
         initial_stop_price = stop_price_for_order
         cur.execute("""
-            INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, notes, source, status, proposal_id, cost, thesis_id, initial_stop_price)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, notes, source, status, proposal_id, cost, thesis_id, initial_stop_price, trade_thesis_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             req.symbol.upper(), req.side, filled_qty, filled_price,
             filled_qty * filled_price, order["id"],
             datetime.now(timezone.utc), req.notes, req.source,
-            order["status"], req.proposal_id, cost, thesis_id, initial_stop_price
+            order["status"], req.proposal_id, cost, thesis_id, initial_stop_price, trade_thesis_id
         ))
         trade_id = cur.fetchone()["id"]
         conn.commit()
@@ -1316,13 +1333,13 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
 
             cost = _current_trade_cost_flat(cur)
             cur.execute("""
-                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id, cost, thesis_id, initial_stop_price)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id, cost, thesis_id, initial_stop_price, trade_thesis_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (p["symbol"], p["side"], filled_qty, filled_price,
                   filled_qty * filled_price, order["id"],
                   datetime.now(timezone.utc), "model_approved", order["status"], proposal_id, cost, p["thesis_id"],
-                  stop_price_for_order))
+                  stop_price_for_order, p["trade_thesis_id"]))
             new_trade_id = cur.fetchone()["id"]
             # update proposal qty if it was null
             cur.execute("UPDATE trade_proposals SET qty=%s WHERE id=%s AND qty IS NULL", (trade_qty, proposal_id))

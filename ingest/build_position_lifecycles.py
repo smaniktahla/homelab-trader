@@ -38,7 +38,7 @@ def _fetch_trade_rows(conn):
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
             SELECT t.id, t.symbol, t.side, t.qty, t.price, t.cost, t.traded_at,
-                   t.thesis_id, t.initial_stop_price,
+                   t.thesis_id, t.trade_thesis_id, t.initial_stop_price,
                    tp.planned_entry_price, tp.planned_initial_stop_price,
                    tp.planned_risk_per_share, tp.planned_risk_dollars
             FROM trades t
@@ -92,7 +92,7 @@ def _rebuild_tables(conn, lifecycles_by_symbol):
             for lc in data["lifecycles"]:
                 cur.execute("""
                     INSERT INTO position_lifecycles (
-                        symbol, thesis_id, status, opened_at, closed_at, qty,
+                        symbol, thesis_id, trade_thesis_id, status, opened_at, closed_at, qty,
                         planned_entry_price, planned_initial_stop_price,
                         planned_risk_per_share, planned_risk_dollars,
                         initial_stop_price, actual_initial_risk_per_share,
@@ -102,11 +102,11 @@ def _rebuild_tables(conn, lifecycles_by_symbol):
                         excursion_resolution, data_quality_flags
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     RETURNING id
                 """, (
-                    lc.symbol, lc.thesis_id, lc.status, lc.opened_at, lc.closed_at, lc.qty,
+                    lc.symbol, lc.thesis_id, lc.trade_thesis_id, lc.status, lc.opened_at, lc.closed_at, lc.qty,
                     lc.planned_entry_price, lc.planned_initial_stop_price,
                     lc.planned_risk_per_share, lc.planned_risk_dollars,
                     lc.initial_stop_price, lc.actual_initial_risk_per_share,

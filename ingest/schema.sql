@@ -604,7 +604,7 @@ CREATE TABLE IF NOT EXISTS position_lifecycles (
     mfe_r                           NUMERIC,
     excursion_resolution            TEXT CHECK (excursion_resolution IS NULL
                                          OR excursion_resolution IN ('hourly', 'daily_approximation')),
-    data_quality_flags              TEXT[] NOT NULL DEFAULT '{}',  -- e.g. 'concurrent_multi_thesis_symbol', 'pre_ledger_holding_excluded'
+    data_quality_flags              TEXT[] NOT NULL DEFAULT '{}',  -- e.g. 'concurrent_multi_thesis_symbol', 'concurrent_multi_trade_thesis_position', 'pre_ledger_holding_excluded'
     created_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -907,3 +907,17 @@ ON CONFLICT (key) DO NOTHING;
 INSERT INTO signal_params (key, value, description) VALUES
     ('thesis_invalidation_exit_enabled', 0, 'Master switch for proposing sells when a held position''s linked trade_thesis looks invalidated (structure CHoCH, regime deterioration, or its own invalidation_spec). 0=off, matches pre-PR-8 behavior. Independent of trade_thesis_instantiation_enabled.')
 ON CONFLICT (key) DO NOTHING;
+
+-- Thesis Snapshot on Proposal/Position (PR 9, Hypothesis-Driven Trading
+-- Architecture epic) -- per docs/trade-thesis-architecture-reconciliation.md
+-- §5's PR 9 bullet: trade_thesis_id threads through immutably the same
+-- way initial_stop_price already does. trade_proposals.trade_thesis_id
+-- and trades.trade_thesis_id already exist (PR 1); this closes the last
+-- gap -- api/main.py now copies trades.trade_thesis_id down from
+-- trade_proposals.trade_thesis_id at fill time (mirroring thesis_id/
+-- initial_stop_price's existing copy-down), and position_lifecycles gets
+-- its own trade_thesis_id, derived by shared/position_lifecycles.py's
+-- _flush() the same way it already collapses thesis_id across a
+-- lifecycle's constituent trades -- see that function's own comment for
+-- why the None-filtering differs from thesis_id's collapse.
+ALTER TABLE position_lifecycles ADD COLUMN IF NOT EXISTS trade_thesis_id BIGINT REFERENCES trade_theses(id);
