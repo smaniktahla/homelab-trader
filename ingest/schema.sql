@@ -819,3 +819,52 @@ INSERT INTO signal_params (key, value, description) VALUES
     ('relative_strength_risk_mode', 0, 'Relative-strength risk eligibility filter for mean_reversion buys: 0=off, 1=gate (reject underperforming_sector buys), 2=size_reduce (reserved, not implemented -- currently a no-op). Risk control only, never a score adjustment.'),
     ('relative_strength_risk_size_reduce_pct', 0.5, 'Reserved for relative_strength_risk_mode=2 (size_reduce), not implemented yet')
 ON CONFLICT (key) DO NOTHING;
+
+-- Trade Thesis Schema, PR 1 of the Hypothesis-Driven Trading Architecture
+-- epic -- see docs/trade-thesis-architecture-reconciliation.md for the full
+-- design (§1/§1a/§1b/§7 in particular). `theses`/`thesis_id` above is a
+-- STRATEGY FAMILY registry (mean_reversion, congress_shreve_hern) and is
+-- UNCHANGED by this table. `trade_theses` is a new, separate object one
+-- level down: one falsifiable hypothesis for one specific opportunity,
+-- referencing which strategy family produced it via thesis_id (FK, still
+-- meaning what it always meant).
+--
+-- This PR ships the grammar only (shared/trade_thesis.py defines and
+-- validates entry_conditions/invalidation_spec/success_spec's JSON shape
+-- and evidence_context's provider envelope) -- it does NOT check that a
+-- referenced feature identifier exists (PR 2/3's job) and nothing in the
+-- live signal-generation path creates trade_theses rows yet (PR 4's job).
+-- The table can be dark -- computed, tested, persisted, not load-bearing --
+-- same staged-rollout discipline shared/market_structure.py already uses.
+CREATE TABLE IF NOT EXISTS trade_theses (
+    id                  BIGSERIAL PRIMARY KEY,
+    thesis_id           BIGINT NOT NULL REFERENCES theses(id),  -- strategy family (existing meaning)
+    symbol              TEXT NOT NULL,
+    schema_version      TEXT NOT NULL,   -- Trade Thesis Schema (grammar) version, see shared/trade_thesis.py
+    evidence_context    JSONB NOT NULL,  -- {as_of, providers: {...}} multi-provider evidence lineage, see §1b
+    hypothesis_type     TEXT NOT NULL,   -- constrained vocabulary, shared/trade_thesis.py
+    hypothesis_text     TEXT NOT NULL,   -- human-readable
+    entry_conditions    JSONB NOT NULL,  -- grammar defined here, semantically validated PR 3
+    evidence_snapshot   JSONB NOT NULL,  -- {supporting: [...], contradictory: [...], missing: [...]}, PR 4 output, frozen at creation
+    invalidation_spec   JSONB NOT NULL,  -- grammar defined here, semantically validated PR 3, consumed PR 5/6
+    success_spec        JSONB NOT NULL,  -- grammar defined here, semantically validated PR 3
+    confidence          NUMERIC CHECK (confidence BETWEEN 0 AND 1),
+    provenance          JSONB NOT NULL,  -- explicit/inferred/proposed per field (PR 17); trivially all-'explicit' through Phase 4
+    status              TEXT NOT NULL DEFAULT 'proposed'
+                        CHECK (status IN ('proposed','active','weakening','invalidated','completed','superseded')),
+    as_of               TIMESTAMPTZ NOT NULL,  -- point-in-time evidence was evaluated
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_trade_theses_symbol ON trade_theses (symbol);
+CREATE INDEX IF NOT EXISTS idx_trade_theses_thesis_id ON trade_theses (thesis_id);
+CREATE INDEX IF NOT EXISTS idx_trade_theses_status ON trade_theses (status);
+
+-- trade_thesis_id threading (§2): nullable, unpopulated, no writer wired in
+-- this PR -- these columns are dark until PR 4 (trade_proposals, generated
+-- for a specific trade_theses row) and PR 9 (trades, copied immutably from
+-- trade_proposals at insert, same pattern as trades.initial_stop_price)
+-- start setting them. signals and position_lifecycles deliberately do NOT
+-- get this column in this PR -- see §2's table for why.
+ALTER TABLE trade_proposals ADD COLUMN IF NOT EXISTS trade_thesis_id BIGINT REFERENCES trade_theses(id);
+ALTER TABLE trades          ADD COLUMN IF NOT EXISTS trade_thesis_id BIGINT REFERENCES trade_theses(id);

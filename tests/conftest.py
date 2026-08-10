@@ -25,7 +25,7 @@ RESET_TABLES = [
     "market_structure_history",
     "congressional_filings", "fundamental_facts",
     "position_trades", "position_lifecycles", "position_lifecycle_symbol_status",
-    "rule_adherence_checks", "risk_decisions",
+    "rule_adherence_checks", "risk_decisions", "trade_theses",
 ]
 
 
