@@ -868,3 +868,14 @@ CREATE INDEX IF NOT EXISTS idx_trade_theses_status ON trade_theses (status);
 -- get this column in this PR -- see §2's table for why.
 ALTER TABLE trade_proposals ADD COLUMN IF NOT EXISTS trade_thesis_id BIGINT REFERENCES trade_theses(id);
 ALTER TABLE trades          ADD COLUMN IF NOT EXISTS trade_thesis_id BIGINT REFERENCES trade_theses(id);
+
+-- Evidence Evaluation Engine (PR 4, shared/trade_thesis_engine.py) -- the
+-- master switch for trade-thesis instantiation on the live BUY path.
+-- Disabled by default: existing compute_signals() BUY behavior is
+-- byte-for-byte unchanged (trade_proposals.trade_thesis_id stays NULL)
+-- until a human flips this to 1 via PATCH /api/signal-params/
+-- trade_thesis_instantiation_enabled, same precedent as
+-- structure_scoring_enabled/relative_strength_risk_mode above.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('trade_thesis_instantiation_enabled', 0, 'Master switch for creating a trade_theses row alongside a qualifying BUY trade_proposals row (0=off, matches pre-PR-4 behavior)')
+ON CONFLICT (key) DO NOTHING;
