@@ -131,7 +131,12 @@ CREATE TABLE IF NOT EXISTS security_regime_history (
 CREATE INDEX IF NOT EXISTS idx_security_regime_history_symbol ON security_regime_history (symbol);
 
 -- exit_reason classifies sell proposals by which rule triggered them:
--- thesis_complete | time_stop | stop_loss | overbought | regime_deterioration | manual
+-- thesis_complete | time_stop | stop_loss | overbought | regime_deterioration |
+-- thesis_invalidated | manual
+-- thesis_invalidated added PR 8 (Hypothesis-Driven Trading Architecture epic,
+-- shared/signals.py::check_thesis_invalidation_sell) -- structure/regime
+-- deterioration or the thesis's own invalidation_spec, distinct from the
+-- blunt price-only stop_loss check above.
 ALTER TABLE trade_proposals ADD COLUMN IF NOT EXISTS exit_reason TEXT;
 
 CREATE TABLE IF NOT EXISTS trades (
@@ -890,4 +895,15 @@ ON CONFLICT (key) DO NOTHING;
 INSERT INTO signal_params (key, value, description) VALUES
     ('structure_aware_stop_enabled', 0, 'Master switch for deriving planned_initial_stop_price from Market Structure Engine support zones instead of a flat percentage (0=off, matches pre-PR-6 behavior)'),
     ('max_structure_stop_multiple', 2.5, 'Sanity cap: a structure support zone more than this many times farther from price than the plain percentage stop falls back to the percentage stop instead')
+ON CONFLICT (key) DO NOTHING;
+
+-- Exit Taxonomy (PR 8, shared/signals.py::check_thesis_invalidation_sell)
+-- -- master switch for proposing sells on trade-thesis invalidation
+-- (exit_reason='thesis_invalidated'), distinct from trade_thesis_instantiation_enabled
+-- (PR 4): turning instantiation on alone stays purely observational --
+-- creating trade_theses rows for audit -- until this flag is ALSO
+-- explicitly turned on. Disabled by default, same precedent as every
+-- other flag above.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('thesis_invalidation_exit_enabled', 0, 'Master switch for proposing sells when a held position''s linked trade_thesis looks invalidated (structure CHoCH, regime deterioration, or its own invalidation_spec). 0=off, matches pre-PR-8 behavior. Independent of trade_thesis_instantiation_enabled.')
 ON CONFLICT (key) DO NOTHING;
