@@ -18,6 +18,7 @@ from market_structure import update_market_structure
 from sector_mapping import get_sector_etf
 from outcomes import update_signal_outcomes
 from build_position_lifecycles import build_position_lifecycles
+from trade_thesis_reevaluation import reevaluate_active_trade_theses
 from earnings import sync_earnings_calendar
 from postmortem import run_postmortem_review
 from fundamentals_collector import sync_fundamentals
@@ -1145,6 +1146,18 @@ def run_once(conn, last_universe_scan):
         build_position_lifecycles(conn)
     except Exception as e:
         log.warning(f'Position lifecycles rebuild failed: {e}')
+
+    # PR 10 (Hypothesis-Driven Trading Architecture epic, Live Thesis
+    # Re-Evaluation): every cycle, same fail-open placement as the other
+    # derivation steps above. Unlike shared/signals.py::
+    # check_thesis_invalidation_sell() (PR 8, gated, creates real sell
+    # proposals), this only appends an audit row and refreshes
+    # trade_theses.status -- never affects trading behavior, so it runs
+    # unconditionally, same as build_position_lifecycles above.
+    try:
+        reevaluate_active_trade_theses(conn)
+    except Exception as e:
+        log.warning(f'Trade thesis re-evaluation failed: {e}')
 
     # Every cycle, regardless of market hours — a proposal existing is a DB
     # fact, not a live-market condition, unlike the other alerts below.
