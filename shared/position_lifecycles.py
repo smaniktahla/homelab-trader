@@ -57,6 +57,7 @@ class Lot:
     cost: float                    # trades.cost for this entry trade, full (prorated at exit time)
     traded_at: object
     thesis_id: object
+    trade_thesis_id: object        # trades.trade_thesis_id (PR 9); None if no linked trade_thesis
     initial_stop_price: object     # trades.initial_stop_price; None if no linked proposal
 
 
@@ -65,6 +66,7 @@ class PositionLifecycle:
     symbol: str
     status: str                              # 'open' | 'closed'
     thesis_id: object                        # None if ambiguous -- see data_quality_flags
+    trade_thesis_id: object                  # None if no entry ever carried one, or if entries disagree -- see data_quality_flags
     opened_at: object
     closed_at: object                        # None while open
     qty: float
@@ -94,7 +96,7 @@ class PositionLifecycle:
 
 def match_lifecycles(trade_rows, price_bars_by_symbol=None):
     """trade_rows: iterable of dicts with id, symbol, side, qty, price,
-    cost, traded_at, thesis_id, initial_stop_price, plus planned_entry_price
+    cost, traded_at, thesis_id, trade_thesis_id, initial_stop_price, plus planned_entry_price
     / planned_initial_stop_price / planned_risk_per_share /
     planned_risk_dollars (only meaningfully populated on buy trades with a
     linked proposal -- None otherwise). Already filtered to status='filled',
@@ -125,6 +127,7 @@ def match_lifecycles(trade_rows, price_bars_by_symbol=None):
     def _start_building(symbol, first_trade):
         return {
             "thesis_ids_seen": set(),
+            "trade_thesis_ids_seen": set(),
             "opened_at": first_trade["traded_at"],
             "planned_entry_price": first_trade.get("planned_entry_price"),
             "planned_initial_stop_price": first_trade.get("planned_initial_stop_price"),
@@ -172,6 +175,21 @@ def match_lifecycles(trade_rows, price_bars_by_symbol=None):
         if len(thesis_ids) > 1:
             flags.append("concurrent_multi_thesis_symbol")
 
+        # trade_thesis_id (PR 9): unlike thesis_id (NOT NULL on every trade
+        # since migration 001, so thesis_ids_seen above never contains
+        # None), trade_thesis_id is nullable and will be None on the
+        # common case -- instantiation disabled, or a fill predating PR 4.
+        # None is filtered out before collapsing, so "one real thesis plus
+        # some untracked fills" reads as unambiguous (that one thesis), not
+        # as a fabricated ambiguity -- only two or more DISTINCT non-None
+        # trade_thesis_ids (a position genuinely pyramided from separate
+        # opportunities) is real ambiguity, mirroring
+        # concurrent_multi_thesis_symbol's meaning one level down.
+        trade_thesis_ids = {tid for tid in b["trade_thesis_ids_seen"] if tid is not None}
+        trade_thesis_id = next(iter(trade_thesis_ids)) if len(trade_thesis_ids) == 1 else None
+        if len(trade_thesis_ids) > 1:
+            flags.append("concurrent_multi_trade_thesis_position")
+
         risk_per_share, risk_dollars = _actual_initial_risk(b)
         # gross_pnl/net_pnl/exit_notional represent REALIZED-TO-DATE, not
         # "final only once closed" -- a still-open lifecycle that has had a
@@ -193,7 +211,7 @@ def match_lifecycles(trade_rows, price_bars_by_symbol=None):
 
         remaining_qty = sum(l.qty_remaining for l in fifo.get(symbol, []))
         lc = PositionLifecycle(
-            symbol=symbol, status=status, thesis_id=thesis_id,
+            symbol=symbol, status=status, thesis_id=thesis_id, trade_thesis_id=trade_thesis_id,
             opened_at=b["opened_at"], closed_at=closed_at,
             qty=remaining_qty if status == "open" else b.get("_closed_qty"),
             planned_entry_price=b["planned_entry_price"],
@@ -236,9 +254,11 @@ def match_lifecycles(trade_rows, price_bars_by_symbol=None):
             lots.append(Lot(
                 trade_id=t["id"], qty_remaining=qty, price=price, cost=cost,
                 traded_at=t["traded_at"], thesis_id=t.get("thesis_id"),
+                trade_thesis_id=t.get("trade_thesis_id"),
                 initial_stop_price=t.get("initial_stop_price"),
             ))
             b["thesis_ids_seen"].add(t.get("thesis_id"))
+            b["trade_thesis_ids_seen"].add(t.get("trade_thesis_id"))
             b["entry_notional"] += qty * price
             b["entry_cost_total"] += cost
             b["entry_qty_total"] += qty
