@@ -25,6 +25,11 @@ from market_structure import snapshot_market_structure_for_symbol
 from structure_scoring import load_structure_scoring_params, compute_structure_adjustment
 from relative_strength_risk import load_relative_strength_risk_params, evaluate_relative_strength_risk
 from sector_mapping import get_sector_etf
+# trade_thesis_engine is imported lazily inside compute_signals(), not here at
+# module level -- feature_registry.py (which trade_thesis_engine.py imports)
+# itself imports compute_rsi/compute_bollinger from this module, so a
+# top-level import here would be a signals -> trade_thesis_engine ->
+# feature_registry -> signals cycle.
 from regime_common import load_daily_series, pct_return
 
 log = logging.getLogger(__name__)
@@ -732,6 +737,8 @@ def _load_market_context(conn):
 
 def compute_signals(conn, symbols):
     """Main entry point: compute signals for all symbols, write to DB, create proposals."""
+    from trade_thesis_engine import load_trade_thesis_engine_params, instantiate_buy_trade_thesis
+
     p = load_params(conn)
     thesis_id = mean_reversion_thesis_id(conn)
 
@@ -792,6 +799,7 @@ def compute_signals(conn, symbols):
     regime_params = load_regime_scoring_params(conn)
     structure_params = load_structure_scoring_params(conn)
     rs_risk_params = load_relative_strength_risk_params(conn)
+    trade_thesis_engine_params = load_trade_thesis_engine_params(conn)
 
     # Portfolio's total planned dollar risk right now, before any of this
     # cycle's proposals -- fed into the risk engine's portfolio-open-risk
@@ -926,6 +934,8 @@ def compute_signals(conn, symbols):
                 # Position sizing for buy signals
                 qty = None
                 sizing_note = ""
+                trade_thesis_id = None  # PR 4: only ever set on the buy branch below, and only when
+                                         # trade_thesis_instantiation_enabled is on -- see shared/trade_thesis_engine.py
                 if side == "buy":
                     if not trading_permission["new_entries_allowed"]:
                         reasons = ",".join(trading_permission["reasons"])
@@ -996,10 +1006,22 @@ def compute_signals(conn, symbols):
                     planned_risk_per_share = price - planned_initial_stop_price
                     planned_risk_dollars = planned_risk_per_share * qty
 
+                    # PR 4 (Evidence Evaluation Engine): dark unless a human has
+                    # explicitly flipped trade_thesis_instantiation_enabled on
+                    # (default off, same precedent as structure_scoring_enabled).
+                    # Failure anywhere inside (grammar, semantic validation,
+                    # persistence) returns None -- the proposal below still gets
+                    # created, just without a trade_thesis_id, identical to the
+                    # flag-off behavior. See shared/trade_thesis_engine.py.
+                    if trade_thesis_engine_params["trade_thesis_instantiation_enabled"]:
+                        trade_thesis_id = instantiate_buy_trade_thesis(
+                            conn, thesis_id, sym, generated_at, p["rsi_oversold"], planned_initial_stop_price)
+
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO trade_proposals (
                             symbol, side, qty, rationale, signal_score, exit_reason, thesis_id,
+                            trade_thesis_id,
                             planned_entry_price, planned_initial_stop_price,
                             planned_risk_per_share, planned_risk_dollars,
                             regime_snapshot, hierarchy_alignment, base_strategy_score,
@@ -1008,9 +1030,10 @@ def compute_signals(conn, symbols):
                             market_structure_snapshot, structure_trend, structure_confidence,
                             structure_score_adjustment
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                     """, (sym, side, qty, rationale, score, exit_reason, thesis_id,
+                          trade_thesis_id,
                           planned_entry_price, planned_initial_stop_price,
                           planned_risk_per_share, planned_risk_dollars,
                           Json(regime_snapshot), regime_snapshot["hierarchy_alignment"], score,
