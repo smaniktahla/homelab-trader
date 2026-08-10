@@ -921,3 +921,26 @@ ON CONFLICT (key) DO NOTHING;
 -- lifecycle's constituent trades -- see that function's own comment for
 -- why the None-filtering differs from thesis_id's collapse.
 ALTER TABLE position_lifecycles ADD COLUMN IF NOT EXISTS trade_thesis_id BIGINT REFERENCES trade_theses(id);
+
+-- Live Thesis Re-Evaluation (PR 10, Hypothesis-Driven Trading Architecture
+-- epic) -- per docs/trade-thesis-architecture-reconciliation.md §4/§5's
+-- PR 10 bullet. Append-only, same "recompute-from-history-and-write-one-
+-- summary-row" discipline ingest/postmortem.py already established --
+-- never an UPDATE against a past evaluation. trade_theses.status (the one
+-- field PR 1's §4 immutability contract explicitly excludes) becomes a
+-- denormalized read of this table's most recent row per trade_thesis_id,
+-- refreshed by shared/trade_thesis_reevaluation.py -- not mutated
+-- directly by anything else.
+CREATE TABLE IF NOT EXISTS trade_thesis_evaluations (
+    id                    BIGSERIAL PRIMARY KEY,
+    trade_thesis_id       BIGINT NOT NULL REFERENCES trade_theses(id),
+    evaluated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    previous_state        TEXT,             -- trade_theses.status before this evaluation; NULL on the first evaluation
+    state                 TEXT NOT NULL     -- reuses trade_thesis.STATUSES 1:1 (PR 1 §6 deferred this to PR 10 --
+                          CHECK (state IN ('proposed','active','weakening','invalidated','completed','superseded')),
+    evidence_diff         JSONB NOT NULL,   -- what this evaluation actually found -- invalidation reasons, success_spec result
+    triggering_condition  TEXT              -- human-readable reason for a state change; NULL when state == previous_state
+);
+
+CREATE INDEX IF NOT EXISTS idx_trade_thesis_evaluations_trade_thesis_id
+    ON trade_thesis_evaluations (trade_thesis_id, evaluated_at DESC);
