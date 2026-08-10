@@ -7,6 +7,7 @@ from trade_thesis import (
     TRADE_THESIS_SCHEMA_VERSION,
     GrammarError,
     TradeThesis,
+    load_trade_thesis,
     record_trade_thesis,
     validate_condition_tree,
     validate_evidence_context,
@@ -248,3 +249,26 @@ def test_record_trade_thesis_leaves_connection_usable_after_failure(conn):
     thesis_id = _mean_reversion_thesis_id(conn)
     good_thesis = _valid_thesis(thesis_id=thesis_id)
     assert record_trade_thesis(conn, good_thesis) is not None
+
+
+# --- load_trade_thesis (PR 8's read counterpart to record_trade_thesis) -----
+
+def test_load_trade_thesis_round_trips_a_recorded_thesis(conn):
+    thesis_id = _mean_reversion_thesis_id(conn)
+    thesis = _valid_thesis(thesis_id=thesis_id)
+    row_id = record_trade_thesis(conn, thesis)
+
+    loaded = load_trade_thesis(conn, row_id)
+    assert loaded is not None
+    assert loaded.thesis_id == thesis.thesis_id
+    assert loaded.symbol == thesis.symbol
+    assert loaded.hypothesis_type == thesis.hypothesis_type
+    assert loaded.entry_conditions == thesis.entry_conditions
+    assert loaded.invalidation_spec == thesis.invalidation_spec
+    assert loaded.success_spec == thesis.success_spec
+    assert loaded.evidence_context == thesis.evidence_context
+    assert loaded.status == thesis.status
+
+
+def test_load_trade_thesis_returns_none_for_missing_id(conn):
+    assert load_trade_thesis(conn, 999999) is None

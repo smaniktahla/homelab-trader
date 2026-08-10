@@ -26,6 +26,11 @@ from structure_scoring import load_structure_scoring_params, compute_structure_a
 from relative_strength_risk import load_relative_strength_risk_params, evaluate_relative_strength_risk
 from sector_mapping import get_sector_etf
 from trade_thesis_stop_resolver import load_stop_resolver_params, resolve_initial_stop_price
+from trade_thesis import load_trade_thesis
+# trade_thesis_invalidation is imported lazily inside check_thesis_invalidation_sell(),
+# not here at module level -- it imports feature_registry.py, which itself imports
+# compute_rsi/compute_bollinger from this module (same signals -> X -> feature_registry
+# -> signals cycle already worked around for trade_thesis_engine in PR 4).
 # trade_thesis_engine is imported lazily inside compute_signals(), not here at
 # module level -- feature_registry.py (which trade_thesis_engine.py imports)
 # itself imports compute_rsi/compute_bollinger from this module, so a
@@ -658,6 +663,99 @@ def check_regime_deterioration_sell(conn, positions, market_overall, market_rati
         log.info(f"Regime-deterioration PROPOSAL created: sell {pos['qty']} {sym}")
 
 
+# Exit taxonomy (PR 8, Hypothesis-Driven Trading Architecture epic) --
+# per docs/trade-thesis-architecture-reconciliation.md §5's PR 8 bullet:
+# normalize/extend exit_reason using the trade_thesis_id threading from
+# §2 to distinguish thesis invalidation (structure CHoCH, regime
+# deterioration, or the thesis's own invalidation_spec, per PR 5) from a
+# blunt price-only emergency stop (check_stop_losses above) or a profit
+# target (check_symbol_exits' thesis_complete below). Disabled by default:
+# gated separately from trade_thesis_instantiation_enabled (PR 4) so
+# turning instantiation on stays purely observational -- creating
+# trade_theses rows for audit -- until this flag is ALSO explicitly
+# turned on, same staged-rollout discipline as every other PR in this epic.
+THESIS_INVALIDATION_EXIT_DEFAULTS = {"thesis_invalidation_exit_enabled": 0}
+
+
+def load_thesis_invalidation_exit_params(conn):
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT key, value FROM signal_params")
+            rows = cur.fetchall()
+        params = dict(THESIS_INVALIDATION_EXIT_DEFAULTS)
+        for row in rows:
+            k = row[0] if isinstance(row, (list, tuple)) else row["key"]
+            if k not in THESIS_INVALIDATION_EXIT_DEFAULTS:
+                continue
+            v = row[1] if isinstance(row, (list, tuple)) else row["value"]
+            params[k] = float(v)
+        return params
+    except Exception as e:
+        log.warning(f"Could not load thesis invalidation exit params, using defaults: {e}")
+        return dict(THESIS_INVALIDATION_EXIT_DEFAULTS)
+
+
+def _resolve_trade_thesis_id_for_open_position(conn, sym):
+    """Best-effort scalar hint (§2a) -- the trade_thesis_id of the most
+    recent approved BUY proposal for this symbol, never authoritative
+    lot-level ownership (that's position_trades.qty_allocated's job, per
+    §2a, once PR 9 wires it). Returns None if no BUY proposal for this
+    symbol ever carried one -- thesis instantiation was off when the
+    position was opened, or it predates PR 4."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT trade_thesis_id FROM trade_proposals
+            WHERE symbol=%s AND side='buy' AND decision='approved' AND trade_thesis_id IS NOT NULL
+            ORDER BY proposed_at DESC LIMIT 1
+        """, (sym,))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def check_thesis_invalidation_sell(conn, positions, thesis_id):
+    """For each held long position with a resolvable trade_thesis_id, run
+    PR 5's evaluate_thesis_invalidation() and propose an exit distinct
+    from check_stop_losses' blunt price-only check -- structure CHoCH,
+    regime deterioration, or the thesis's own invalidation_spec can all
+    fire before price ever reaches the hard stop level. Positions with no
+    resolvable trade_thesis_id are silently skipped -- check_stop_losses/
+    check_regime_deterioration_sell remain their only safety nets,
+    unchanged."""
+    if not positions:
+        return
+    from trade_thesis_invalidation import evaluate_thesis_invalidation
+
+    for sym, pos in positions.items():
+        if pos["qty"] <= 0:
+            continue  # short position or already flat
+        if _open_sell_exists(conn, sym):
+            continue
+        trade_thesis_id = _resolve_trade_thesis_id_for_open_position(conn, sym)
+        if trade_thesis_id is None:
+            continue
+        thesis = load_trade_thesis(conn, trade_thesis_id)
+        if thesis is None:
+            continue
+        result = evaluate_thesis_invalidation(conn, thesis)
+        if not result.invalidated:
+            continue
+
+        gain_pct = pos["unrealized_plpc"] * 100
+        rationale = (
+            f"THESIS INVALIDATED: {sym} trade_thesis #{trade_thesis_id} -- {', '.join(result.reasons)}. "
+            f"Entry ${pos['avg_entry']:.2f} → current ${pos['current_price']:.2f} ({gain_pct:+.1f}%)"
+        )
+        log.warning(f"Exit [thesis_invalidated]: {rationale}")
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO trade_proposals
+                    (symbol, side, qty, rationale, signal_score, exit_reason, thesis_id, trade_thesis_id)
+                VALUES (%s, 'sell', %s, %s, 93, 'thesis_invalidated', %s, %s)
+            """, (sym, pos["qty"], rationale, thesis_id, trade_thesis_id))
+        conn.commit()
+        log.info(f"Thesis-invalidation PROPOSAL created: sell {pos['qty']} {sym}")
+
+
 def check_symbol_exits(conn, sym, price, bb_middle, positions, p, thesis_id):
     """
     Check thesis-complete and time-stop exit conditions for a held symbol.
@@ -742,6 +840,7 @@ def compute_signals(conn, symbols):
 
     p = load_params(conn)
     thesis_id = mean_reversion_thesis_id(conn)
+    thesis_invalidation_exit_params = load_thesis_invalidation_exit_params(conn)
 
     # Load market regime modifiers computed by market_regime.py this cycle
     score_mod, alloc_mod, market_overall, market_rationale = _load_market_context(conn)
@@ -790,6 +889,13 @@ def compute_signals(conn, symbols):
     # Bear_fear regime: proactively de-risk open longs rather than wait for
     # each position's own stop-loss to trigger one at a time
     check_regime_deterioration_sell(conn, positions, market_overall, market_rationale, thesis_id)
+
+    # Exit taxonomy (PR 8): dark unless a human has explicitly flipped
+    # thesis_invalidation_exit_enabled on, separately from
+    # trade_thesis_instantiation_enabled -- see check_thesis_invalidation_sell's
+    # own docstring.
+    if thesis_invalidation_exit_params["thesis_invalidation_exit_enabled"]:
+        check_thesis_invalidation_sell(conn, positions, thesis_id)
 
     # Count open positions for the max_open_positions gate
     open_position_count = len(positions)

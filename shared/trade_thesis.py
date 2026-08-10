@@ -277,3 +277,38 @@ def record_trade_thesis(conn, thesis):
         except Exception:
             pass
         return None
+
+
+def load_trade_thesis(conn, trade_thesis_id):
+    """Best-effort load + reconstruct of a persisted trade_theses row into
+    a TradeThesis instance -- the read counterpart record_trade_thesis()
+    didn't need until a consumer actually had to read one back (PR 8,
+    shared/signals.py::check_thesis_invalidation_sell(), the first live
+    caller). Returns None if the row doesn't exist, or if it fails to
+    reconstruct (a corrupted/grammar-invalid row) -- fail-open, same
+    contract as record_trade_thesis()."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT thesis_id, symbol, schema_version, evidence_context, hypothesis_type,
+                       hypothesis_text, entry_conditions, evidence_snapshot, invalidation_spec,
+                       success_spec, confidence, provenance, status, as_of
+                FROM trade_theses WHERE id=%s
+            """, (trade_thesis_id,))
+            row = cur.fetchone()
+        if row is None:
+            return None
+        (thesis_id, symbol, schema_version, evidence_context, hypothesis_type,
+         hypothesis_text, entry_conditions, evidence_snapshot, invalidation_spec,
+         success_spec, confidence, provenance, status, as_of) = row
+        return TradeThesis(
+            thesis_id=thesis_id, symbol=symbol, schema_version=schema_version,
+            evidence_context=evidence_context, hypothesis_type=hypothesis_type,
+            hypothesis_text=hypothesis_text, entry_conditions=entry_conditions,
+            evidence_snapshot=evidence_snapshot, invalidation_spec=invalidation_spec,
+            success_spec=success_spec, confidence=float(confidence) if confidence is not None else None,
+            provenance=provenance, status=status, as_of=as_of,
+        )
+    except Exception as e:
+        log.warning(f"trade_thesis: load failed for id={trade_thesis_id}: {e}")
+        return None
