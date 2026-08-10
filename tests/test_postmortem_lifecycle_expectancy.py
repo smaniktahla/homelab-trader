@@ -48,7 +48,7 @@ def _insert_proposal(conn, symbol, side, qty, exit_reason=None, trade_thesis_id=
     return proposal_id
 
 
-def _insert_trade_thesis(conn, symbol, hypothesis_type):
+def _insert_trade_thesis(conn, symbol, hypothesis_type, status="proposed"):
     from trade_thesis import TradeThesis, record_trade_thesis
     thesis_id = _mean_reversion_thesis_id(conn)
     thesis = TradeThesis(
@@ -65,6 +65,7 @@ def _insert_trade_thesis(conn, symbol, hypothesis_type):
         },
         provenance={"entry_conditions": "explicit"},
         as_of=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        status=status,
     )
     row_id = record_trade_thesis(conn, thesis)
     assert row_id is not None
@@ -360,3 +361,68 @@ def test_lifecycle_without_linked_trade_thesis_excluded_from_hypothesis_type_not
 
     assert metric_summary["lifecycle_hypothesis_type"] == {}
     assert metric_summary["lifecycle_symbol"]["MSFT"]["n"] == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PR 12 (Hypothesis-Driven Trading Architecture epic): hypothesis_status_by_type
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_hypothesis_status_segments_mixed_statuses(conn):
+    build_position_lifecycles, run_postmortem_review = _import_ingest_modules()
+
+    _insert_trade_thesis(conn, "AAPL", "mean_reversion_oversold", status="completed")
+    _insert_trade_thesis(conn, "MSFT", "mean_reversion_oversold", status="invalidated")
+    _insert_trade_thesis(conn, "NVDA", "mean_reversion_oversold", status="active")
+    _insert_trade_thesis(conn, "TSLA", "mean_reversion_overbought", status="proposed")
+
+    build_position_lifecycles(conn)
+    result = run_postmortem_review(conn)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT metric_summary FROM strategy_review_proposals ORDER BY created_at DESC LIMIT 1")
+        metric_summary = cur.fetchone()[0]
+
+    assert "Hypotheses: 4 trade thesis instance(s) across 2 type(s)." in result["finding"]
+
+    oversold = metric_summary["hypothesis_status_by_type"]["mean_reversion_oversold"]
+    assert oversold["total"] == 3
+    assert oversold["by_status"] == {"completed": 1, "invalidated": 1, "active": 1}
+    # 2 of 3 resolved (completed + invalidated) -> 66.7%
+    assert oversold["resolution_rate_pct"] == round(100 * 2 / 3, 1)
+    # of the 2 resolved, 1 completed -> 50%
+    assert oversold["completion_rate_of_resolved_pct"] == 50.0
+
+    overbought = metric_summary["hypothesis_status_by_type"]["mean_reversion_overbought"]
+    assert overbought["total"] == 1
+    assert overbought["by_status"] == {"proposed": 1}
+    assert overbought["resolution_rate_pct"] == 0.0
+    assert overbought["completion_rate_of_resolved_pct"] is None  # nothing resolved yet -- unknown, not 0
+
+
+def test_hypothesis_status_segments_empty_when_no_theses_exist(conn):
+    build_position_lifecycles, run_postmortem_review = _import_ingest_modules()
+    build_position_lifecycles(conn)
+    run_postmortem_review(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT metric_summary FROM strategy_review_proposals ORDER BY created_at DESC LIMIT 1")
+        metric_summary = cur.fetchone()[0]
+    assert metric_summary["hypothesis_status_by_type"] == {}
+
+
+def test_hypothesis_status_segments_independent_of_lifecycle_data(conn):
+    """A trade_theses row with no linked position_lifecycles at all (e.g.
+    invalidated before any position ever opened) must still show up here
+    -- this data source doesn't require a closed lifecycle, unlike PR 11's
+    lifecycle_hypothesis_type."""
+    build_position_lifecycles, run_postmortem_review = _import_ingest_modules()
+
+    _insert_trade_thesis(conn, "AAPL", "mean_reversion_oversold", status="invalidated")
+    build_position_lifecycles(conn)  # no trades at all -- zero lifecycles
+    run_postmortem_review(conn)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT metric_summary FROM strategy_review_proposals ORDER BY created_at DESC LIMIT 1")
+        metric_summary = cur.fetchone()[0]
+
+    assert metric_summary["lifecycle_hypothesis_type"] == {}  # PR 11's axis: nothing to show
+    assert metric_summary["hypothesis_status_by_type"]["mean_reversion_oversold"]["total"] == 1  # PR 12's axis: still shows

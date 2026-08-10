@@ -1318,6 +1318,10 @@ const LIFECYCLE_GROUP_LABEL = {
   lifecycle_thesis: 'Thesis', lifecycle_symbol: 'Symbol', lifecycle_exit_reason: 'Exit Reason',
   lifecycle_market_regime: 'Market Regime', lifecycle_sector: 'Sector',
   lifecycle_holding_period: 'Holding Period', lifecycle_calendar_period: 'Month',
+  // PR 11 (Hypothesis-Driven Trading Architecture epic): hypothesis_type
+  // segmentation, P&L-based (closed position_lifecycles only) -- distinct
+  // from hypothesis_status_by_type below (PR 12, status-based, not P&L).
+  lifecycle_hypothesis_type: 'Hypothesis Type',
 };
 const SAMPLE_QUALITY_COLOR = { insufficient: '#666', preliminary: '#c9a227', established: '#3fb950' };
 
@@ -1418,6 +1422,29 @@ function _reviewRiskDecisionTable(metricSummary) {
   return contextRows + constraintRows;
 }
 
+// PR 12 (Hypothesis-Driven Trading Architecture epic): trade_theses status
+// distribution per hypothesis_type (hypothesis_status_by_type) -- how
+// hypotheses actually resolve (invalidated/completed/still active),
+// straight from trade_theses, independent of whether any linked position
+// ever closed. Different shape from bucket_stats-based tables above, so
+// its own small renderer rather than forcing it through
+// _reviewLifecycleBucketTable.
+function _reviewHypothesisStatusTable(metricSummary) {
+  const byType = (metricSummary || {}).hypothesis_status_by_type || {};
+  return Object.entries(byType).map(([hyp, s]) => {
+    const statusText = Object.entries(s.by_status || {})
+      .map(([status, n]) => `${status}: ${n}`).join(', ');
+    return `
+    <tr>
+      <td style="color:#888">${hyp}</td>
+      <td>${s.total}</td>
+      <td style="font-size:.78rem;color:#aaa">${statusText}</td>
+      <td>${s.resolution_rate_pct != null ? s.resolution_rate_pct + '%' : '—'}</td>
+      <td class="${(s.completion_rate_of_resolved_pct ?? 0) >= 50 ? 'up' : 'down'}">${s.completion_rate_of_resolved_pct != null ? s.completion_rate_of_resolved_pct + '%' : '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
 async function loadReviews() {
   const wrap = document.getElementById('reviews-list');
   try {
@@ -1462,6 +1489,14 @@ async function loadReviews() {
              <tbody>${riskDecisionRows}</tbody>
            </table>`
         : '';
+      const hypothesisRows = _reviewHypothesisStatusTable(r.metric_summary);
+      const hypothesisTable = hypothesisRows
+        ? `<div style="margin-top:14px;color:#888;font-size:.78rem">Hypothesis Status (trade_theses -- how each hypothesis type actually resolves)</div>
+           <table style="margin-top:6px">
+             <thead><tr><th>Hypothesis Type</th><th>N</th><th>By Status</th><th>Resolved</th><th>Completed (of resolved)</th></tr></thead>
+             <tbody>${hypothesisRows}</tbody>
+           </table>`
+        : '';
       return `
       <div class="proposal-row" style="flex-direction:column;align-items:stretch">
         <div class="prop-info">
@@ -1473,6 +1508,7 @@ async function loadReviews() {
           ${lifecycleTable}
           ${adherenceTable}
           ${riskDecisionTable}
+          ${hypothesisTable}
         </div>
       </div>`;
     }).join('');

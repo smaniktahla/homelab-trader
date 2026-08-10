@@ -361,6 +361,61 @@ def _risk_decision_segments(rows):
     }
 
 
+def _fetch_trade_theses_statuses(conn):
+    """PR 12 (Hypothesis-Driven Trading Architecture epic): every
+    trade_theses row's current (hypothesis_type, status) -- a fifth
+    independent data source, same "always computed, merged under its own
+    prefixed key" treatment as the four above. Deliberately NOT windowed
+    by WINDOW_DAYS like the others: this is a current-state snapshot (how
+    do hypotheses of each type actually resolve, right now), not a
+    windowed event tally -- an old still-open thesis is exactly as
+    relevant to that question as a new one, so excluding it by age would
+    misrepresent the resolution rate rather than just narrow the sample."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT hypothesis_type, status FROM trade_theses")
+        return cur.fetchall()
+
+
+def _hypothesis_status_segments(rows):
+    """Status distribution per hypothesis_type, straight from trade_theses
+    -- genuinely different data from PR 11's lifecycle_hypothesis_type
+    (which is P&L, derived from CLOSED position_lifecycles only). A trade
+    thesis can resolve (invalidated or completed) without a linked
+    position_lifecycles row ever closing -- e.g. invalidated before the
+    position was ever opened -- so this answers "how do hypotheses of
+    this type actually resolve" independent of whether a trade's P&L is
+    known yet. See shared/trade_thesis.py::STATUSES for the vocabulary;
+    'invalidated'/'completed'/'superseded' are terminal (per
+    shared/trade_thesis_reevaluation.py), 'proposed'/'active'/'weakening'
+    are not."""
+    _TERMINAL = {"invalidated", "completed", "superseded"}
+
+    counts_by_type = {}
+    for r in rows:
+        hyp = r["hypothesis_type"]
+        if hyp is None:
+            continue
+        counts_by_type.setdefault(hyp, Counter())[r["status"]] += 1
+
+    out = {}
+    for hyp, status_counts in counts_by_type.items():
+        total = sum(status_counts.values())
+        resolved = sum(n for status, n in status_counts.items() if status in _TERMINAL)
+        completed = status_counts.get("completed", 0)
+        out[hyp] = {
+            "total": total,
+            "by_status": dict(status_counts),
+            "resolution_rate_pct": round(100 * resolved / total, 1) if total else None,
+            # Of theses that HAVE resolved, what fraction resolved as
+            # 'completed' (thesis played out) rather than 'invalidated'/
+            # 'superseded' -- None (not 0) while nothing has resolved yet,
+            # same "unknown, not zero" convention this codebase uses
+            # everywhere else for a denominator of zero.
+            "completion_rate_of_resolved_pct": round(100 * completed / resolved, 1) if resolved else None,
+        }
+    return {"hypothesis_status_by_type": out}
+
+
 def _propose_score_threshold_change(conn, score_stats):
     """If low score buckets clearly underperform high buckets with enough N,
     propose raising score_proposal_min to the boundary of the better bucket.
@@ -434,12 +489,20 @@ def run_postmortem_review(conn):
     risk_segments = _risk_decision_segments(risk_rows)
     risk_note = f" | Risk engine: {len(risk_rows)} sizing decision(s) in window."
 
+    # Fifth independent data source (PR 12, Hypothesis-Driven Trading
+    # Architecture epic) -- trade_theses status distribution, not windowed
+    # (see _fetch_trade_theses_statuses' own docstring).
+    hypothesis_rows = _fetch_trade_theses_statuses(conn)
+    hypothesis_segments = _hypothesis_status_segments(hypothesis_rows)
+    n_hypothesis_types = len(hypothesis_segments["hypothesis_status_by_type"])
+    hypothesis_note = f" | Hypotheses: {len(hypothesis_rows)} trade thesis instance(s) across {n_hypothesis_types} type(s)."
+
     if n < MIN_BUCKET_N:
         finding = (
             f"Insufficient data: {n} resolved buy signals in the last {WINDOW_DAYS}d "
             f"(need {MIN_BUCKET_N}+ per bucket). Skipping calibration check."
-        ) + lifecycle_note + adherence_note + risk_note
-        _insert_review(conn, n, {**lifecycle_segments, **adherence_segments, **risk_segments}, finding, None)
+        ) + lifecycle_note + adherence_note + risk_note + hypothesis_note
+        _insert_review(conn, n, {**lifecycle_segments, **adherence_segments, **risk_segments, **hypothesis_segments}, finding, None)
         return {"n_resolved": n, "finding": finding, "proposal": None}
 
     score_rows = [(_score_bucket(float(s)), float(r)) for s, _, _, r, _ in rows if s is not None]
@@ -459,6 +522,7 @@ def run_postmortem_review(conn):
         **lifecycle_segments,
         **adherence_segments,
         **risk_segments,
+        **hypothesis_segments,
     }
 
     proposal = _propose_score_threshold_change(conn, score_stats)
@@ -467,11 +531,11 @@ def run_postmortem_review(conn):
         finding = (
             f"Score calibration gap found: {proposal['reason']}. "
             f"Suggest raising score_proposal_min from {proposal['current_value']} to {proposal['proposed_value']}."
-        ) + lifecycle_note + adherence_note + risk_note
+        ) + lifecycle_note + adherence_note + risk_note + hypothesis_note
     else:
         finding = (
             f"No calibration change proposed this cycle (N={n} resolved). Bucket stats logged for trend-watching."
-            + lifecycle_note + adherence_note + risk_note
+            + lifecycle_note + adherence_note + risk_note + hypothesis_note
         )
 
     _insert_review(conn, n, metric_summary, finding, proposal)
