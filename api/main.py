@@ -550,13 +550,37 @@ def get_portfolio_history(range: str = "1m"):
 
 @app.get("/api/positions")
 def get_positions():
+    """PR C, exit/protection-state series (docs/position-exit-state-
+    investigation.md): adds an explicit `state` per position (via
+    shared/position_execution_state.py's PR A classifier) instead of
+    leaving the dashboard to infer one from `pending_orders` presence
+    alone -- that inference is exactly what collapsed 3 different
+    situations into one "sell pending" badge (§2 of the doc). `state` is
+    one of pes.VALID_STATES minus STATE_CLOSING (case 4 has no
+    representation in this endpoint at all -- see GET
+    /api/positions/closing, PR B -- because Alpaca has already dropped a
+    stopped-out symbol from /v2/positions by the time that state would
+    apply, so there's no row here to attach it to)."""
     positions = alpaca("GET", "/v2/positions")
     symbols = [p["symbol"] for p in positions]
     names = {}
-    if symbols:
-        with db() as conn, conn.cursor() as cur:
+    open_proposal_by_symbol = {}
+    with db() as conn, conn.cursor() as cur:
+        if symbols:
             cur.execute("SELECT symbol, name FROM universe WHERE symbol = ANY(%s)", (symbols,))
             names = {r["symbol"]: r["name"] for r in cur.fetchall()}
+        # Bulk fetch of every open (undecided) sell proposal, one query
+        # instead of pes.load_open_sell_proposal() per symbol -- same
+        # "at most one per symbol" invariant that helper documents
+        # (_open_sell_exists()), just batched.
+        cur.execute("""
+            SELECT DISTINCT ON (symbol) *
+            FROM trade_proposals
+            WHERE side='sell' AND decision IS NULL
+            ORDER BY symbol, proposed_at DESC
+        """)
+        open_proposal_by_symbol = {r["symbol"]: dict(r) for r in cur.fetchall()}
+
     # Alpaca's own open orders -- status=open covers everything non-terminal
     # (new/accepted/pending_new/partially_filled/replaced). Surfaced per
     # position so the UI can show "order pending" instead of silently
@@ -572,21 +596,71 @@ def get_positions():
     for o in open_orders:
         pending_by_symbol.setdefault(o["symbol"], []).append({
             "side": o["side"], "qty": float(o["qty"]), "status": o["status"],
+            "type": o.get("type"), "stop_price": o.get("stop_price"),
             "submitted_at": o.get("submitted_at"),
         })
-    return [{
-        "symbol": p["symbol"],
-        "company_name": names.get(p["symbol"]) or None,
-        "qty": float(p["qty"]),
-        "avg_entry_price": float(p["avg_entry_price"]),
-        "current_price": float(p["current_price"]),
-        "market_value": float(p["market_value"]),
-        "cost_basis": float(p["cost_basis"]),
-        "unrealized_pl": float(p["unrealized_pl"]),
-        "unrealized_plpc": round(float(p["unrealized_plpc"]) * 100, 2),
-        "side": p["side"],
-        "pending_orders": pending_by_symbol.get(p["symbol"], []),
-    } for p in positions]
+
+    result = []
+    for p in positions:
+        symbol = p["symbol"]
+        current_price = float(p["current_price"])
+        pending_orders = pending_by_symbol.get(symbol, [])
+        open_proposal = open_proposal_by_symbol.get(symbol)
+        state = pes.classify_position_execution_state(pending_orders, open_proposal)
+
+        row = {
+            "symbol": symbol,
+            "company_name": names.get(symbol) or None,
+            "qty": float(p["qty"]),
+            "avg_entry_price": float(p["avg_entry_price"]),
+            "current_price": current_price,
+            "market_value": float(p["market_value"]),
+            "cost_basis": float(p["cost_basis"]),
+            "unrealized_pl": float(p["unrealized_pl"]),
+            "unrealized_plpc": round(float(p["unrealized_plpc"]) * 100, 2),
+            "side": p["side"],
+            "pending_orders": pending_orders,
+            "state": state,
+        }
+
+        # Per-state display detail -- exactly what the target UI (per the
+        # investigation doc's mockup) needs, computed once here rather than
+        # re-derived client-side from pending_orders/proposal internals.
+        if state == pes.STATE_PROTECTED:
+            stop_order = next(
+                (o for o in pending_orders if o["side"] == "sell" and o["type"] in ("stop", "stop_limit")
+                 and o.get("stop_price") is not None), None)
+            if stop_order:
+                stop_price = float(stop_order["stop_price"])
+                row["protective_stop_price"] = stop_price
+                row["distance_to_stop_pct"] = (
+                    round((current_price - stop_price) / current_price * 100, 2) if current_price else None
+                )
+        elif state == pes.STATE_EXIT_RECOMMENDED:
+            row["exit_reason"] = open_proposal.get("exit_reason")
+            row["exit_rationale"] = open_proposal.get("rationale")
+            row["exit_proposed_at"] = open_proposal.get("proposed_at")
+            # A recommended exit can still have a resting stop under it
+            # (§5 of the doc -- exit_recommended outranks protected but
+            # doesn't erase that a stop is also there); surface the same
+            # stop detail as the protected branch so the UI can show both.
+            stop_order = next(
+                (o for o in pending_orders if o["side"] == "sell" and o["type"] in ("stop", "stop_limit")
+                 and o.get("stop_price") is not None), None)
+            if stop_order:
+                stop_price = float(stop_order["stop_price"])
+                row["protective_stop_price"] = stop_price
+                row["distance_to_stop_pct"] = (
+                    round((current_price - stop_price) / current_price * 100, 2) if current_price else None
+                )
+        elif state == pes.STATE_SELL_PENDING:
+            sell_order = next(
+                (o for o in pending_orders if o["side"] == "sell" and o["type"] == "market"), None)
+            if sell_order:
+                row["sell_submitted_at"] = sell_order.get("submitted_at")
+
+        result.append(row)
+    return result
 
 @app.get("/api/positions/closing")
 def get_closing_positions():
