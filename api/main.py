@@ -5,7 +5,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import Optional
 import psycopg2, psycopg2.extras, os, requests as http, secrets, time, bisect, json, logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from signals import compute_signals, compute_bollinger, fetch_alpaca_portfolio, load_params, load_sector_map
 from signal_components import weighted_component_score
@@ -17,6 +17,7 @@ import risk_engine
 import trading_permission
 import circuit_breaker
 import proposal_ranking
+import position_execution_state as pes
 
 log = logging.getLogger(__name__)
 
@@ -586,6 +587,60 @@ def get_positions():
         "side": p["side"],
         "pending_orders": pending_by_symbol.get(p["symbol"], []),
     } for p in positions]
+
+@app.get("/api/positions/closing")
+def get_closing_positions():
+    """PR B, exit/protection-state series (docs/position-exit-state-
+    investigation.md): symbols where a broker-side protective stop has
+    already fired -- so Alpaca's own /v2/positions has already dropped
+    them -- but the local `trades` ledger hasn't caught up yet (that
+    happens in ingest.py::reconcile_broker_stop_fills(), on its normal
+    hourly cycle). Without this, a stopped-out position just vanishes
+    from the dashboard with zero explanation for up to an hour.
+
+    Deliberately a separate endpoint rather than folding synthetic rows
+    into GET /api/positions here -- this ships dark (PR C is what teaches
+    the dashboard to render it) and a synthetic row's shape (no
+    current_price/market_value/unrealized_pl -- the position is already
+    closed) is different enough from a real position that merging them
+    into one list before the frontend is ready to tell them apart would
+    risk breaking the existing Positions table.
+
+    Same 2-hour lookback and stop/stop_limit + sell + filled_qty>0
+    filtering convention as reconcile_broker_stop_fills(), applied
+    read-only, live per-request -- independent of that function's own
+    hourly batch cadence so a slow ingest cycle can never delay what this
+    endpoint reports."""
+    try:
+        open_positions = alpaca("GET", "/v2/positions")
+    except Exception:
+        return []
+    known_open_symbols = {p["symbol"] for p in open_positions}
+
+    try:
+        after = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        closed_orders = alpaca("GET", "/v2/orders", params={
+            "status": "closed", "after": after, "direction": "desc", "limit": 200,
+        })
+    except Exception:
+        return []
+    if not closed_orders:
+        return []
+
+    order_ids = [o["id"] for o in closed_orders]
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT order_id FROM trades WHERE order_id = ANY(%s)", (order_ids,))
+        known_trade_order_ids = {r["order_id"] for r in cur.fetchall()}
+
+    fills = pes.find_closing_fills(closed_orders, known_open_symbols, known_trade_order_ids)
+    return [{
+        "symbol": o["symbol"],
+        "state": pes.STATE_CLOSING,
+        "qty": float(o["filled_qty"]),
+        "fill_price": float(o["filled_avg_price"]) if o.get("filled_avg_price") else None,
+        "filled_at": o.get("filled_at") or o.get("updated_at"),
+        "order_id": o["id"],
+    } for o in fills]
 
 def _all_closed_lifecycles(cur):
     """Every CLOSED position_lifecycles row, across ALL symbols, oldest

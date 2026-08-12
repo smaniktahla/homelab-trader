@@ -30,8 +30,10 @@ STATE_OWNED = "owned"
 STATE_PROTECTED = "protected"
 STATE_EXIT_RECOMMENDED = "exit_recommended"
 STATE_SELL_PENDING = "sell_pending"
+STATE_CLOSING = "closing"
 
-VALID_STATES = (STATE_OWNED, STATE_PROTECTED, STATE_EXIT_RECOMMENDED, STATE_SELL_PENDING)
+VALID_STATES = (STATE_OWNED, STATE_PROTECTED, STATE_EXIT_RECOMMENDED,
+                 STATE_SELL_PENDING, STATE_CLOSING)
 
 # Alpaca order `type` values that represent a resting protective stop
 # (case 1) rather than a submitted, actively-executing exit (case 3).
@@ -94,6 +96,45 @@ def classify_position_execution_state(pending_orders, open_sell_proposal=None):
         return STATE_PROTECTED
 
     return STATE_OWNED
+
+
+def find_closing_fills(closed_orders, known_open_symbols, known_trade_order_ids):
+    """PR B of the exit/protection-state series -- per
+    docs/position-exit-state-investigation.md's PR B bullet: surface case
+    4 (a broker stop that has fired but hasn't been reconciled into the
+    local `trades` ledger yet) instead of letting the position silently
+    disappear.
+
+    Pure filter, no DB/Alpaca IO -- same split as
+    classify_position_execution_state(). Mirrors the exact filtering
+    ingest.py::reconcile_broker_stop_fills() already uses to find
+    broker-initiated stop fills, but read-only and framed as "what should
+    the UI show right now" rather than "what should get written to
+    trades" -- the two call sites (this one, live per-request; that one,
+    hourly batch) are intentionally independent so a slow ingest cycle
+    can never delay what the dashboard shows.
+
+    closed_orders: Alpaca orders with status='closed' (any terminal
+        status), e.g. from GET /v2/orders?status=closed&after=<lookback>.
+    known_open_symbols: set of symbols currently held per Alpaca's own
+        /v2/positions -- a symbol still open obviously isn't "closing."
+    known_trade_order_ids: set of trades.order_id already present locally
+        -- once reconcile_broker_stop_fills() (or any other path) has
+        written the trade, this stops being a gap to report; it's just a
+        normal closed position at that point, visible in Trade History.
+
+    Returns the subset of closed_orders that are still in the gap: a
+    filled protective stop, for a symbol no longer open at the broker,
+    with no local trades row yet."""
+    return [
+        o for o in closed_orders
+        if o.get("status") == "filled"
+        and o.get("type") in _STOP_ORDER_TYPES
+        and o.get("side") == "sell"
+        and float(o.get("filled_qty") or 0) > 0
+        and o.get("symbol") not in known_open_symbols
+        and o.get("id") not in known_trade_order_ids
+    ]
 
 
 def load_open_sell_proposal(conn, symbol):
