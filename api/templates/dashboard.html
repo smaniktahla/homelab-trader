@@ -375,6 +375,7 @@
     <button class="page-tab-btn active" id="page-tab-dashboard" onclick="showPageTab('dashboard',this)">Dashboard</button>
     <button class="page-tab-btn" id="page-tab-history" onclick="showPageTab('history',this)">Trade History</button>
     <button class="page-tab-btn" id="page-tab-reviews" onclick="showPageTab('reviews',this)">Strategy Review</button>
+    <button class="page-tab-btn" id="page-tab-globalmarkets" onclick="showPageTab('globalmarkets',this)">Global Markets</button>
   </div>
 
   <div id="page-dashboard">
@@ -473,23 +474,6 @@
     </span>
     <span class="mkt-rationale" id="mkt-rationale"></span>
     <span class="mkt-updated" id="mkt-updated"></span>
-  </div>
-
-  <!-- Global Markets -->
-  <div class="card">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <h2 style="margin:0">Global Markets</h2>
-      <div style="display:flex;flex-wrap:wrap;gap:12px;font-size:.72rem;color:#888">
-        <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3ecf6e;margin-right:4px"></span>Risk-on</span>
-        <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f75f5f;margin-right:4px"></span>Risk-off</span>
-        <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#888;margin-right:4px"></span>Neutral</span>
-        <span>★ Home market</span>
-        <span>Size = market cap</span>
-      </div>
-    </div>
-    <div id="gm-clock-strip" style="width:100%;margin-bottom:4px"></div>
-    <div id="gm-map" style="width:100%"></div>
-    <div id="gm-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px"></div>
   </div>
 
   <!-- Portfolio Advisor -->
@@ -608,6 +592,25 @@
   </div>
   <div id="reviews-list"><div class="no-data">Loading…</div></div>
   </div><!-- /page-reviews -->
+
+  <!-- Global Markets -->
+  <div id="page-globalmarkets" style="display:none">
+  <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <h2 style="margin:0">Global Markets</h2>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;font-size:.72rem;color:#888">
+        <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3ecf6e;margin-right:4px"></span>Risk-on</span>
+        <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f75f5f;margin-right:4px"></span>Risk-off</span>
+        <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#888;margin-right:4px"></span>Neutral</span>
+        <span>★ Home market</span>
+        <span>Size = market cap</span>
+      </div>
+    </div>
+    <div id="gm-clock-strip" style="width:100%;margin-bottom:4px"></div>
+    <div id="gm-map" style="width:100%"></div>
+    <div id="gm-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px"></div>
+  </div>
+  </div><!-- /page-globalmarkets -->
 </div>
 
 <!-- Trade Modal -->
@@ -648,6 +651,7 @@ function showPageTab(name, btn) {
   document.getElementById('page-dashboard').style.display = name === 'dashboard' ? '' : 'none';
   document.getElementById('page-history').style.display = name === 'history' ? '' : 'none';
   document.getElementById('page-reviews').style.display = name === 'reviews' ? '' : 'none';
+  document.getElementById('page-globalmarkets').style.display = name === 'globalmarkets' ? '' : 'none';
   document.querySelectorAll('.page-tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
 }
