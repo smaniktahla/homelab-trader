@@ -548,6 +548,62 @@ def get_portfolio_history(range: str = "1m"):
         "spy_assumptions": {"cost_adjusted": cost_adjust, "dividends_included": include_dividends},
     }
 
+def _risk_drift_for_symbols(cur, symbols):
+    """PR D, exit/protection-state series (docs/position-exit-state-
+    investigation.md): planned risk vs. realized risk vs. drift, per §3's
+    finding on APP -- a resting stop's dollar price is frozen at proposal
+    time against `planned_entry_price`, but the actual fill can land
+    materially away from that plan (slippage, an after-hours queue, a
+    multi-day approval-to-fill gap). This doesn't unify the two numbers
+    (per instruction) -- it reports the gap between them explicitly:
+
+      planned risk  = stop distance from planned_entry_price (what the
+                       proposal was sized against)
+      realized risk = stop distance from the actual fill price (what's
+                       actually protecting the position today)
+      drift         = realized - planned, signed (positive = the stop
+                       ended up WIDER than planned, e.g. APP's 12%->16%;
+                       negative = TIGHTER -- the same slippage mechanism
+                       cuts either way depending on which direction price
+                       gapped between proposal and fill)
+
+    Resolves each symbol's most recent filled BUY trade and, if it came
+    from an approved proposal, that proposal's planned figures. Returns no
+    entry (never a fabricated 0%) for a symbol with no linked proposal --
+    a manual buy has no "plan" to diff against."""
+    if not symbols:
+        return {}
+    cur.execute("""
+        SELECT DISTINCT ON (t.symbol)
+            t.symbol, t.price AS actual_entry_price, t.initial_stop_price,
+            tp.planned_entry_price, tp.planned_initial_stop_price
+        FROM trades t
+        LEFT JOIN trade_proposals tp ON tp.id = t.proposal_id
+        WHERE t.symbol = ANY(%s) AND t.side='buy' AND t.status='filled'
+        ORDER BY t.symbol, t.traded_at DESC
+    """, (symbols,))
+    result = {}
+    for r in cur.fetchall():
+        if r["planned_entry_price"] is None or r["planned_initial_stop_price"] is None or r["initial_stop_price"] is None:
+            continue
+        planned_entry = float(r["planned_entry_price"])
+        actual_entry = float(r["actual_entry_price"])
+        if planned_entry <= 0 or actual_entry <= 0:
+            continue
+        planned_stop = float(r["planned_initial_stop_price"])
+        actual_stop = float(r["initial_stop_price"])
+        planned_risk_pct = round((planned_entry - planned_stop) / planned_entry * 100, 2)
+        realized_risk_pct = round((actual_entry - actual_stop) / actual_entry * 100, 2)
+        result[r["symbol"]] = {
+            "planned_entry_price": planned_entry,
+            "actual_entry_price": actual_entry,
+            "planned_risk_pct": planned_risk_pct,
+            "realized_risk_pct": realized_risk_pct,
+            "drift_pct": round(realized_risk_pct - planned_risk_pct, 2),
+        }
+    return result
+
+
 @app.get("/api/positions")
 def get_positions():
     """PR C, exit/protection-state series (docs/position-exit-state-
@@ -580,6 +636,7 @@ def get_positions():
             ORDER BY symbol, proposed_at DESC
         """)
         open_proposal_by_symbol = {r["symbol"]: dict(r) for r in cur.fetchall()}
+        risk_drift_by_symbol = _risk_drift_for_symbols(cur, symbols)
 
     # Alpaca's own open orders -- status=open covers everything non-terminal
     # (new/accepted/pending_new/partially_filled/replaced). Surfaced per
@@ -636,6 +693,8 @@ def get_positions():
                 row["distance_to_stop_pct"] = (
                     round((current_price - stop_price) / current_price * 100, 2) if current_price else None
                 )
+            if symbol in risk_drift_by_symbol:
+                row["risk_drift"] = risk_drift_by_symbol[symbol]
         elif state == pes.STATE_EXIT_RECOMMENDED:
             row["exit_reason"] = open_proposal.get("exit_reason")
             row["exit_rationale"] = open_proposal.get("rationale")
@@ -653,6 +712,8 @@ def get_positions():
                 row["distance_to_stop_pct"] = (
                     round((current_price - stop_price) / current_price * 100, 2) if current_price else None
                 )
+            if symbol in risk_drift_by_symbol:
+                row["risk_drift"] = risk_drift_by_symbol[symbol]
         elif state == pes.STATE_SELL_PENDING:
             sell_order = next(
                 (o for o in pending_orders if o["side"] == "sell" and o["type"] == "market"), None)
