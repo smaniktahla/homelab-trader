@@ -733,11 +733,16 @@ function sortPositions(key) {
 // human-readable projection of position_execution_state, not a re-exposure
 // of Alpaca's order-state implementation detail.
 const STATE_META = {
-  closing:          { label: 'Closing',           sortRank: 0 },
-  exit_recommended: { label: 'Exit recommended',  sortRank: 1 },
-  sell_pending:     { label: 'Sell pending',       sortRank: 2 },
-  protected:        { label: 'Owned · Protected',  sortRank: 3 },
-  owned:            { label: 'Owned',              sortRank: 4 },
+  closing:          { label: 'Closing',           sortRank: 0,
+    help: 'A protective stop just fired at the broker and the position is gone from the account, but the local trade record hasn\'t caught up yet (normally within the hour). Nothing to do here — it\'s already sold.' },
+  exit_recommended: { label: 'Exit recommended',  sortRank: 1,
+    help: 'The strategy has flagged this position for exit (stop-loss, thesis complete, time stop, or regime deterioration) and it\'s waiting on your approve/reject decision. Nothing is submitted to the broker until you act.' },
+  sell_pending:     { label: 'Sell pending',       sortRank: 2,
+    help: 'A sell order has been submitted to the broker and is executing. This is genuinely in-flight — it should fill within seconds during market hours.' },
+  protected:        { label: 'Owned · Protected',  sortRank: 3,
+    help: 'You own this position and it has a resting protective stop order at the broker. It will only sell if price falls to the stop price — otherwise it just sits there working as designed.' },
+  owned:            { label: 'Owned',              sortRank: 4,
+    help: 'You own this position with no protective stop attached and no pending action. Usually a position opened before automatic stop orders shipped, or one where the stop failed to attach.' },
 };
 
 function _statusCell(p) {
@@ -769,7 +774,7 @@ function _statusCell(p) {
     : p.state === 'sell_pending' ? '#e8a33d'
     : p.state === 'protected' ? '#3ecf6e' : '#888';
   return `<div style="white-space:normal" title="${title}">
-    <span style="color:${color};font-weight:600">${meta.label}</span>
+    <span style="color:${color};font-weight:600;cursor:help" title="${meta.help || ''}">${meta.label}</span>
     ${detail ? `<div style="color:#888;font-size:.72rem;margin-top:2px">${detail}</div>` : ''}
   </div>`;
 }
