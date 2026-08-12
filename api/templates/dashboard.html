@@ -755,6 +755,27 @@ function _statusCell(p) {
     const plStr = plpc != null ? `${plpc >= 0 ? '+' : ''}${plpc}%` : '—';
     const distStr = p.distance_to_stop_pct != null ? `${p.distance_to_stop_pct >= 0 ? '-' : '+'}${Math.abs(p.distance_to_stop_pct).toFixed(1)}% away` : '';
     detail = `P/L ${plStr} · hard stop ${fmtUSD(p.protective_stop_price)} (${distStr})`;
+    // PR D: planned-vs-realized risk drift (docs/position-exit-state-
+    // investigation.md §3/PR D) -- only shown once it's non-trivial
+    // (>=0.5pp) to avoid noise on the common near-zero case.
+    const rd = p.risk_drift;
+    if (rd && Math.abs(rd.drift_pct) >= 0.5) {
+      const wider = rd.drift_pct > 0;
+      const rose = rd.actual_entry_price > rd.planned_entry_price;
+      // Plain-English, not a risk memo -- per user feedback, "planned
+      // risk 12% / realized risk 16.35%" reads like a broker's desk
+      // note. What actually matters to a non-broker: what was supposed
+      // to happen, what happened instead, and what that means for them.
+      const driftTitle = `This was planned to buy at ${fmtUSD(rd.planned_entry_price)}, but actually filled at `
+        + `${fmtUSD(rd.actual_entry_price)} — price ${rose ? 'rose' : 'fell'} while the order was waiting to fill. `
+        + `The stop-loss price stayed fixed at the planned dollar amount, so it's now `
+        + `${rd.realized_risk_pct}% below the real entry instead of the intended ${rd.planned_risk_pct}% — `
+        + (wider
+          ? `wider than planned, meaning more room for the price to fall before you're protected.`
+          : `tighter than planned, meaning it could sell on a smaller dip than intended.`);
+      detail += ` <span style="color:${wider ? '#f75f5f' : '#3ecf6e'};cursor:help" title="${driftTitle}">`
+        + `(${wider ? '+' : ''}${rd.drift_pct}pp drift)</span>`;
+    }
   }
   if (p.state === 'exit_recommended') {
     if (!detail && p.exit_rationale) detail = p.exit_rationale;
