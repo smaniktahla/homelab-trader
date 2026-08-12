@@ -720,9 +720,58 @@ function sortPositions(key) {
     posSortDir = posSortDir === 'asc' ? 'desc' : 'asc';
   } else {
     posSortKey = key;
-    posSortDir = key === 'symbol' ? 'asc' : 'desc';
+    // Ascending-first for symbol (alphabetical) and statusSortVal (low
+    // rank = most urgent, e.g. closing/exit_recommended, should lead).
+    posSortDir = (key === 'symbol' || key === 'statusSortVal') ? 'asc' : 'desc';
   }
   renderPositions();
+}
+
+// State -> {label, sortRank} -- sortRank orders by urgency when sorting
+// by Status (closing/exit_recommended need eyes soonest, owned needs none).
+// Per docs/position-exit-state-investigation.md's target UI: this is the
+// human-readable projection of position_execution_state, not a re-exposure
+// of Alpaca's order-state implementation detail.
+const STATE_META = {
+  closing:          { label: 'Closing',           sortRank: 0 },
+  exit_recommended: { label: 'Exit recommended',  sortRank: 1 },
+  sell_pending:     { label: 'Sell pending',       sortRank: 2 },
+  protected:        { label: 'Owned · Protected',  sortRank: 3 },
+  owned:            { label: 'Owned',              sortRank: 4 },
+};
+
+function _statusCell(p) {
+  const meta = STATE_META[p.state] || STATE_META.owned;
+  let detail = '';
+  let title = '';
+
+  if (p.state === 'protected' || (p.state === 'exit_recommended' && p.protective_stop_price != null)) {
+    const plpc = p.unrealized_plpc;
+    const plStr = plpc != null ? `${plpc >= 0 ? '+' : ''}${plpc}%` : '—';
+    const distStr = p.distance_to_stop_pct != null ? `${p.distance_to_stop_pct >= 0 ? '-' : '+'}${Math.abs(p.distance_to_stop_pct).toFixed(1)}% away` : '';
+    detail = `P/L ${plStr} · hard stop ${fmtUSD(p.protective_stop_price)} (${distStr})`;
+  }
+  if (p.state === 'exit_recommended') {
+    if (!detail && p.exit_rationale) detail = p.exit_rationale;
+    title = p.exit_rationale || '';
+  }
+  if (p.state === 'sell_pending') {
+    const when = p.sell_submitted_at ? new Date(p.sell_submitted_at).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}) : 'recently';
+    detail = `Exit approved ${when} · broker order submitted`;
+  }
+  if (p.state === 'closing') {
+    const when = p.filled_at ? new Date(p.filled_at).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}) : '';
+    detail = `Stop triggered${when ? ' ' + when : ''} · awaiting fill`;
+    title = p.fill_price != null ? `Filled at ${fmtUSD(p.fill_price)}` : '';
+  }
+
+  const color = p.state === 'closing' || p.state === 'exit_recommended' ? '#f75f5f'
+    : p.state === 'sell_pending' ? '#e8a33d'
+    : p.state === 'protected' ? '#3ecf6e' : '#888';
+  return `<div style="white-space:normal" title="${title}">
+    <span style="color:${color};font-weight:600">${meta.label}</span>
+    ${detail ? `<div style="color:#888;font-size:.72rem;margin-top:2px">${detail}</div>` : ''}
+  </div>`;
 }
 
 function renderPositions() {
@@ -751,19 +800,36 @@ function renderPositions() {
     return;
   }
   tbody.innerHTML = rows.map(p => {
+    if (p.state === 'closing') {
+      // Case 4 -- already gone from Alpaca's own positions, so most
+      // columns simply don't apply anymore. Render what IS known (symbol,
+      // qty, fill price as "current") and dash out the rest rather than
+      // pretend this is still an open position with unknown P&L.
+      return `<tr style="opacity:.75">
+        <td><a href="/symbol/${p.symbol}">${p.symbol}</a></td>
+        <td>—</td>
+        <td style="white-space:nowrap">${_statusCell(p)}</td>
+        <td>${fmt(p.qty, p.qty % 1 === 0 ? 0 : 4)}</td>
+        <td>—</td>
+        <td>${p.fill_price != null ? fmtUSD(p.fill_price) : '—'}</td>
+        <td>—</td>
+        <td>—</td>
+        <td>—</td>
+        <td>—</td>
+        <td>—</td>
+        <td>—</td>
+        <td>—</td>
+      </tr>`;
+    }
     const plClass = p.unrealized_pl >= 0 ? 'up' : 'down';
     const rsiColor = p.rsi == null ? '#888' : p.rsi > 70 ? '#f75f5f' : p.rsi < 30 ? '#3ecf6e' : '#e8eaf6';
     const scoreBar = p.sellScore > 0
       ? `<div style="display:inline-block;width:${Math.round(p.sellScore * 0.6)}px;height:6px;background:#f75f5f;border-radius:3px;vertical-align:middle;margin-left:4px"></div>`
       : '—';
-    const pending = p.pending_orders && p.pending_orders.length ? p.pending_orders[0] : null;
-    const statusCell = pending
-      ? `<span class="badge badge-pending" style="font-size:.68rem" title="${pending.qty}sh ${pending.side} order, status: ${pending.status}">⏳ ${pending.side} pending since ${p.pendingSinceTs ? new Date(p.pendingSinceTs).toLocaleDateString() : 'unknown'}</span>`
-      : `<span style="color:#888;font-size:.8rem">Owned</span>`;
     return `<tr>
       <td><a href="/symbol/${p.symbol}">${p.symbol}</a></td>
       <td style="color:#888;font-size:.8rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.company_name || ''}">${p.company_name || '—'}</td>
-      <td style="white-space:nowrap">${statusCell}</td>
+      <td style="white-space:nowrap">${_statusCell(p)}</td>
       <td>${fmt(p.qty, p.qty % 1 === 0 ? 0 : 4)}</td>
       <td>${fmtUSD(p.avg_entry_price)}</td>
       <td>${fmtUSD(p.current_price)}</td>
@@ -784,19 +850,23 @@ function renderPositions() {
 async function loadPositions() {
   const tbody = document.getElementById('positions-body');
   try {
-    const [positions, signals] = await Promise.all([
+    const [positions, signals, closing] = await Promise.all([
       fetch('/api/positions').then(r => r.json()),
       fetch('/api/signals/latest').then(r => r.json()).catch(() => ({})),
+      fetch('/api/positions/closing').then(r => r.json()).catch(() => []),
     ]);
-    posRows = positions.map(p => {
+    const openRows = positions.map(p => {
       const sig = signals[p.symbol] || {};
       const sell = sig.sell || {};
       const rsi = sig.sell?.rsi ?? sig.buy?.rsi ?? null;
-      const pendingSinceTs = p.pending_orders && p.pending_orders.length
-        ? Math.min(...p.pending_orders.map(o => o.submitted_at ? new Date(o.submitted_at).getTime() : Infinity))
-        : null;
-      return { ...p, rsi, sellScore: sell.score ?? 0, pendingSinceTs, statusSortVal: pendingSinceTs };
+      const meta = STATE_META[p.state] || STATE_META.owned;
+      return { ...p, rsi, sellScore: sell.score ?? 0, statusSortVal: meta.sortRank };
     });
+    // Closing rows (case 4, PR B) come from a separate endpoint since
+    // Alpaca has already dropped them from /v2/positions -- merged here
+    // so Status sorting and the table itself treat them as one list.
+    const closingRows = closing.map(c => ({ ...c, statusSortVal: STATE_META.closing.sortRank }));
+    posRows = [...closingRows, ...openRows];
     renderPositions();
   } catch(e) {
     tbody.innerHTML = `<tr><td colspan="13" class="no-data" style="color:#f75f5f">${e.message}</td></tr>`;
