@@ -444,6 +444,57 @@ def reconcile_broker_stop_fills(conn):
     conn.commit()
 
 
+def reconcile_stale_sell_proposals(conn):
+    """Reality-awareness gap found live 2026-08-12: an open (decision IS
+    NULL) sell proposal -- e.g. a stop_loss proposal from
+    check_stop_losses() -- has no mechanism anywhere that resolves it when
+    the position it's about gets closed through an UNRELATED path (the
+    user clicks Sell directly on the position instead of approving the
+    proposal, or a resting broker stop fires and reconcile_broker_stop_
+    fills() above logs the trade). _open_sell_exists() only prevents a
+    NEW duplicate proposal from being created while one is open -- it was
+    never the thing that closes out an existing one once its premise (an
+    open position to sell) stops being true. Confirmed live: a stop_loss
+    proposal for APP sat open showing a stale price hours after the
+    position was fully sold via the dashboard's Sell button, still
+    inviting approval on a position that no longer existed (which would
+    have failed against qty_available anyway -- but only after the user
+    tried, and the stale row itself was actively misleading).
+
+    Auto-rejects any open sell proposal whose symbol has no matching
+    position at Alpaca. Read-only against Alpaca (GET /v2/positions,
+    already fetched once per cycle elsewhere, but re-fetched here to stay
+    independent and correct even if called standalone); on ANY fetch
+    failure this returns without touching anything, same fail-closed
+    posture as reconcile_broker_stop_fills() above -- an empty/failed
+    fetch must never be misread as "no positions exist," which would
+    incorrectly reject every open sell proposal in the system."""
+    try:
+        r = requests.get(f"{ALPACA_BASE}/v2/positions", headers=ALPACA_HEADERS, timeout=10)
+        r.raise_for_status()
+        open_symbols = {p["symbol"] for p in r.json()}
+    except Exception as e:
+        log.warning(f"Stale-sell-proposal reconciliation: could not fetch positions: {e}")
+        return
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, symbol, qty FROM trade_proposals WHERE side='sell' AND decision IS NULL")
+        open_sells = cur.fetchall()
+        if not open_sells:
+            return
+        for proposal_id, symbol, qty in open_sells:
+            if symbol in open_symbols:
+                continue
+            cur.execute("""
+                UPDATE trade_proposals
+                SET decision='rejected', decided_at=NOW(), decided_by='system',
+                    rejection_reason='Auto-resolved: position no longer exists at the broker (closed via a manual sell or a broker stop fill outside this proposal)'
+                WHERE id=%s
+            """, (proposal_id,))
+            log.warning(f"Stale sell proposal #{proposal_id} for {symbol} (qty {qty}) auto-rejected -- no matching position at broker")
+    conn.commit()
+
+
 def get_positions():
     try:
         r = requests.get(f"{ALPACA_BASE}/v2/positions", headers=ALPACA_HEADERS, timeout=10)
@@ -1137,6 +1188,7 @@ def run_once(conn, last_universe_scan):
     compute_signals(conn, symbols)
     reconcile_orders(conn)
     reconcile_broker_stop_fills(conn)
+    reconcile_stale_sell_proposals(conn)
     update_signal_outcomes(conn)
 
     # Platform Improvements PR A: derived from the trades ledger every
@@ -1207,6 +1259,7 @@ if __name__ == "__main__":
         seed_universe(conn)
         reconcile_orders(conn)
         reconcile_broker_stop_fills(conn)
+        reconcile_stale_sell_proposals(conn)
     except Exception as e:
         log.warning(f"Startup tasks failed: {e}")
     finally:
