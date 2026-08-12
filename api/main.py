@@ -72,6 +72,28 @@ def alpaca(method, path, **kwargs):
         raise HTTPException(r.status_code, f"Alpaca rejected the request: {msg}")
     return r.json()
 
+def _next_open_status(order):
+    """Whether this order is genuinely deferred to the next market session,
+    vs. just not synchronously reflected as 'filled' yet in the immediate
+    POST response. A market order submitted while the market is open
+    routinely comes back status='accepted'/'new' for a moment before
+    Alpaca fills it a second or two later (see _reconcile_fill) -- that is
+    NOT the same thing as an order queued because the market is closed,
+    but the old check (order['status'] not in ('filled','partially_filled'))
+    treated both cases identically, so a same-day market-hours sell could
+    show 'will execute at next open' even though it was about to fill
+    normally. Ground truth is the actual market clock, not the order's
+    transient status."""
+    if order["status"] in ("filled", "partially_filled"):
+        return False, None
+    try:
+        clock = alpaca("GET", "/v2/clock")
+    except HTTPException:
+        return False, None
+    if clock.get("is_open"):
+        return False, None
+    return True, clock.get("next_open")
+
 _YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; invest-agent/1.0)"}
 
 def _fetch_prices_yf(symbol, yf_range="1y"):
@@ -1127,13 +1149,10 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
 
     # Market orders placed outside trading hours come back "accepted"/"pending_new",
     # not "filled" — Alpaca queues them for the next open rather than rejecting them.
-    booked_for_next_open = order["status"] not in ("filled", "partially_filled")
-    next_open = None
-    if booked_for_next_open:
-        try:
-            next_open = alpaca("GET", "/v2/clock").get("next_open")
-        except HTTPException:
-            pass
+    # (See _next_open_status: that same transient status can also appear for a
+    # split second during market hours while a normal fill is in flight, so the
+    # actual market clock -- not just this status -- decides which case it is.)
+    booked_for_next_open, next_open = _next_open_status(order)
 
     # Log to DB
     with db() as conn, conn.cursor() as cur:
@@ -1305,13 +1324,7 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
             order = alpaca("POST", "/v2/orders", json=order_payload)
             filled_price = float(order.get("filled_avg_price") or 0)
             filled_qty = float(order.get("filled_qty") or 0) or float(trade_qty)
-            booked_for_next_open = order["status"] not in ("filled", "partially_filled")
-            next_open = None
-            if booked_for_next_open:
-                try:
-                    next_open = alpaca("GET", "/v2/clock").get("next_open")
-                except HTTPException:
-                    pass
+            booked_for_next_open, next_open = _next_open_status(order)
 
             # Platform Improvements PR C: re-check the same gates
             # compute_signals() enforced when this proposal was originally

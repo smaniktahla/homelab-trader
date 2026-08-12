@@ -512,6 +512,7 @@
     <thead><tr>
       <th class="sortable" onclick="sortPositions('symbol')">Symbol<span class="sort-arrow" id="parrow-symbol"></span></th>
       <th class="sortable" onclick="sortPositions('company_name')">Company<span class="sort-arrow" id="parrow-company_name"></span></th>
+      <th class="sortable" onclick="sortPositions('statusSortVal')">Status<span class="sort-arrow" id="parrow-statusSortVal"></span></th>
       <th class="sortable" onclick="sortPositions('qty')">Shares<span class="sort-arrow" id="parrow-qty"></span></th>
       <th class="sortable" onclick="sortPositions('avg_entry_price')">Avg Cost<span class="sort-arrow" id="parrow-avg_entry_price"></span></th>
       <th class="sortable" onclick="sortPositions('current_price')">Current<span class="sort-arrow" id="parrow-current_price"></span></th>
@@ -523,7 +524,7 @@
       <th class="sortable" onclick="sortPositions('sellScore')">Sell Signal<span class="sort-arrow" id="parrow-sellScore"></span></th>
       <th></th>
     </tr></thead>
-    <tbody id="positions-body"><tr><td colspan="12" class="no-data">Loading…</td></tr></tbody>
+    <tbody id="positions-body"><tr><td colspan="13" class="no-data">Loading…</td></tr></tbody>
   </table>
 
   <!-- Proposals -->
@@ -728,7 +729,7 @@ function renderPositions() {
   }
 
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="12" class="no-data">No open positions — all cash.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="no-data">No open positions — all cash.</td></tr>';
     return;
   }
   tbody.innerHTML = rows.map(p => {
@@ -738,12 +739,13 @@ function renderPositions() {
       ? `<div style="display:inline-block;width:${Math.round(p.sellScore * 0.6)}px;height:6px;background:#f75f5f;border-radius:3px;vertical-align:middle;margin-left:4px"></div>`
       : '—';
     const pending = p.pending_orders && p.pending_orders.length ? p.pending_orders[0] : null;
-    const pendingBadge = pending
-      ? ` <span class="badge badge-pending" style="font-size:.68rem" title="${pending.qty}sh ${pending.side} order, status: ${pending.status} — placed ${pending.submitted_at ? new Date(pending.submitted_at).toLocaleString() : 'unknown'}">⏳ ${pending.side} pending</span>`
-      : '';
+    const statusCell = pending
+      ? `<span class="badge badge-pending" style="font-size:.68rem" title="${pending.qty}sh ${pending.side} order, status: ${pending.status}">⏳ ${pending.side} pending since ${p.pendingSinceTs ? new Date(p.pendingSinceTs).toLocaleDateString() : 'unknown'}</span>`
+      : `<span style="color:#888;font-size:.8rem">Owned</span>`;
     return `<tr>
-      <td><a href="/symbol/${p.symbol}">${p.symbol}</a>${pendingBadge}</td>
+      <td><a href="/symbol/${p.symbol}">${p.symbol}</a></td>
       <td style="color:#888;font-size:.8rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.company_name || ''}">${p.company_name || '—'}</td>
+      <td style="white-space:nowrap">${statusCell}</td>
       <td>${fmt(p.qty, p.qty % 1 === 0 ? 0 : 4)}</td>
       <td>${fmtUSD(p.avg_entry_price)}</td>
       <td>${fmtUSD(p.current_price)}</td>
@@ -772,11 +774,14 @@ async function loadPositions() {
       const sig = signals[p.symbol] || {};
       const sell = sig.sell || {};
       const rsi = sig.sell?.rsi ?? sig.buy?.rsi ?? null;
-      return { ...p, rsi, sellScore: sell.score ?? 0 };
+      const pendingSinceTs = p.pending_orders && p.pending_orders.length
+        ? Math.min(...p.pending_orders.map(o => o.submitted_at ? new Date(o.submitted_at).getTime() : Infinity))
+        : null;
+      return { ...p, rsi, sellScore: sell.score ?? 0, pendingSinceTs, statusSortVal: pendingSinceTs };
     });
     renderPositions();
   } catch(e) {
-    tbody.innerHTML = `<tr><td colspan="12" class="no-data" style="color:#f75f5f">${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13" class="no-data" style="color:#f75f5f">${e.message}</td></tr>`;
   }
 }
 
