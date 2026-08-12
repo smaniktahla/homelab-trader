@@ -346,16 +346,28 @@ Purely informational, no behavior change, no threshold changes. This is
 what would have made APP's situation legible three days ago instead of
 only surfacing as a same-day stop_loss proposal.
 
-**PR E (separate, flagged as a fast follow, not blocking A-D) — Confirm
-Hypothesis-Driven Trading epic DB state.** Check whether
-`ingest/schema.sql` actually contains `trade_theses`/
-`trade_thesis_evaluations`/the `trade_thesis_id` columns post-merge, and if
-so, whether `invest-ingest` has been restarted since 2026-08-10 to apply
-them. If the schema is present but unapplied, this is a one-restart fix; if
-missing from `schema.sql` entirely, that's its own bug report against PR
-1/9's stated scope. Not part of the exit-state work, but adjacent enough
-that it should be resolved before Phase 4+ of that epic is assumed to be
-live.
+**PR E — Confirm Hypothesis-Driven Trading epic DB state. RESOLVED
+2026-08-12.** `ingest/schema.sql` already had correct, idempotent
+`CREATE TABLE IF NOT EXISTS`/`ADD COLUMN IF NOT EXISTS` statements for
+`trade_theses`, `trade_thesis_evaluations`, and every `trade_thesis_id`
+column (PR 1/9 shipped this correctly). The gap was purely operational:
+`invest-ingest`'s running container was still on an image built before
+2026-08-10 (confirmed via `diff` between the container's baked-in
+`/app/schema.sql` and the git checkout's copy — genuinely different files,
+missing the entire `trade_theses` block and three epic-flag `INSERT`s),
+so its startup schema-apply (`ingest.py`'s `if __name__ == "__main__"`
+block, `cur.execute(open("/app/schema.sql").read())`) had never run
+against the current schema. Fixed with `docker compose build invest-ingest`
++ `docker compose up -d invest-ingest` — a full rebuild rather than a
+`docker cp`, since `shared/*.py` (also baked in, also touched by several
+epic PRs) needed to come along too, not just `schema.sql`. Verified live:
+`trade_theses`/`trade_thesis_evaluations` now exist, all three
+`trade_thesis_id` columns exist on `trade_proposals`/`trades`/
+`position_lifecycles`, and all three epic flags
+(`trade_thesis_instantiation_enabled`, `structure_aware_stop_enabled`,
+`thesis_invalidation_exit_enabled`) came up at their correct `0`/off
+default — no behavior change, schema-only activation. No code changes;
+nothing to review as a PR.
 
 ## 6. Explicitly not doing here
 
