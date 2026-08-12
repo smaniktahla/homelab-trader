@@ -1,0 +1,112 @@
+"""
+Position Execution State, PR A of the exit/protection-state series --
+per docs/position-exit-state-investigation.md §5's PR A bullet: replace
+the dashboard's single "any open order = sell pending" inference with an
+explicit classification over the 4 states that were being collapsed
+together (§1 of that doc).
+
+This module is deliberately pure and DB-free for its core classifier --
+same "compute once, tested standalone" split shared/market_structure.py
+already established -- so it can be exercised with hand-built inputs, no
+disposable-Postgres fixture required. `load_open_sell_proposal()` is the
+one DB-touching helper, kept thin, mirroring the read-only helpers already
+in shared/trade_thesis.py.
+
+Ships dark: nothing in api/main.py or ingest.py calls this yet (PR C's
+job, per the doc). Orthogonal to trade_theses.status (PR 1-12,
+Hypothesis-Driven Trading epic) -- that's a strategy-judgment axis ("is
+the hypothesis still true?"); this is an execution-mechanics axis ("what
+is the broker doing with the shares right now?"). See the doc's §4 for
+why these are deliberately not merged into one enum.
+
+`closing` (case 4 -- a broker stop that has already fired but hasn't been
+reconciled into the local trades ledger yet) is NOT classified here. It
+requires data /api/positions cannot see (the position is already gone
+from Alpaca's own /v2/positions by the time this state would apply) --
+that's PR B's job, per the doc.
+"""
+
+STATE_OWNED = "owned"
+STATE_PROTECTED = "protected"
+STATE_EXIT_RECOMMENDED = "exit_recommended"
+STATE_SELL_PENDING = "sell_pending"
+
+VALID_STATES = (STATE_OWNED, STATE_PROTECTED, STATE_EXIT_RECOMMENDED, STATE_SELL_PENDING)
+
+# Alpaca order `type` values that represent a resting protective stop
+# (case 1) rather than a submitted, actively-executing exit (case 3).
+_STOP_ORDER_TYPES = ("stop", "stop_limit")
+
+
+def classify_position_execution_state(pending_orders, open_sell_proposal=None):
+    """Pure classifier. No DB, no Alpaca call -- everything it needs is
+    passed in.
+
+    pending_orders: list of dicts for this symbol's OPEN Alpaca orders
+        only (status='open' per api/main.py::get_positions()'s existing
+        query), each with at least {"side", "type"}. Safe to pass the
+        exact shape api/main.py already builds for `pending_orders` per
+        position.
+    open_sell_proposal: the symbol's open (decision IS NULL, side='sell')
+        trade_proposals row, as a dict, or None if there isn't one. Only
+        presence/absence matters here -- callers needing the rationale/
+        exit_reason for display read it off this same dict (PR C).
+
+    Precedence, most urgent first:
+      1. sell_pending  -- a submitted market sell order is actually
+         in flight. This beats an open proposal because approving a
+         proposal is exactly what PRODUCES the market order (api/main.py
+         decides the proposal to 'approved' in the same transaction that
+         submits the order) -- by the time both could coexist, the
+         proposal is no longer "open" (decision is no longer NULL), so in
+         practice these two are already mutually exclusive today. Ordered
+         defensively anyway, not load-bearing on that invariant holding.
+      2. exit_recommended -- an open strategy-layer proposal exists,
+         regardless of whether a resting protective stop (case 1) is also
+         sitting under the same position -- a human decision is queued
+         either way, and that's more urgent to surface than "protected."
+      3. protected -- a resting stop order (case 1), no case 2/3 activity.
+      4. owned -- no protection and nothing pending. Deliberately its own
+         state (not lumped into "protected") -- a position with no stop
+         attached at all (pre-dating "Execution: protective stop orders,"
+         or a stop that failed to attach) is meaningfully different from
+         one that's actively protected, and collapsing them back together
+         would recreate the exact kind of information loss this PR series
+         exists to undo.
+    """
+    pending_orders = pending_orders or []
+
+    has_pending_market_sell = any(
+        o.get("side") == "sell" and o.get("type") == "market"
+        for o in pending_orders
+    )
+    if has_pending_market_sell:
+        return STATE_SELL_PENDING
+
+    if open_sell_proposal is not None:
+        return STATE_EXIT_RECOMMENDED
+
+    has_resting_stop = any(
+        o.get("side") == "sell" and o.get("type") in _STOP_ORDER_TYPES
+        for o in pending_orders
+    )
+    if has_resting_stop:
+        return STATE_PROTECTED
+
+    return STATE_OWNED
+
+
+def load_open_sell_proposal(conn, symbol):
+    """The symbol's open (undecided) sell proposal, if any -- at most one
+    can exist at a time per _open_sell_exists()'s own invariant
+    (shared/signals.py), which every proposal-creating function already
+    checks before inserting. Read-only, fail-open shape mirrors
+    shared/trade_thesis.py::load_trade_thesis()."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT * FROM trade_proposals
+            WHERE symbol=%s AND side='sell' AND decision IS NULL
+            ORDER BY proposed_at DESC LIMIT 1
+        """, (symbol,))
+        row = cur.fetchone()
+    return dict(row) if row else None
