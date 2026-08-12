@@ -519,8 +519,18 @@ def get_portfolio_history(range: str = "1m"):
     spy_dates_sorted = sorted(spy_by_date)
 
     def nearest_spy_close(d):
+        # Clamp to the earliest available SPY date rather than returning None
+        # when `d` precedes all SPY data -- a range's anchor date (e.g. the
+        # 1M window's first portfolio snapshot) can fall a day or two before
+        # SPY's own earliest row without there being any real gap to report,
+        # and a None first_spy_close would otherwise null out spy_value for
+        # EVERY point in the series, not just the anchor.
+        if not spy_dates_sorted:
+            return None
         idx = bisect.bisect_right(spy_dates_sorted, d) - 1
-        return spy_by_date[spy_dates_sorted[idx]] if idx >= 0 else None
+        if idx < 0:
+            idx = 0
+        return spy_by_date[spy_dates_sorted[idx]]
 
     first_portfolio_value = float(snapshots[0]["portfolio_value"]) if snapshots else None
     first_spy_close = nearest_spy_close(snapshots[0]["snapshot_at"].date()) if snapshots else None
@@ -731,11 +741,64 @@ def _resolve_trade_thesis_id(cur, proposal_id: Optional[int] = None):
             return row["trade_thesis_id"]
     return None
 
+def _vs_spy_since_inception(cur, current_portfolio_value):
+    """Cumulative portfolio return vs. a SPY buy-and-hold of the same
+    starting capital, anchored to the account's first portfolio_snapshots
+    row rather than whatever range button the chart happens to have
+    selected -- this is meant to be a stable top-level stat, not something
+    that changes when the user clicks 1M vs 1Y. Same re-basing/
+    cost-adjustment/dividend convention as /api/portfolio-history's
+    per-range SPY line, just a fixed since-inception window instead of a
+    re-anchored one. Returns None (never a fabricated 0%) if there's no
+    snapshot or no SPY price history to compare against yet."""
+    cur.execute("""
+        SELECT snapshot_at, portfolio_value - COALESCE(
+            (SELECT SUM(t.cost) FROM trades t WHERE t.traded_at <= snapshot_at), 0
+        ) AS portfolio_value
+        FROM portfolio_snapshots ORDER BY snapshot_at ASC LIMIT 1
+    """)
+    first = cur.fetchone()
+    if not first or not first["portfolio_value"]:
+        return None
+    first_value = float(first["portfolio_value"])
+    if first_value <= 0:
+        return None
+
+    settings = get_all_settings()
+    include_dividends = settings.get("spy_include_dividends", "true") == "true"
+
+    cur.execute("""
+        SELECT close, adjclose FROM price_history
+        WHERE symbol='SPY' AND ts >= %s ORDER BY ts ASC
+    """, (first["snapshot_at"],))
+    rows = cur.fetchall()
+    if not rows:
+        return None
+
+    def px(r):
+        return float(r["adjclose"]) if (include_dividends and r["adjclose"] is not None) else float(r["close"])
+
+    first_spy, last_spy = px(rows[0]), px(rows[-1])
+    if not first_spy:
+        return None
+
+    portfolio_return_pct = (current_portfolio_value - first_value) / first_value * 100
+    spy_return_pct = (last_spy - first_spy) / first_spy * 100
+    return {
+        "since": first["snapshot_at"].isoformat(),
+        "portfolio_return_pct": round(portfolio_return_pct, 2),
+        "spy_return_pct": round(spy_return_pct, 2),
+        "alpha_pct": round(portfolio_return_pct - spy_return_pct, 2),
+    }
+
+
 @app.get("/api/account")
 def get_account():
     a = alpaca("GET", "/v2/account")
+    portfolio_value = float(a["portfolio_value"])
     with db() as conn, conn.cursor() as cur:
         total_cost = _total_trade_cost(cur)
+        vs_spy = _vs_spy_since_inception(cur, portfolio_value - total_cost)
     # buying_power is left as Alpaca reports it — it reflects what can
     # actually be spent on the next order, which our modeled cost doesn't
     # change. cash/portfolio_value/equity are the reported performance
@@ -744,8 +807,9 @@ def get_account():
         "equity": float(a["equity"]) - total_cost,
         "cash": float(a["cash"]) - total_cost,
         "buying_power": float(a["buying_power"]),
-        "portfolio_value": float(a["portfolio_value"]) - total_cost,
+        "portfolio_value": portfolio_value - total_cost,
         "total_trade_cost": total_cost,
+        "vs_spy": vs_spy,
     }
 
 def _build_proposal_price_map(cur, proposals, alpaca_positions, pending_orders):
