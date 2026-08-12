@@ -14,6 +14,18 @@ point — it's the first experiment running inside a platform built to hold
 any strategy to the same bar: propose, get approved, execute, measure the
 outcome, review the evidence, repeat.
 
+## Mission
+
+**Live capital exists to maximize risk-adjusted returns, not to complete
+experiments.** Once a thesis is trading real money, decisions about that
+capital are made on its own merits — not to finish collecting a sample
+size, prove a hypothesis right, or avoid admitting a thesis didn't pan
+out. **Research hypotheses may continue in shadow after live capital
+exits** — a thesis can keep generating signals/proposals/backtests against
+paper or historical data indefinitely for its own sake, but that ongoing
+research is never a reason to keep a live position open past what its own
+risk/exit logic says.
+
 ![Dashboard](docs/screenshots/dashboard.png)
 
 The dashboard at a glance:
