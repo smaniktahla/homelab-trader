@@ -1325,6 +1325,50 @@ def cancel_resting_stop_orders(symbol):
                 log.warning(f"Could not cancel resting stop order {order['id']} for {symbol}: {e}")
 
 
+def _reject_stale_sell_proposals_if_position_gone(cur, symbol, just_decided_proposal_id=None):
+    """Reality-awareness gap found live 2026-08-12: approving one sell
+    proposal, or clicking Sell directly on a position, closes the
+    position at the broker but does nothing to any OTHER open sell
+    proposal for that same symbol (e.g. a stop_loss proposal generated
+    hours earlier). ingest.py::reconcile_stale_sell_proposals() is the
+    hourly backstop for this same gap (also catches the broker-stop-fill
+    case, which this function can't -- no HTTP request happens for
+    that); this is the immediate version, called right after a sell
+    order is placed here in api/main.py so the Proposals list doesn't
+    show something stale for up to an hour.
+
+    Best-effort and non-blocking: any failure here is logged, never
+    raised -- the sell that just executed must never be affected by a
+    cleanup step for a DIFFERENT proposal."""
+    try:
+        alpaca("GET", f"/v2/positions/{symbol}")
+        return  # position still exists (partial sell) -- other proposals may still be valid
+    except HTTPException as e:
+        if e.status_code != 404:
+            log.warning(f"Stale-proposal check for {symbol}: unexpected Alpaca response: {e.detail}")
+            return
+    except Exception as e:
+        log.warning(f"Stale-proposal check for {symbol}: could not verify position: {e}")
+        return
+
+    try:
+        cur.execute("""
+            SELECT id FROM trade_proposals
+            WHERE symbol=%s AND side='sell' AND decision IS NULL
+        """, (symbol,))
+        stale_ids = [r["id"] for r in cur.fetchall() if r["id"] != just_decided_proposal_id]
+        for proposal_id in stale_ids:
+            cur.execute("""
+                UPDATE trade_proposals
+                SET decision='rejected', decided_at=NOW(), decided_by='system',
+                    rejection_reason='Auto-resolved: position was closed via a different sell before this proposal was decided'
+                WHERE id=%s
+            """, (proposal_id,))
+            log.warning(f"Stale sell proposal #{proposal_id} for {symbol} auto-rejected immediately after an unrelated sell closed the position")
+    except Exception as e:
+        log.warning(f"Stale-proposal cleanup for {symbol} failed: {e}")
+
+
 def _stop_price_for_order(ref_price, planned_stop, stop_loss_pct):
     """The price attached to a buy order's OTO stop_loss leg. Prefers the
     proposal's own planned_initial_stop_price (the SAME value
@@ -1466,6 +1510,10 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
                 UPDATE trade_proposals SET decision='approved', decided_at=NOW(), decided_by='human'
                 WHERE id=%s
             """, (req.proposal_id,))
+            conn.commit()
+
+        if req.side == "sell":
+            _reject_stale_sell_proposals_if_position_gone(cur, req.symbol.upper(), req.proposal_id)
             conn.commit()
 
         if adherence_results is not None:
@@ -1610,6 +1658,8 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
             new_trade_id = cur.fetchone()["id"]
             # update proposal qty if it was null
             cur.execute("UPDATE trade_proposals SET qty=%s WHERE id=%s AND qty IS NULL", (trade_qty, proposal_id))
+            if p["side"] == "sell":
+                _reject_stale_sell_proposals_if_position_gone(cur, p["symbol"], proposal_id)
             # Reconcile fill in background
             background_tasks.add_task(_reconcile_fill, new_trade_id, order["id"], filled_qty)
 
