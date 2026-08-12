@@ -256,7 +256,14 @@ currently disagree:
 ## 5. Proposed PR series
 
 Small, sequenced, no threshold unification (per your instruction), building
-toward the target UI:
+toward the target UI. **Order: A → B → C → E → D** — A establishes the
+semantics (isolated, safe, no dependencies). B stops positions from
+silently vanishing. C makes the dashboard trustworthy. **E moves ahead of D**
+on review: activating the Hypothesis-Driven Trading epic's actual DB
+migration should happen before more lifecycle-adjacent UI work (D) builds on
+top of an architecture that currently exists in git but not in the live
+database — otherwise D risks being designed around a Schrödinger's feature.
+D then adds risk-drift observability once the core lifecycle data is real.
 
 ```
 APP — Exit recommended
@@ -322,14 +329,22 @@ becomes state-ordinal-first, then time-in-state, so sorting groups by
 urgency (Closing/Exit recommended first) rather than just by pending-since
 timestamp.
 
-**PR D — Surface stop-drift, don't unify it.** Per §3: expose, for any
-`protected` or `exit_recommended` position, the delta between the resting
-broker stop's implied percentage-from-actual-entry and the live
-`stop_loss_pct` config — e.g. "protected at -16.0% from actual entry (stop
-was sized off a $334.24 planned entry, filled at $350.21)." Purely
-informational, no behavior change, no threshold changes. This is what
-would have made APP's situation legible three days ago instead of only
-surfacing as a same-day stop_loss proposal.
+**PR D — Surface stop-drift, don't unify it.** Per §3: this is really
+**execution slippage causing risk-geometry drift**, not just "stop drift" —
+today it widened APP's effective stop, but the same mechanism could just as
+easily tighten another trade's stop if price gaps down instead of up
+between proposal and fill. Report it as three numbers, not one:
+
+- **Planned risk** — stop distance from `planned_entry_price` (what the
+  proposal was sized against).
+- **Realized risk** — stop distance from the actual fill price (what's
+  actually protecting the position today).
+- **Drift** — the difference between the two, signed (wider or tighter than
+  planned).
+
+Purely informational, no behavior change, no threshold changes. This is
+what would have made APP's situation legible three days ago instead of
+only surfacing as a same-day stop_loss proposal.
 
 **PR E (separate, flagged as a fast follow, not blocking A-D) — Confirm
 Hypothesis-Driven Trading epic DB state.** Check whether
