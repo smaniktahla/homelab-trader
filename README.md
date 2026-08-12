@@ -26,6 +26,13 @@ paper or historical data indefinitely for its own sake, but that ongoing
 research is never a reason to keep a live position open past what its own
 risk/exit logic says.
 
+**Whenever and wherever possible, provide information in the simplest
+and plainest English possible.** Avoid technical jargon without
+explanation. Provide tooltips, pop-ups, and guidance when technical
+terminology is necessary. The person using this dashboard is not an
+investment broker — a number or a status label is only useful if its
+meaning is immediately clear without looking anything up.
+
 ![Dashboard](docs/screenshots/dashboard.png)
 
 The dashboard at a glance:
