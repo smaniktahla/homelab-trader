@@ -519,8 +519,18 @@ def get_portfolio_history(range: str = "1m"):
     spy_dates_sorted = sorted(spy_by_date)
 
     def nearest_spy_close(d):
+        # Clamp to the earliest available SPY date rather than returning None
+        # when `d` precedes all SPY data -- a range's anchor date (e.g. the
+        # 1M window's first portfolio snapshot) can fall a day or two before
+        # SPY's own earliest row without there being any real gap to report,
+        # and a None first_spy_close would otherwise null out spy_value for
+        # EVERY point in the series, not just the anchor.
+        if not spy_dates_sorted:
+            return None
         idx = bisect.bisect_right(spy_dates_sorted, d) - 1
-        return spy_by_date[spy_dates_sorted[idx]] if idx >= 0 else None
+        if idx < 0:
+            idx = 0
+        return spy_by_date[spy_dates_sorted[idx]]
 
     first_portfolio_value = float(snapshots[0]["portfolio_value"]) if snapshots else None
     first_spy_close = nearest_spy_close(snapshots[0]["snapshot_at"].date()) if snapshots else None
