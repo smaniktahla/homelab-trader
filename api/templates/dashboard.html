@@ -385,6 +385,10 @@
     <div class="stat-card"><div class="label">Cash</div><div class="value" id="cash">—</div></div>
     <div class="stat-card"><div class="label">Buying Power</div><div class="value" id="buying-power">—</div></div>
     <div class="stat-card"><div class="label">Unrealized P&amp;L</div><div class="value" id="upl">—</div></div>
+    <div class="stat-card" id="vs-spy-card" style="display:none">
+      <div class="label" id="vs-spy-label">vs SPY</div>
+      <div class="value" id="vs-spy-value">—</div>
+    </div>
     <div style="display:flex;align-items:center">
       <button class="btn btn-primary" onclick="openModal()">+ New Trade</button>
     </div>
@@ -685,6 +689,20 @@ async function loadAccount() {
   const uplEl = document.getElementById('upl');
   uplEl.textContent = (upl >= 0 ? '+' : '') + fmtUSD(upl);
   uplEl.style.color = upl >= 0 ? '#3ecf6e' : '#f75f5f';
+
+  const vsSpyCard = document.getElementById('vs-spy-card');
+  if (acct.vs_spy) {
+    const { alpha_pct, portfolio_return_pct, spy_return_pct, since } = acct.vs_spy;
+    vsSpyCard.style.display = '';
+    const valEl = document.getElementById('vs-spy-value');
+    valEl.textContent = (alpha_pct >= 0 ? '+' : '') + alpha_pct.toFixed(1) + '%';
+    valEl.style.color = alpha_pct >= 0 ? '#3ecf6e' : '#f75f5f';
+    const sinceDate = since ? new Date(since).toLocaleDateString() : 'inception';
+    vsSpyCard.title = `Portfolio ${portfolio_return_pct >= 0 ? '+' : ''}${portfolio_return_pct.toFixed(1)}% `
+      + `vs SPY ${spy_return_pct >= 0 ? '+' : ''}${spy_return_pct.toFixed(1)}% since ${sinceDate}`;
+  } else {
+    vsSpyCard.style.display = 'none';
+  }
 
   const costNote = document.getElementById('portfolio-cost-note');
   if (costNote && acct.total_trade_cost != null) {
