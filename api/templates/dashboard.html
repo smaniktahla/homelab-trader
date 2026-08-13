@@ -494,6 +494,19 @@
     <div id="adv-candidates-note" style="display:none;font-size:.7rem;color:#555;margin-top:6px">Based on a fast RSI-only universe screen, not the real signal score — check a symbol's page before acting.</div>
   </div>
 
+  <!-- Proposals -->
+  <div id="proposals-wrap" style="display:none">
+    <h2>Proposed Trades</h2>
+    <div id="proposals-cash-bar" style="display:none;align-items:center;gap:16px;margin-bottom:10px;font-size:.85rem;color:#aaa;padding:8px 12px;background:#12151f;border-radius:6px;border:1px solid #2a2d3e">
+      <span>Available: <strong id="pcb-available" style="color:#e8eaf6">—</strong></span>
+      <span style="color:#2a2d3e">|</span>
+      <span>Pending approvals: <strong id="pcb-pending" style="color:#f7c94f">—</strong></span>
+      <span style="color:#2a2d3e">|</span>
+      <span>Remaining after pending: <strong id="pcb-remaining" style="color:#4caf50">—</strong></span>
+    </div>
+    <div class="proposals-section" id="proposals-list"></div>
+  </div>
+
   <!-- Positions -->
   <h2>Positions</h2>
   <table>
@@ -514,19 +527,6 @@
     </tr></thead>
     <tbody id="positions-body"><tr><td colspan="13" class="no-data">Loading…</td></tr></tbody>
   </table>
-
-  <!-- Proposals -->
-  <div id="proposals-wrap" style="display:none">
-    <h2>Proposed Trades</h2>
-    <div id="proposals-cash-bar" style="display:none;align-items:center;gap:16px;margin-bottom:10px;font-size:.85rem;color:#aaa;padding:8px 12px;background:#12151f;border-radius:6px;border:1px solid #2a2d3e">
-      <span>Available: <strong id="pcb-available" style="color:#e8eaf6">—</strong></span>
-      <span style="color:#2a2d3e">|</span>
-      <span>Pending approvals: <strong id="pcb-pending" style="color:#f7c94f">—</strong></span>
-      <span style="color:#2a2d3e">|</span>
-      <span>Remaining after pending: <strong id="pcb-remaining" style="color:#4caf50">—</strong></span>
-    </div>
-    <div class="proposals-section" id="proposals-list"></div>
-  </div>
 
   <!-- Signal Leaderboard -->
   <h2 style="margin-bottom:2px">Signal Leaderboard</h2>
@@ -871,7 +871,7 @@ function renderPositions() {
       <td style="white-space:nowrap">${p.sellScore > 0 ? `<span style="color:#f75f5f;font-size:.8rem">${p.sellScore}</span>` : ''}${scoreBar}</td>
       <td style="white-space:nowrap">
         <button class="btn-sm btn-buy" onclick="openModal('${p.symbol}','buy')">Buy</button>
-        <button class="btn-sm btn-sell" onclick="openModal('${p.symbol}','sell')">Sell</button>
+        <button class="btn-sm btn-sell" onclick="openModal('${p.symbol}','sell',${p.state === 'exit_recommended' ? (p.exit_qty ?? p.qty) : 'null'})">Sell</button>
       </td>
     </tr>`;
   }).join('');
@@ -980,8 +980,8 @@ function _proposalCard(p, expanded) {
         ${estCost ? `<span style="color:#888;font-size:.78rem;margin-left:8px">${estCost}</span>` : ''}
       </div>
       <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
-        <button class="btn-sm btn-buy" onclick="approveProposal(${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
-        <button class="btn-sm btn-sell" onclick="rejectProposal(${p.id})">Reject</button>
+        <button class="btn-sm btn-buy" onclick="approveProposal(this, ${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
+        <button class="btn-sm btn-sell" onclick="rejectProposal(this, ${p.id})">Reject</button>
       </div>
     </div>`;
   }
@@ -1075,8 +1075,8 @@ function _proposalCard(p, expanded) {
     </div>
     <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
       ${p.qty == null ? `<input id="prop-qty-${p.id}" type="number" min="0.001" step="0.001" placeholder="qty" style="width:70px;padding:4px 6px;background:#12151f;border:1px solid #4f8ef7;border-radius:4px;color:#e8eaf6;font-size:.85rem">` : ''}
-      <button class="btn-sm btn-buy" onclick="approveProposal(${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
-      <button class="btn-sm btn-sell" onclick="rejectProposal(${p.id})">Reject</button>
+      <button class="btn-sm btn-buy" onclick="approveProposal(this, ${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
+      <button class="btn-sm btn-sell" onclick="rejectProposal(this, ${p.id})">Reject</button>
     </div>
   </div>`;
 }
@@ -1159,13 +1159,17 @@ async function loadProposals() {
   }
 }
 
-async function approveProposal(id, symbol, side, qty, currentPrice) {
+async function approveProposal(btn, id, symbol, side, qty, currentPrice) {
   let finalQty = qty;
   if (finalQty == null) {
     const inp = document.getElementById(`prop-qty-${id}`);
     finalQty = inp ? parseFloat(inp.value) : NaN;
     if (!finalQty || isNaN(finalQty)) { showToast('Enter a quantity first', 'error'); return; }
   }
+  // Belt-and-suspenders against double-submission (e.g. a double-click):
+  // the real guard is the server-side row lock in decide_proposal(), but
+  // disabling immediately avoids firing a second request at all.
+  if (btn) { btn.disabled = true; btn.textContent = 'Approving…'; }
   let r, data;
   try {
     r = await fetch(`/api/proposals/${id}`, {
@@ -1186,11 +1190,15 @@ async function approveProposal(id, symbol, side, qty, currentPrice) {
       showToast(`${side.toUpperCase()} ${symbol} approved`);
     }
     loadProposals(); loadPositions(); loadAccount(); loadTrades();
-  } else showToast(data.detail || 'Error', 'error');
+  } else {
+    showToast(data.detail || 'Error', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Approve'; }
+  }
 }
 
-async function rejectProposal(id) {
+async function rejectProposal(btn, id) {
   const reason = '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Rejecting…'; }
   let r, data;
   try {
     r = await fetch(`/api/proposals/${id}`, {
@@ -1201,10 +1209,14 @@ async function rejectProposal(id) {
     data = await r.json();
   } catch (e) {
     showToast('Reject failed — no response from server', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Reject'; }
     return;
   }
   if (r.ok) { showToast('Proposal rejected'); loadProposals(); }
-  else showToast(data.detail || 'Error', 'error');
+  else {
+    showToast(data.detail || 'Error', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Reject'; }
+  }
 }
 
 // ── Signal Leaderboard ─────────────────────────────────────────────
@@ -1448,9 +1460,18 @@ const LIFECYCLE_GROUP_LABEL = {
 };
 const SAMPLE_QUALITY_COLOR = { insufficient: '#666', preliminary: '#c9a227', established: '#3fb950' };
 
+// Groups rendered by their own dedicated tables below (different field
+// shape than n/win_rate/avg_return) -- must stay out of the generic
+// bucket table or they render with undefined win_rate/avg_return.
+const SPECIAL_METRIC_GROUPS = new Set([
+  'rule_adherence_by_context', 'rule_adherence_by_rule',
+  'risk_decision_by_context', 'risk_decision_by_binding_constraint',
+  'hypothesis_status_by_type',
+]);
+
 function _reviewBucketTable(metricSummary) {
   const groups = Object.entries(metricSummary || {})
-    .filter(([k, buckets]) => !k.startsWith('lifecycle_') && buckets && Object.keys(buckets).length);
+    .filter(([k, buckets]) => !k.startsWith('lifecycle_') && !SPECIAL_METRIC_GROUPS.has(k) && buckets && Object.keys(buckets).length);
   if (!groups.length) return '';
   return groups.map(([group, buckets]) => {
     const rows = Object.entries(buckets).map(([label, s]) => `
@@ -1639,10 +1660,10 @@ async function loadReviews() {
 }
 
 // ── Modal ──────────────────────────────────────────────────────────
-function openModal(symbol='', side='buy') {
+function openModal(symbol='', side='buy', qty=null) {
   document.getElementById('modal-symbol').value = symbol.toUpperCase();
   document.getElementById('modal-side').value = side;
-  document.getElementById('modal-qty').value = '';
+  document.getElementById('modal-qty').value = qty != null ? qty : '';
   document.getElementById('modal-notes').value = '';
   document.getElementById('modal-title').textContent = symbol ? `Trade ${symbol}` : 'New Trade';
   document.getElementById('modal').classList.add('open');
