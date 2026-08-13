@@ -1304,13 +1304,26 @@ if __name__ == "__main__":
                 if last_postmortem is None or (now_utc - last_postmortem).days >= 7:
                     try:
                         result = run_postmortem_review(conn)
-                        subject = "📊 Weekly Strategy Review"
-                        html = f"<p>{result['finding']}</p><p>N resolved: {result['n_resolved']}</p>"
-                        wa_text = f"{subject}\n{result['finding']}"
-                        send_notification(cfg, subject, html, wa_text, "postmortem review")
-                        set_last_postmortem_at(conn, now_utc)
                     except Exception as e:
-                        log.error(f"Postmortem review failed: {e}")
+                        log.error(f"Postmortem review failed to run: {e}")
+                    else:
+                        # Gate the review itself on run_postmortem_review()
+                        # succeeding, not on the notification also
+                        # succeeding -- these used to share one try/except,
+                        # so a flaky send_notification() (WhatsApp/email)
+                        # silently skipped persisting last_postmortem_at,
+                        # and the next hourly cycle re-ran the whole
+                        # review from scratch. Produced 4 duplicate
+                        # strategy_review_proposals rows within ~49h on
+                        # 2026-08-03/04 before this was caught.
+                        set_last_postmortem_at(conn, now_utc)
+                        try:
+                            subject = "📊 Weekly Strategy Review"
+                            html = f"<p>{result['finding']}</p><p>N resolved: {result['n_resolved']}</p>"
+                            wa_text = f"{subject}\n{result['finding']}"
+                            send_notification(cfg, subject, html, wa_text, "postmortem review")
+                        except Exception as e:
+                            log.error(f"Postmortem review ran but notification failed to send: {e}")
 
                 # ── Alerts (every cycle on active market days) ────────────────
                 if is_trading_day and is_currently_open:

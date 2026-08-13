@@ -699,6 +699,12 @@ def get_positions():
             row["exit_reason"] = open_proposal.get("exit_reason")
             row["exit_rationale"] = open_proposal.get("rationale")
             row["exit_proposed_at"] = open_proposal.get("proposed_at")
+            # The proposal's own qty if it recommends a partial exit;
+            # None for a full-position exit (compute_signals() leaves qty
+            # unset in that case and it's sized against the live position
+            # at approval time) -- the dashboard falls back to `qty`
+            # (shares owned) so the Sell modal can autofill either way.
+            row["exit_qty"] = float(open_proposal["qty"]) if open_proposal.get("qty") is not None else None
             # A recommended exit can still have a resting stop under it
             # (§5 of the doc -- exit_recommended outranks protected but
             # doesn't erase that a stop is also there); surface the same
@@ -1547,7 +1553,15 @@ class ProposalDecision(BaseModel):
 @app.patch("/api/proposals/{proposal_id}")
 def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: BackgroundTasks):
     with db() as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM trade_proposals WHERE id=%s", (proposal_id,))
+        # FOR UPDATE: without this lock, two concurrent PATCH requests for
+        # the same proposal_id (e.g. a double-click on Approve) can both
+        # read decision=NULL before either commits, both pass the check
+        # below, and both independently submit a live order to Alpaca --
+        # observed in production as duplicate buy fills + duplicate OTO
+        # stop legs for the same symbol (EIX/CMS, 2026-08-08). The second
+        # request now blocks here until the first transaction commits or
+        # rolls back, then sees the real decision and 409s.
+        cur.execute("SELECT * FROM trade_proposals WHERE id=%s FOR UPDATE", (proposal_id,))
         p = cur.fetchone()
         if not p:
             raise HTTPException(404, "proposal not found")
