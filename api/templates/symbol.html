@@ -144,7 +144,7 @@
             Bollinger Bands
           </label>
           <div class="range-btns">
-            <button class="range-btn active" onclick="loadChart(14,this)">2W</button>
+            <button class="range-btn active" id="range-btn-default" onclick="loadChart(14,this)">2W</button>
             <button class="range-btn" onclick="loadChart(30,this)">1M</button>
             <button class="range-btn" onclick="loadChart(90,this)">3M</button>
             <button class="range-btn" onclick="loadChart(182,this)">6M</button>
@@ -814,7 +814,7 @@ async function loadRoundTrips() {
 
 loadHeader();
 loadPosition();
-loadChart(14, null);
+loadChart(14, document.getElementById('range-btn-default'));
 loadSignals();
 loadNews();
 loadTrades();
