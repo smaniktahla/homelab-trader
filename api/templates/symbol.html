@@ -132,7 +132,7 @@
   <div class="grid2">
     <!-- Price chart -->
     <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
         <h2 style="margin:0">Price History</h2>
         <div style="display:flex;align-items:center;gap:14px">
           <label style="display:flex;align-items:center;gap:5px;font-size:.78rem;color:#888;cursor:pointer">
@@ -143,17 +143,17 @@
             <input type="checkbox" id="bb-toggle" checked onchange="loadChart(currentChartDays,null)">
             Bollinger Bands
           </label>
-          <div class="range-btns">
-            <button class="range-btn active" id="range-btn-default" onclick="loadChart(14,this)">2W</button>
-            <button class="range-btn" onclick="loadChart(30,this)">1M</button>
-            <button class="range-btn" onclick="loadChart(90,this)">3M</button>
-            <button class="range-btn" onclick="loadChart(182,this)">6M</button>
-            <button class="range-btn" onclick="loadChart(365,this)">1Y</button>
-            <button class="range-btn" onclick="loadChart(730,this)">2Y</button>
-            <button class="range-btn" onclick="loadChart(1095,this)">3Y</button>
-            <button class="range-btn" onclick="loadChart(1825,this)">5Y</button>
-          </div>
         </div>
+      </div>
+      <div class="range-btns">
+        <button class="range-btn active" id="range-btn-default" onclick="loadChart(14,this)">2W</button>
+        <button class="range-btn" onclick="loadChart(30,this)">1M</button>
+        <button class="range-btn" onclick="loadChart(90,this)">3M</button>
+        <button class="range-btn" onclick="loadChart(182,this)">6M</button>
+        <button class="range-btn" onclick="loadChart(365,this)">1Y</button>
+        <button class="range-btn" onclick="loadChart(730,this)">2Y</button>
+        <button class="range-btn" onclick="loadChart(1095,this)">3Y</button>
+        <button class="range-btn" onclick="loadChart(1825,this)">5Y</button>
       </div>
       <canvas id="price-chart" height="200"></canvas>
     </div>
