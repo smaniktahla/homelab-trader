@@ -1077,6 +1077,27 @@ def get_proposals():
         """)
         proposals = cur.fetchall()
 
+        # Flag sell proposals whose symbol has a resting stop order stuck
+        # in Alpaca's pending_cancel state (a DELETE was sent but Alpaca
+        # never resolved it to canceled -- observed live on WEC, stuck 5
+        # days). Approving such a proposal will 400 at the qty_available
+        # check in decide_proposal() since those shares still read as
+        # unavailable, so the card should say so up front instead of
+        # only surfacing it after a failed Approve click.
+        sell_symbols = {p["symbol"] for p in proposals if p["side"] == "sell"}
+        if sell_symbols:
+            try:
+                _open_orders_for_stuck_check = alpaca("GET", "/v2/orders", params={"status": "open"})
+            except Exception:
+                _open_orders_for_stuck_check = []
+            stuck_cancel_symbols = {
+                o["symbol"] for o in _open_orders_for_stuck_check
+                if o.get("type") in ("stop", "stop_limit") and o.get("status") == "pending_cancel"
+            }
+            for p in proposals:
+                if p["side"] == "sell" and p["symbol"] in stuck_cancel_symbols:
+                    p["stop_cancel_pending"] = True
+
         ranking_params = proposal_ranking.load_proposal_ranking_params(conn)
         ranking_params["sector_max_pct"] = load_params(conn).get("sector_max_pct")
         if proposals and ranking_params.get("proposal_ranking_enabled"):
@@ -1623,6 +1644,28 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
                     else:
                         raise HTTPException(502, f"Could not verify {p['symbol']} position with Alpaca: {e.detail}")
                 if available_qty <= 0:
+                    # cancel_resting_stop_orders() just fired a DELETE, but
+                    # Alpaca sometimes leaves an OTO stop leg wedged in
+                    # pending_cancel indefinitely instead of resolving to
+                    # canceled (observed live on WEC: stuck 5 days, DELETE
+                    # re-sent on every approval attempt with no effect --
+                    # each call succeeds but the leg never clears). That
+                    # reads to a human as "sold/closed already" or "shares
+                    # missing", not "a stop order is broker-side stuck", so
+                    # detect it here and say so plainly instead of the
+                    # generic message.
+                    stuck_stop = None
+                    try:
+                        open_orders = alpaca("GET", f"/v2/orders?status=open&symbols={p['symbol']}")
+                        stuck_stop = next(
+                            (o for o in open_orders or []
+                             if o.get("type") in ("stop", "stop_limit")
+                             and o.get("status") == "pending_cancel"),
+                            None)
+                    except Exception:
+                        pass
+                    if stuck_stop:
+                        raise HTTPException(400, f"{p['symbol']} shares are held but locked by a protective stop order (id {stuck_stop['id']}) stuck in Alpaca's pending_cancel state — cancellation was requested but never resolved. This needs manual clearing at Alpaca (dashboard or support); the app cannot force it. Cannot sell until it clears.")
                     raise HTTPException(400, f"No available long position in {p['symbol']} — either none held or fully committed to another pending order. Cannot sell.")
                 if trade_qty > available_qty:
                     raise HTTPException(400, f"Sell qty {trade_qty} exceeds available shares {available_qty} for {p['symbol']} (some may be tied up in another pending order). Reduce qty to {available_qty} or less.")
