@@ -754,6 +754,16 @@ function _statusCell(p) {
   let detail = '';
   let title = '';
 
+  // A resting stop can get stuck in Alpaca's pending_cancel state after a
+  // cancel was requested but never resolved (observed live on WEC, stuck
+  // 5 days) -- the shares still read as broker-unavailable the whole
+  // time, so Sell will 400 until this clears. Independent of `state`:
+  // can co-occur with protected/exit_recommended/owned alike.
+  const stuckCancel = (p.pending_orders || []).find(o => o.status === 'pending_cancel');
+  const stuckCancelBadge = stuckCancel
+    ? `<span style="color:#e8a33d;font-weight:600;cursor:help" title="Cancel was requested for this stop order but Alpaca never resolved it -- shares still read as unavailable there. Needs manual clearing at Alpaca.">⏳ Pending cancel (Alpaca)</span>`
+    : '';
+
   if (p.state === 'protected' || (p.state === 'exit_recommended' && p.protective_stop_price != null)) {
     const plpc = p.unrealized_plpc;
     const plStr = plpc != null ? `${plpc >= 0 ? '+' : ''}${plpc}%` : '—';
@@ -800,6 +810,7 @@ function _statusCell(p) {
     : p.state === 'protected' ? '#3ecf6e' : '#888';
   return `<div style="white-space:normal" title="${title}">
     <span style="color:${color};font-weight:600;cursor:help" title="${meta.help || ''}">${meta.label}</span>
+    ${stuckCancelBadge ? `<div style="margin-top:2px;font-size:.75rem">${stuckCancelBadge}</div>` : ''}
     ${detail ? `<div style="color:#888;font-size:.72rem;margin-top:2px">${detail}</div>` : ''}
   </div>`;
 }
@@ -968,6 +979,9 @@ function _proposalCard(p, expanded) {
   const actionSlug = (p.recommended_action || '').toLowerCase().replace(/\s+/g, '-');
   const actionBadge = p.recommended_action
     ? `<span class="action-badge action-${actionSlug}">${p.recommended_action}</span>` : '';
+  const stopCancelPendingBadge = p.stop_cancel_pending
+    ? `<span style="color:#e8a33d;font-size:.75rem;font-weight:600;margin-left:6px" title="A protective stop on ${p.symbol} is stuck in Alpaca's pending_cancel state, so the shares still read as unavailable there. Approving this may 400 until it clears.">⏳ Pending cancel (Alpaca)</span>`
+    : '';
 
   if (!expanded) {
     // Collapsed cluster alternative: one compact line, no decision-factors/
@@ -976,7 +990,7 @@ function _proposalCard(p, expanded) {
     <div class="proposal-row compact">
       <div class="prop-info">
         <strong>${p.qty ?? '?'} <a href="/symbol/${p.symbol}">${p.symbol}</a></strong>
-        ${priorityStars} ${actionBadge}
+        ${priorityStars} ${actionBadge} ${stopCancelPendingBadge}
         ${estCost ? `<span style="color:#888;font-size:.78rem;margin-left:8px">${estCost}</span>` : ''}
       </div>
       <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
@@ -1067,7 +1081,7 @@ function _proposalCard(p, expanded) {
       <strong>${p.side.toUpperCase()} ${p.qty ?? '?'} <a href="/symbol/${p.symbol}">${p.symbol}</a></strong>
       ${exitTag}
       &nbsp;<span style="color:#888;font-size:.8rem">score ${p.signal_score ?? '—'}</span>
-      ${priorityStars} ${actionBadge}
+      ${priorityStars} ${actionBadge} ${stopCancelPendingBadge}
       ${estCost ? `<span style="color:#f7c94f;font-size:.82rem;margin-left:8px">${estCost}</span>` : ''}
       ${opportunityCostHtml}
       ${decisionFactorsHtml}
@@ -1147,6 +1161,7 @@ function renderProposals() {
   list.innerHTML = unitsHtml + sells.map(p => _proposalCard(p, true)).join('');
 }
 
+let _scrolledToProposalsHash = false;
 async function loadProposals() {
   const wrap = document.getElementById('proposals-wrap');
   try {
@@ -1154,6 +1169,15 @@ async function loadProposals() {
     propRows = resp.proposals ?? resp;  // backwards compat
     propBuyingPower = resp.buying_power ?? null;
     renderProposals();
+    // Deep-linked from a proposal-notification email/WhatsApp message
+    // (#proposals-wrap): the target only becomes visible/laid-out after
+    // this async render, so the browser's own anchor-jump-on-load (which
+    // runs against the still display:none element) silently no-ops --
+    // do it ourselves, once, after the content it needs to scroll to exists.
+    if (!_scrolledToProposalsHash && location.hash === '#proposals-wrap') {
+      _scrolledToProposalsHash = true;
+      wrap.scrollIntoView({behavior: 'smooth', block: 'start'});
+    }
   } catch(e) {
     wrap.style.display = 'none';
   }

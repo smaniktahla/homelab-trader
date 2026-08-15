@@ -1128,7 +1128,7 @@ def check_new_proposal_alerts(conn, cfg):
           <h2 style="margin:0 0 12px">📋 New Trade Proposal</h2>
           <p><strong>{label} {sym}</strong>{reason_tag} — score {score}</p>
           <p style="color:#888;margin-top:12px">{rationale}</p>
-          <p style="margin-top:20px"><a href="http://10.10.10.13:8100" style="color:#4f8ef7">Review &amp; Approve →</a></p>
+          <p style="margin-top:20px"><a href="http://10.10.10.13:8100/#proposals-wrap" style="color:#4f8ef7">Review &amp; Approve →</a></p>
         </div>"""
         whatsapp = f"📋 *New Proposal: {label} {sym}*{reason_tag}\nScore: {score}\n{rationale}\nhttp://10.10.10.13:8100"
         send_notification(cfg, subject, html, whatsapp, f"new proposal {sym}")
