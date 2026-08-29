@@ -32,10 +32,16 @@ TRADE_THESIS_SCHEMA_VERSION = "v1"  # versions this module's grammar (condition 
                                      # legal operators/combinators, evidence_context envelope).
                                      # Bump only when the grammar itself changes.
 
-# Minimal placeholder vocabulary sufficient to port mean_reversion's existing
-# entry logic. Full vocabulary across future strategy families is explicitly
-# deferred (see docs/trade-thesis-architecture-reconciliation.md §6) --
-# grammar-adjacent enum work, not PR 2's Feature Registry job.
+# Legacy/reference constant only as of PR 13 (Hypothesis Library) -- these
+# were the two values this module enforced at construction time before that
+# PR. Membership + status enforcement now lives in
+# shared/hypothesis_library.py (DB-backed catalog, ingest/schema.sql's
+# hypothesis_types table) and is checked in
+# shared/trade_thesis_validator.py::validate_trade_thesis(), the same
+# grammar-vs-vocabulary split PR 3 already applies to 'feature' identifiers
+# against shared/feature_registry.py. __post_init__ below only checks that
+# hypothesis_type is a non-empty string now -- see hypothesis_library.py for
+# the real vocabulary.
 HYPOTHESIS_TYPES = frozenset({
     "mean_reversion_oversold",
     "mean_reversion_overbought",
@@ -188,8 +194,8 @@ class TradeThesis:
     status: str = "proposed"
 
     def __post_init__(self):
-        if self.hypothesis_type not in HYPOTHESIS_TYPES:
-            raise GrammarError(f"illegal hypothesis_type '{self.hypothesis_type}', must be one of {sorted(HYPOTHESIS_TYPES)}")
+        if not isinstance(self.hypothesis_type, str) or not self.hypothesis_type:
+            raise GrammarError(f"hypothesis_type must be a non-empty string, got {self.hypothesis_type!r}")
         if self.status not in STATUSES:
             raise GrammarError(f"illegal status '{self.status}', must be one of {sorted(STATUSES)}")
         if self.confidence is not None and not (0 <= self.confidence <= 1):

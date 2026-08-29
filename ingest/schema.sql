@@ -944,3 +944,114 @@ CREATE TABLE IF NOT EXISTS trade_thesis_evaluations (
 
 CREATE INDEX IF NOT EXISTS idx_trade_thesis_evaluations_trade_thesis_id
     ON trade_thesis_evaluations (trade_thesis_id, evaluated_at DESC);
+
+-- Hypothesis Library, PR 13 of the Hypothesis-Driven Trading Architecture
+-- epic. A catalog of hypothesis_type *templates* -- distinct from both
+-- `theses` (strategy-family registry: mean_reversion, congress_shreve_hern)
+-- and `trade_theses` (one falsifiable hypothesis per opportunity). Neither
+-- existing table is touched or FK'd here: a hypothesis type isn't owned by
+-- one strategy family, and trade_theses.hypothesis_type stays plain TEXT --
+-- shared/trade_thesis.py's grammar layer deliberately doesn't take a live
+-- conn, so a DB FK there would force every TradeThesis() construction site
+-- to open one. Membership is enforced instead by
+-- shared/hypothesis_library.py::is_legal_hypothesis_type()/
+-- is_instantiable_hypothesis_type(), called from
+-- shared/trade_thesis_validator.py (PR 3) -- see that module for why
+-- vocabulary enforcement lives one layer above pure grammar.
+--
+-- `status` here is catalog-entry lifecycle (active/experimental/deprecated)
+-- -- a deliberately different vocabulary from trade_theses.STATUSES
+-- (proposed/active/weakening/invalidated/completed/superseded), and NOT a
+-- strategy-promotion gate. This axis only answers "is this hypothesis
+-- template available for use" -- it never answers "has an implementation of
+-- this idea demonstrated a tradable edge," which is the separately-scoped
+-- Strategy Incubator epic's job. Conceptual hierarchy this table sits at
+-- the bottom of: HypothesisType -> ResearchExperiment -> StrategyVersion ->
+-- TradeThesis -> TradeProposal -> Order/Position. PR13 implements only the
+-- HypothesisType layer; it must not grow strategy lifecycle, versioning,
+-- scoring, or promotion concepts of its own -- those belong one or more
+-- layers up.
+--
+-- Instantiability (shared/hypothesis_library.py::is_instantiable_
+-- hypothesis_type()) requires status='active' (or 'experimental' too, for
+-- allow_experimental=True research-tooling callers only -- never the live
+-- path) AND schema_version == trade_thesis.TRADE_THESIS_SCHEMA_VERSION,
+-- checked in Python since Postgres can't reach into the Python constant.
+-- register_hypothesis_type() always stamps schema_version from that
+-- constant itself, not from caller input -- a catalog entry can never claim
+-- conformance to a grammar version it wasn't actually written against. This
+-- means an old template automatically stops being live-instantiable the
+-- moment TRADE_THESIS_SCHEMA_VERSION bumps, without needing every row
+-- touched -- the row stays catalog-visible (list/get) for history, it just
+-- fails the instantiability check.
+--
+-- `version` is a simple counter bumped on update (not full append-only
+-- history -- that would start to resemble the separately-tracked Strategy
+-- Incubator epic's strategy_versions concept at a different level of
+-- abstraction). hypothesis_type_changes below captures a minimal
+-- before/after snapshot per change so a mutated template doesn't silently
+-- lose what an already-instantiated trade_theses row's hypothesis_type
+-- meant at the time -- see that table's comment.
+CREATE TABLE IF NOT EXISTS hypothesis_types (
+    id                        BIGSERIAL PRIMARY KEY,
+    type_key                  TEXT NOT NULL UNIQUE,   -- matches trade_theses.hypothesis_type values, e.g. 'mean_reversion_oversold'
+    display_name              TEXT NOT NULL,
+    description                TEXT NOT NULL,
+    category                  TEXT,                    -- loose grouping only, not an FK
+    schema_version             TEXT NOT NULL,           -- stamped from trade_thesis.TRADE_THESIS_SCHEMA_VERSION at write time, not caller-supplied; enforced (not just informational) by is_instantiable_hypothesis_type()
+    required_providers        JSONB NOT NULL DEFAULT '[]',  -- list of feature_registry.PROVIDERS ids; validated in Python at write time, not a DB constraint
+    default_entry_conditions  JSONB,                   -- optional condition-tree template (PR 14 seed material), same grammar as trade_theses.entry_conditions
+    default_invalidation_spec JSONB,
+    default_success_spec      JSONB,
+    status                    TEXT NOT NULL DEFAULT 'active'
+                              CHECK (status IN ('active', 'experimental', 'deprecated')),
+    version                   INTEGER NOT NULL DEFAULT 1,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_hypothesis_types_status ON hypothesis_types (status);
+
+-- Minimal change history for hypothesis_types -- NOT the Strategy
+-- Incubator's strategy_versions concept, deliberately lighter-weight: one
+-- row per update() call capturing a before/after snapshot of the full spec,
+-- so "what did mean_reversion_oversold mean when trade_theses row #4821 was
+-- instantiated against it" stays answerable even though hypothesis_types
+-- itself is mutated in place. previous_value/new_value store the complete
+-- HypothesisTypeSpec dict, not a per-field diff -- simplest thing that
+-- preserves provenance without inventing a second versioning system.
+CREATE TABLE IF NOT EXISTS hypothesis_type_changes (
+    id             BIGSERIAL PRIMARY KEY,
+    type_key       TEXT NOT NULL,
+    version        INTEGER NOT NULL,  -- hypothesis_types.version AFTER this change was applied
+    changed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    changed_by     TEXT,              -- NULL if unattributed (no caller-identity plumbing exists yet at this layer)
+    previous_value JSONB NOT NULL,
+    new_value      JSONB NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_hypothesis_type_changes_type_key
+    ON hypothesis_type_changes (type_key, changed_at DESC);
+
+-- Seed with today's live HYPOTHESIS_TYPES values so the catalog starts in
+-- lockstep -- this migration alone makes zero new hypothesis_type legal.
+-- mean_reversion_oversold's default_entry_conditions matches the exact
+-- condition tree shared/trade_thesis_engine.py::_build_buy_trade_thesis()
+-- already builds live (PR 4); its description is worded to match the OR
+-- (either condition fires the entry), not an AND, since that's what the
+-- condition tree actually encodes.
+INSERT INTO hypothesis_types
+    (type_key, display_name, description, category, schema_version, required_providers,
+     default_entry_conditions, status)
+VALUES
+    ('mean_reversion_oversold', 'Mean Reversion — Oversold Bounce',
+     'Oversold mean-reversion setup triggered by either low RSI or price near/below the lower Bollinger band, expecting reversion toward the mean.',
+     'mean_reversion', 'v1', '["technical"]'::jsonb,
+     '{"or": [{"feature": "technical.rsi_14", "op": "lt", "value": 30}, {"feature": "technical.bb_pct_b", "op": "lte", "value": 0.1}]}'::jsonb,
+     'active'),
+    ('mean_reversion_overbought', 'Mean Reversion — Overbought Fade',
+     'RSI/BB overbought entry: price near/above upper Bollinger band with high RSI, expecting reversion toward the mean.',
+     'mean_reversion', 'v1', '["technical"]'::jsonb,
+     '{"and": [{"feature": "technical.rsi_14", "op": "gt", "value": 70}, {"feature": "technical.bb_pct_b", "op": "gte", "value": 0.9}]}'::jsonb,
+     'active')
+ON CONFLICT (type_key) DO NOTHING;

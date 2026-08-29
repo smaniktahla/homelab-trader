@@ -109,6 +109,60 @@ def test_valid_thesis_with_seeded_history_passes_all_checks(conn):
     assert result.errors == []
 
 
+# --- hypothesis_type vocabulary (PR 13 -- Hypothesis Library) ---------------
+# hypothesis_type membership moved from construction-time (shared/
+# trade_thesis.py) to here as of PR 13; see shared/hypothesis_library.py.
+# hypothesis_types is reference/config data (not in tests/conftest.py's
+# RESET_TABLES, same convention as `theses`), so any test that mutates the
+# seeded row must restore it in a finally block.
+
+def test_unregistered_hypothesis_type_fails(conn):
+    _insert_price_history(conn, SYMBOL, _CLOSES)
+    thesis_id = _mean_reversion_thesis_id(conn)
+    thesis = _valid_thesis(thesis_id, hypothesis_type="not_a_registered_type")
+
+    result = validate_trade_thesis(conn, thesis)
+    assert not result.is_valid
+    assert any("unregistered or inactive hypothesis_type 'not_a_registered_type'" in e for e in result.errors)
+
+
+def test_deprecated_hypothesis_type_fails(conn):
+    _insert_price_history(conn, SYMBOL, _CLOSES)
+    thesis_id = _mean_reversion_thesis_id(conn)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE hypothesis_types SET status='deprecated' WHERE type_key='mean_reversion_oversold'")
+    conn.commit()
+    try:
+        thesis = _valid_thesis(thesis_id)
+        result = validate_trade_thesis(conn, thesis)
+        assert not result.is_valid
+        assert any("unregistered or inactive hypothesis_type 'mean_reversion_oversold'" in e for e in result.errors)
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE hypothesis_types SET status='active' WHERE type_key='mean_reversion_oversold'")
+        conn.commit()
+
+
+def test_schema_version_mismatch_hypothesis_type_fails(conn):
+    # An entry that's status='active' but written against a stale grammar
+    # version must still fail -- is_instantiable_hypothesis_type() requires
+    # BOTH active status AND schema_version == TRADE_THESIS_SCHEMA_VERSION.
+    _insert_price_history(conn, SYMBOL, _CLOSES)
+    thesis_id = _mean_reversion_thesis_id(conn)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE hypothesis_types SET schema_version='v0_stale' WHERE type_key='mean_reversion_oversold'")
+    conn.commit()
+    try:
+        thesis = _valid_thesis(thesis_id)
+        result = validate_trade_thesis(conn, thesis)
+        assert not result.is_valid
+        assert any("unregistered or inactive hypothesis_type 'mean_reversion_oversold'" in e for e in result.errors)
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE hypothesis_types SET schema_version='v1' WHERE type_key='mean_reversion_oversold'")
+        conn.commit()
+
+
 # --- vocabulary checks -----------------------------------------------------
 
 def test_unregistered_feature_in_condition_tree_fails(conn):
