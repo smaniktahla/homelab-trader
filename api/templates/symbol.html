@@ -52,7 +52,7 @@
   .score-neutral { background: #222; color: #666; }
   .modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:100; align-items:center; justify-content:center; }
   .modal-bg.open { display:flex; }
-  .modal { background:#1a1d27; border:1px solid #2a2d3a; border-radius:10px; padding:24px; width:340px; }
+  .modal { background:#1a1d27; border:1px solid #2a2d3a; border-radius:10px; padding:24px; width:340px; transform:translateY(-110px); }
   .field { margin-bottom:14px; }
   .field label { display:block; font-size:.78rem; color:#888; margin-bottom:5px; }
   .field input, .field select { width:100%; background:#0d0f1a; border:1px solid #2a2d3a; border-radius:5px; color:#ccc; padding:8px 10px; font-size:.85rem; }
@@ -269,6 +269,7 @@ const fmt = (n, d=2) => n == null ? '—' : Number(n).toLocaleString('en-US', {m
 const fmtUSD = n => n == null ? '—' : '$' + fmt(n);
 let priceChart = null;
 let currentChartDays = 14;
+let currentPositionQty = null;
 
 function showToast(msg, type='success') {
   const t = document.getElementById('toast');
@@ -321,6 +322,7 @@ async function loadPosition() {
     const positions = await fetch('/api/positions').then(r => r.json());
     const pos = positions.find(p => p.symbol === SYMBOL);
     if (!pos) return;
+    currentPositionQty = pos.qty;
     document.getElementById('position-card').style.display = 'block';
     document.getElementById('pos-shares').textContent = `${fmt(pos.qty, 0)} shares`;
     document.getElementById('pos-detail').textContent =
@@ -581,7 +583,7 @@ async function loadTrades() {
 
 function openModal(side) {
   document.getElementById('modal-side').value = side;
-  document.getElementById('modal-qty').value = '';
+  document.getElementById('modal-qty').value = (side === 'sell' && currentPositionQty != null) ? currentPositionQty : '';
   document.getElementById('modal').classList.add('open');
 }
 function closeModal() { document.getElementById('modal').classList.remove('open'); }

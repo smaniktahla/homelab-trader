@@ -6,9 +6,14 @@ PR-1-grammar-conformant thesis can be constructed today referencing a
 feature that will never validate -- this module is what actually checks
 that against the Feature Registry (PR 2, shared/feature_registry.py).
 
-Three checks against a single TradeThesis + a live DB connection (features
+Four checks against a single TradeThesis + a live DB connection (features
 need real price/regime history to confirm data availability):
 
+0. Hypothesis type -- thesis.hypothesis_type must be registered and
+   'active' in the Hypothesis Library (shared/hypothesis_library.py,
+   PR 13). shared/trade_thesis.py's grammar layer only checks it's a
+   non-empty string (PR 13 moved membership enforcement here), same
+   grammar-vs-vocabulary split as check 1 below for 'feature' identifiers.
 1. Vocabulary -- every 'feature' identifier referenced anywhere in
    entry_conditions/invalidation_spec/success_spec must be registered in
    feature_registry.FEATURES, and every evidence_context.providers key
@@ -39,6 +44,7 @@ from datetime import date as date_cls
 from datetime import datetime
 
 import feature_registry
+import hypothesis_library
 from trade_thesis import COMBINATORS, CONDITION_TREE_FIELDS
 
 
@@ -102,6 +108,10 @@ def validate_trade_thesis(conn, thesis):
     so a caller building/backfilling many theses can see everything wrong
     with one in a single pass."""
     errors = []
+
+    if not hypothesis_library.is_legal_hypothesis_type(conn, thesis.hypothesis_type):
+        errors.append(f"unregistered or inactive hypothesis_type '{thesis.hypothesis_type}'")
+
     referenced_features = extract_referenced_features(thesis)
 
     for feature_id in sorted(referenced_features):

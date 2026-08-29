@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 import psycopg2, psycopg2.extras, os, requests as http, secrets, time, bisect, json, logging
 from datetime import datetime, timezone, timedelta
@@ -18,6 +18,8 @@ import trading_permission
 import circuit_breaker
 import proposal_ranking
 import position_execution_state as pes
+import hypothesis_library
+import dataclasses
 
 log = logging.getLogger(__name__)
 
@@ -1935,6 +1937,78 @@ def update_signal_param(key: str, body: ParamUpdate):
             raise HTTPException(404, f"param '{key}' not found")
         conn.commit()
     return {"key": key, "value": body.value}
+
+
+# ── Hypothesis Library (PR 13, Hypothesis-Driven Trading Architecture) ──────
+# Catalog CRUD only -- no strategy generation (PR 14) or promotion/lifecycle
+# concepts (Strategy Incubator epic) belong here. shared/hypothesis_library.py
+# expects plain tuple-row cursors (same positional-access convention as every
+# other shared/*.py module) -- db()'s RealDictCursor breaks that, same
+# reasoning as the compute_signals() call above, so these use their own plain
+# psycopg2.connect(DB_DSN) rather than db().
+
+@app.get("/api/hypothesis-types")
+def get_hypothesis_types(status: str | None = None):
+    with psycopg2.connect(DB_DSN) as conn:
+        return [dataclasses.asdict(s) for s in hypothesis_library.list_hypothesis_types(conn, status=status)]
+
+@app.get("/api/hypothesis-types/{type_key}")
+def get_hypothesis_type(type_key: str):
+    with psycopg2.connect(DB_DSN) as conn:
+        spec = hypothesis_library.get_hypothesis_type(conn, type_key)
+    if spec is None:
+        raise HTTPException(404, f"hypothesis_type '{type_key}' not found")
+    return dataclasses.asdict(spec)
+
+class HypothesisTypeCreate(BaseModel):
+    type_key: str
+    display_name: str
+    description: str
+    category: Optional[str] = None
+    required_providers: list[str] = Field(default_factory=list)
+    default_entry_conditions: Optional[dict] = None
+    default_invalidation_spec: Optional[dict] = None
+    default_success_spec: Optional[dict] = None
+
+@app.post("/api/hypothesis-types")
+def create_hypothesis_type(body: HypothesisTypeCreate):
+    with psycopg2.connect(DB_DSN) as conn:
+        if hypothesis_library.hypothesis_type_exists(conn, body.type_key):
+            raise HTTPException(409, f"hypothesis_type '{body.type_key}' already exists")
+        spec = hypothesis_library.HypothesisTypeSpec(
+            type_key=body.type_key, display_name=body.display_name, description=body.description,
+            category=body.category, schema_version="",  # register_hypothesis_type always overwrites this
+            required_providers=body.required_providers,
+            default_entry_conditions=body.default_entry_conditions,
+            default_invalidation_spec=body.default_invalidation_spec,
+            default_success_spec=body.default_success_spec,
+            status="active", version=1,
+        )
+        new_id = hypothesis_library.register_hypothesis_type(conn, spec)
+    if new_id is None:
+        raise HTTPException(422, f"hypothesis_type '{body.type_key}' failed validation (unregistered provider or malformed condition template)")
+    return {"id": new_id, "type_key": body.type_key}
+
+class HypothesisTypeUpdate(BaseModel):
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    required_providers: Optional[list[str]] = None
+    status: Optional[str] = None
+    default_entry_conditions: Optional[dict] = None
+    default_invalidation_spec: Optional[dict] = None
+    default_success_spec: Optional[dict] = None
+
+@app.patch("/api/hypothesis-types/{type_key}")
+def update_hypothesis_type_endpoint(type_key: str, body: HypothesisTypeUpdate):
+    changes = {k: v for k, v in body.model_dump().items() if v is not None}
+    with psycopg2.connect(DB_DSN) as conn:
+        if not hypothesis_library.hypothesis_type_exists(conn, type_key):
+            raise HTTPException(404, f"hypothesis_type '{type_key}' not found")
+        ok = hypothesis_library.update_hypothesis_type(conn, type_key, **changes)
+    if not ok:
+        raise HTTPException(422, f"hypothesis_type '{type_key}' update failed validation (unregistered provider or malformed condition template)")
+    return {"type_key": type_key, **changes}
 
 
 # ── App Settings ─────────────────────────────────────────────────────────────

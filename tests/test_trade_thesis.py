@@ -139,9 +139,23 @@ def test_grammar_rejects_malformed_evidence_context(bad_context):
 
 # --- grammar: other fields ---------------------------------------------------
 
-def test_construction_rejects_illegal_hypothesis_type():
+# hypothesis_type vocabulary enforcement moved to shared/hypothesis_library.py
+# + shared/trade_thesis_validator.py as of PR 13 -- construction now only
+# checks the syntactic shape (non-empty string), matching how 'feature'
+# identifiers inside condition trees were already split between grammar
+# (this module) and vocabulary (feature_registry, checked in the validator).
+def test_construction_accepts_any_non_empty_string_hypothesis_type():
+    # Not a registered type in the Hypothesis Library -- construction no
+    # longer knows or cares; see test_trade_thesis_validator.py for the
+    # semantic membership check.
+    thesis = _valid_thesis(hypothesis_type="not_a_registered_type")
+    assert thesis.hypothesis_type == "not_a_registered_type"
+
+
+@pytest.mark.parametrize("bad_hypothesis_type", ["", None, 123])
+def test_construction_rejects_non_string_or_empty_hypothesis_type(bad_hypothesis_type):
     with pytest.raises(GrammarError):
-        _valid_thesis(hypothesis_type="not_a_real_type")
+        _valid_thesis(hypothesis_type=bad_hypothesis_type)
 
 
 def test_construction_rejects_illegal_status():
@@ -192,9 +206,12 @@ def test_evolve_produces_new_validated_instance_without_mutating_original():
 
 
 def test_evolve_still_enforces_grammar():
+    # hypothesis_type is no longer grammar-enforced (PR 13 -- see the
+    # hypothesis_type tests above); status still is, so use that to prove
+    # evolve() re-runs __post_init__ rather than bypassing it.
     thesis = _valid_thesis()
     with pytest.raises(GrammarError):
-        thesis.evolve(hypothesis_type="bogus")
+        thesis.evolve(status="bogus")
 
 
 # --- persistence helper (fail-open, not wired into any live path) -----------
