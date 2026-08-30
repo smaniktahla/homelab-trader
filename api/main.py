@@ -8,6 +8,7 @@ import psycopg2, psycopg2.extras, os, requests as http, secrets, time, bisect, j
 from datetime import datetime, timezone, timedelta
 
 from signals import compute_signals, compute_bollinger, fetch_alpaca_portfolio, load_params, load_sector_map
+from volume_metrics import dollar_volume, relative_volume, volume_zscore, volume_percentile
 from signal_components import weighted_component_score
 import lifecycle_performance
 import rule_adherence
@@ -150,7 +151,8 @@ def get_watchlist():
         return cur.fetchall()
 
 @app.get("/api/prices/{symbol}")
-def get_prices(symbol: str, days: int = 30, include_bb: bool = False):
+def get_prices(symbol: str, days: int = 30, include_bb: bool = False,
+                include_volume_metrics: bool = False, volume_period: int = 20):
     symbol = symbol.upper()
     with db() as conn, conn.cursor() as cur:
         _backfill_thin_history(cur, symbol)
@@ -163,10 +165,17 @@ def get_prices(symbol: str, days: int = 30, include_bb: bool = False):
             bb_period, bb_std = int(p.get("bb_period", 20)), p.get("bb_std", 2.0)
 
         # Fetch extra lookback so the FIRST displayed day still has a full
-        # bb_period of trailing closes to compute against -- otherwise the
-        # default 2-week view (14 days, period 20) would show no bands at
-        # all for its entire range.
-        lookback = days + bb_period + 5 if include_bb else days
+        # bb_period/volume_period of trailing history to compute against --
+        # otherwise the default 2-week view (14 days, period 20) would show
+        # no bands/metrics at all for its entire range. Takes the max of
+        # whichever extras are active, not a naive sum, when both flags
+        # are requested together.
+        lookback_extra = 0
+        if include_bb:
+            lookback_extra = max(lookback_extra, bb_period + 5)
+        if include_volume_metrics:
+            lookback_extra = max(lookback_extra, volume_period + 5)
+        lookback = days + lookback_extra if lookback_extra else days
         cur.execute("""
             SELECT ts, open, high, low, close, volume
             FROM price_history WHERE symbol = %s
@@ -180,8 +189,25 @@ def get_prices(symbol: str, days: int = 30, include_bb: bool = False):
             for i, r in enumerate(rows):
                 bb_upper, bb_middle, bb_lower, _ = compute_bollinger(closes[:i + 1], bb_period, bb_std)
                 r["bb_upper"], r["bb_middle"], r["bb_lower"] = bb_upper, bb_middle, bb_lower
-            rows = rows[-days:]
 
+        if include_volume_metrics:
+            # volume_metrics.py's functions assume a clean numeric list --
+            # any None volume in the trailing window short-circuits that
+            # row's metrics to None rather than crashing, same guard style
+            # compute_bollinger's callers already use for None closes.
+            volumes = [float(r["volume"]) if r["volume"] is not None else None for r in rows]
+            for i, r in enumerate(rows):
+                window = volumes[: i + 1]
+                close = float(r["close"]) if r["close"] is not None else None
+                r["dollar_volume"] = dollar_volume(close, volumes[i])
+                if None in window:
+                    r["rvol"] = r["volume_zscore"] = r["volume_percentile"] = None
+                else:
+                    r["rvol"] = relative_volume(window, volume_period)
+                    r["volume_zscore"] = volume_zscore(window, volume_period)
+                    r["volume_percentile"] = volume_percentile(window, volume_period)
+
+        rows = rows[-days:]
         return rows
 
 @app.get("/api/news/{symbol}")
