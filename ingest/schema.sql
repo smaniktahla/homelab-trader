@@ -1142,3 +1142,22 @@ VALUES
      NULL, NULL,
      'active')
 ON CONFLICT (type_key) DO NOTHING;
+
+-- Volume & Volume Profile epic, PR A: provenance tracking. price_history
+-- has always been an untracked blend of two sources -- the dominant,
+-- recurring Yahoo Finance scrape (ingest.py::ingest_prices) and a
+-- secondary, manually-run Alpaca IEX-feed backfill
+-- (backfill_alpaca.py::store_bars) that deliberately writes into the SAME
+-- table/rows via ON CONFLICT DO NOTHING. Neither path was ever marked.
+-- Existing rows honestly default to 'unknown' -- there is no way to
+-- retroactively determine which source wrote them, so this migration does
+-- not guess/reclassify. Going forward, ingest.py/backfill_alpaca.py tag
+-- every new row with its real source ('yahoo' | 'alpaca_iex'). Once a row
+-- exists, its source is immutable -- neither INSERT's ON CONFLICT clause
+-- touches this column, matching the table's existing implicit
+-- first-write-wins convention. price_history_hourly gets the same column
+-- for consistency even though nothing reads that table yet (schema.sql's
+-- own note: "nothing reads this yet") -- cheap to add now, avoids a
+-- second migration later.
+ALTER TABLE price_history ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE price_history_hourly ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'unknown';

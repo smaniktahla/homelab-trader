@@ -256,8 +256,8 @@ def ingest_prices(conn, symbols):
                     if None in (row["open"], row["close"]):
                         continue
                     cur.execute("""
-                        INSERT INTO price_history (symbol, ts, open, high, low, close, volume, adjclose)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        INSERT INTO price_history (symbol, ts, open, high, low, close, volume, adjclose, source)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'yahoo')
                         ON CONFLICT (symbol, ts) DO UPDATE SET adjclose = EXCLUDED.adjclose
                         WHERE price_history.adjclose IS NULL AND EXCLUDED.adjclose IS NOT NULL
                     """, (sym, row["ts"], row["open"], row["high"],
@@ -304,8 +304,8 @@ def ingest_hourly_prices(conn, symbols):
                         continue
                     ts = datetime.fromisoformat(b["t"].replace("Z", "+00:00")).astimezone(timezone.utc)
                     cur.execute("""
-                        INSERT INTO price_history_hourly (symbol, ts, open, high, low, close, volume)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        INSERT INTO price_history_hourly (symbol, ts, open, high, low, close, volume, source)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'alpaca_iex')
                         ON CONFLICT (symbol, ts) DO NOTHING
                     """, (sym, ts, b["o"], b["h"], b["l"], b["c"], b.get("v")))
                     n += cur.rowcount

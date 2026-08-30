@@ -114,8 +114,8 @@ def store_bars(conn, symbol, bars):
             if b.get("o") is None or b.get("c") is None:
                 continue
             cur.execute("""
-                INSERT INTO price_history (symbol, ts, open, high, low, close, volume)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO price_history (symbol, ts, open, high, low, close, volume, source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'alpaca_iex')
                 ON CONFLICT (symbol, ts) DO NOTHING
             """, (symbol, _normalize_ts(b["t"]), b["o"], b["h"], b["l"], b["c"], b.get("v")))
             inserted += cur.rowcount

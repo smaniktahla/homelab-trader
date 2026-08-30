@@ -140,3 +140,18 @@ def test_main_batch_failure_recovers_good_symbols(monkeypatch):
     assert "BEN" in stored
     assert "BG" in stored
     assert "BF-B" not in stored
+
+
+# --- source provenance (Volume & Volume Profile epic, PR A) ---------------------
+
+def test_store_bars_tags_source_as_alpaca_iex(monkeypatch, conn):
+    backfill_alpaca = _import_backfill_alpaca(monkeypatch)
+    bars = [{"t": "2024-01-02T04:00:00Z", "o": 10.0, "h": 11.0, "l": 9.0, "c": 10.5, "v": 100}]
+
+    backfill_alpaca.store_bars(conn, "PRVTEST", bars)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT source FROM price_history WHERE symbol=%s", ("PRVTEST",))
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "alpaca_iex"
