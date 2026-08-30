@@ -190,6 +190,17 @@ def test_rejects_unmatched_sweep_feature(conn):
     assert generate_candidates(conn, SEEDED_TYPE, {"market_regime.overall": ["bullish"]}) is None
 
 
+def test_ema_crossover_trend_correctly_fails_generation(conn):
+    # PR 16's real-world case for the "no default_entry_conditions"
+    # rejection above: ema_crossover_trend is seeded with
+    # default_entry_conditions=NULL on purpose (a two-EMA crossover can't
+    # be expressed in the single-feature-vs-scalar condition grammar), so
+    # generate_candidates() must refuse it just like any other
+    # no-template type -- proving the honest-NULL registration choice
+    # behaves correctly end to end, not just as a schema-level assertion.
+    assert generate_candidates(conn, "ema_crossover_trend", {"technical.rsi_14": [25]}) is None
+
+
 def test_no_partial_batch_left_visible_on_rejection(conn):
     before = len(list_candidate_batches(conn, hypothesis_type=SEEDED_TYPE))
     assert generate_candidates(conn, SEEDED_TYPE, {"market_regime.overall": ["bullish"]}) is None

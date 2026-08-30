@@ -20,6 +20,11 @@ from hypothesis_library import (
 )
 
 SEEDED_TYPE_KEYS = {"mean_reversion_oversold", "mean_reversion_overbought"}
+# PR 16 seed rows -- kept as a separate constant (not merged into
+# SEEDED_TYPE_KEYS) so ema_crossover_trend's deliberate
+# default_entry_conditions=None can be asserted specifically without
+# complicating the PR13-era generic-loop test above.
+PR16_TYPE_KEYS = {"bollinger_breakout_continuation", "ema_crossover_trend"}
 
 
 def _cleanup(conn, type_key):
@@ -56,6 +61,31 @@ def test_seeded_types_are_active_and_instantiable(conn):
         spec = get_hypothesis_type(conn, type_key)
         assert spec.status == "active"
         assert spec.schema_version == TRADE_THESIS_SCHEMA_VERSION
+
+
+def test_pr16_seeded_types_are_active_and_instantiable(conn):
+    for type_key in PR16_TYPE_KEYS:
+        assert is_legal_hypothesis_type(conn, type_key)
+        assert is_instantiable_hypothesis_type(conn, type_key)
+        spec = get_hypothesis_type(conn, type_key)
+        assert spec.status == "active"
+        assert spec.schema_version == TRADE_THESIS_SCHEMA_VERSION
+
+
+def test_bollinger_breakout_continuation_has_a_condition_tree_template(conn):
+    spec = get_hypothesis_type(conn, "bollinger_breakout_continuation")
+    assert spec.default_entry_conditions == {"feature": "technical.bb_pct_b", "op": "gt", "value": 1.0}
+    assert spec.default_invalidation_spec == {"feature": "technical.bb_pct_b", "op": "lt", "value": 0.0}
+
+
+def test_ema_crossover_trend_has_no_condition_tree_template(conn):
+    # Deliberately NULL -- the condition-tree grammar can't express a
+    # feature-vs-feature crossover, so registering an approximate
+    # single-feature condition would be actively misleading. See
+    # shared/ema_crossover_strategy.py for the real (Python) semantics.
+    spec = get_hypothesis_type(conn, "ema_crossover_trend")
+    assert spec.default_entry_conditions is None
+    assert spec.default_invalidation_spec is None
 
 
 # --- list / get / exists --------------------------------------------------------

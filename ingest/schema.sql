@@ -1100,3 +1100,45 @@ CREATE TABLE IF NOT EXISTS candidates (
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidates_batch_id ON candidates (batch_id);
+
+-- Additional hypothesis_types seed rows, PR 16 (Bollinger Breakout
+-- Continuation + EMA Crossover Trend strategies, built on PR 15's
+-- shared/backtest_engine.py). Metadata/catalog registration only, per
+-- PR 13's design -- the actual executable strategy logic lives in
+-- shared/bollinger_breakout_strategy.py / shared/ema_crossover_strategy.py,
+-- not here.
+--
+-- bollinger_breakout_continuation: "close > upper_band" is exactly
+-- technical.bb_pct_b > 1.0 (same architectural reuse PR 13's original
+-- mean_reversion rows already established), so entry_conditions needs no
+-- new registered feature. default_invalidation_spec (not success_spec)
+-- encodes "close < lower_band" -- matching trade_thesis_engine.py's own
+-- precedent that invalidation_spec is "the thesis went wrong," which a
+-- failed continuation reverting below the band is, not a success.
+--
+-- ema_crossover_trend: default_entry_conditions is deliberately NULL. The
+-- condition-tree grammar (shared/trade_thesis.py) only expresses "one
+-- feature vs. a scalar" -- it has no primitive for "feature A vs. feature
+-- B" or "value at t vs. value at t-1", so a crossover cannot be honestly
+-- expressed in it. Leaving this NULL (rather than registering a
+-- misleading approximate condition) means
+-- shared/hypothesis_candidates.py::generate_candidates() correctly
+-- refuses to generate candidates for it (its own "no template" rejection,
+-- PR 14) -- an accurate reflection of a real grammar limitation, not a
+-- bug to work around here.
+INSERT INTO hypothesis_types
+    (type_key, display_name, description, category, schema_version, required_providers,
+     default_entry_conditions, default_invalidation_spec, status)
+VALUES
+    ('bollinger_breakout_continuation', 'Bollinger Breakout Continuation',
+     'A close above the upper Bollinger Band indicates volatility expansion and positive momentum more likely to continue than immediately revert. Exits on a close back below the lower band.',
+     'trend_following', 'v1', '["technical"]'::jsonb,
+     '{"feature": "technical.bb_pct_b", "op": "gt", "value": 1.0}'::jsonb,
+     '{"feature": "technical.bb_pct_b", "op": "lt", "value": 0.0}'::jsonb,
+     'active'),
+    ('ema_crossover_trend', 'EMA Crossover Trend',
+     'A faster moving average (default EMA 20) crossing above a slower moving average (default EMA 21) indicates positive trend persistence. Exits on the mirrored crossunder. Entry/exit expressed as a two-EMA crossover, which the current condition-tree grammar cannot represent as a single-feature-vs-scalar template -- see shared/ema_crossover_strategy.py for the actual executable logic.',
+     'trend_following', 'v1', '["technical"]'::jsonb,
+     NULL, NULL,
+     'active')
+ON CONFLICT (type_key) DO NOTHING;
