@@ -1055,3 +1055,48 @@ VALUES
      '{"and": [{"feature": "technical.rsi_14", "op": "gt", "value": 70}, {"feature": "technical.bb_pct_b", "op": "gte", "value": 0.9}]}'::jsonb,
      'active')
 ON CONFLICT (type_key) DO NOTHING;
+
+-- Hypothesis Candidate Generation (PR 14). Sits between hypothesis_types
+-- (PR 13's catalog of templates) and the separately-scoped, not-yet-built
+-- Strategy Incubator epic's ResearchExperiment/StrategyVersion concepts --
+-- deliberately NOT named research_experiments/strategy_versions so this
+-- doesn't squat on that epic's future schema; a later integration PR can
+-- migrate rows OUT of these tables into the real Incubator schema once
+-- that epic starts, without a naming collision.
+--
+-- candidate_batches: one row per generation call (one hypothesis_type, one
+-- point in time, one parameter-variation spec). hypothesis_type_version is
+-- copied from hypothesis_types.version AT GENERATION TIME and never
+-- re-derived -- if the catalog entry is edited afterward (bumping its
+-- version), already-generated batches keep pointing at the version they
+-- were actually generated against, same immutable-provenance contract
+-- hypothesis_library.py's docstring establishes for this PR.
+CREATE TABLE IF NOT EXISTS candidate_batches (
+    id                      BIGSERIAL PRIMARY KEY,
+    hypothesis_type         TEXT NOT NULL,     -- hypothesis_types.type_key, not FK'd -- point-in-time
+                                                -- copy, not a live join, same reasoning trade_theses.
+                                                -- hypothesis_type stays plain TEXT
+    hypothesis_type_version INTEGER NOT NULL,  -- hypothesis_types.version AT GENERATION TIME, frozen
+    schema_version          TEXT NOT NULL,     -- trade_thesis.TRADE_THESIS_SCHEMA_VERSION at generation time
+    parameter_spec          JSONB NOT NULL,    -- caller's input, e.g. {"technical.rsi_14": [20, 25, 30]}
+    generated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    generated_by            TEXT                -- NULL if unattributed, same convention as hypothesis_type_changes.changed_by
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidate_batches_hypothesis_type ON candidate_batches (hypothesis_type);
+
+-- candidates: one concrete, fully-substituted condition-tree set per
+-- parameter combination in a batch's Cartesian product. Not executable --
+-- no backtest_results linkage, no scoring/promotion status. Generation +
+-- persistence + provenance only, per this PR's scope.
+CREATE TABLE IF NOT EXISTS candidates (
+    id                 BIGSERIAL PRIMARY KEY,
+    batch_id           BIGINT NOT NULL REFERENCES candidate_batches(id),
+    parameter_values   JSONB NOT NULL,  -- e.g. {"technical.rsi_14": 25}, one point from the batch's Cartesian product
+    entry_conditions   JSONB NOT NULL,  -- substituted, re-validated via trade_thesis.validate_condition_tree()
+    invalidation_spec  JSONB,           -- NULL if the template's default_invalidation_spec was NULL
+    success_spec       JSONB,           -- NULL if the template's default_success_spec was NULL
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidates_batch_id ON candidates (batch_id);

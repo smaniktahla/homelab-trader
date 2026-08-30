@@ -19,6 +19,7 @@ import circuit_breaker
 import proposal_ranking
 import position_execution_state as pes
 import hypothesis_library
+import hypothesis_candidates
 import dataclasses
 
 log = logging.getLogger(__name__)
@@ -2009,6 +2010,41 @@ def update_hypothesis_type_endpoint(type_key: str, body: HypothesisTypeUpdate):
     if not ok:
         raise HTTPException(422, f"hypothesis_type '{type_key}' update failed validation (unregistered provider or malformed condition template)")
     return {"type_key": type_key, **changes}
+
+
+# ── Hypothesis Candidate Generation (PR 14, Hypothesis-Driven Trading ──────
+# Architecture epic). Generation + persistence + provenance only -- no
+# backtest invocation (no callable backtest entry point exists in this repo
+# yet -- see ingest/research/backtests/*.py, all standalone scripts) and no
+# strategy lifecycle/promotion (Strategy Incubator epic, separately scoped).
+# shared/hypothesis_candidates.py expects plain tuple-row cursors, same
+# reasoning as the hypothesis-types endpoints above.
+
+class CandidateGenerateRequest(BaseModel):
+    parameter_spec: dict[str, list[float]]
+
+@app.post("/api/hypothesis-types/{type_key}/candidates")
+def generate_candidates_endpoint(type_key: str, body: CandidateGenerateRequest):
+    with psycopg2.connect(DB_DSN) as conn:
+        result = hypothesis_candidates.generate_candidates(conn, type_key, body.parameter_spec)
+    if result is None:
+        raise HTTPException(422, f"candidate generation for '{type_key}' failed (unknown/non-instantiable type, no default_entry_conditions, or unmatched sweep feature)")
+    batch_id, candidate_ids = result
+    return {"batch_id": batch_id, "candidate_ids": candidate_ids}
+
+@app.get("/api/candidate-batches/{batch_id}")
+def get_candidate_batch_endpoint(batch_id: int):
+    with psycopg2.connect(DB_DSN) as conn:
+        batch = hypothesis_candidates.get_candidate_batch(conn, batch_id)
+        if batch is None:
+            raise HTTPException(404, f"candidate_batch {batch_id} not found")
+        candidates = hypothesis_candidates.list_candidates(conn, batch_id)
+    return {"batch": dataclasses.asdict(batch), "candidates": [dataclasses.asdict(c) for c in candidates]}
+
+@app.get("/api/candidate-batches")
+def list_candidate_batches_endpoint(hypothesis_type: str | None = None):
+    with psycopg2.connect(DB_DSN) as conn:
+        return [dataclasses.asdict(b) for b in hypothesis_candidates.list_candidate_batches(conn, hypothesis_type=hypothesis_type)]
 
 
 # ── App Settings ─────────────────────────────────────────────────────────────
