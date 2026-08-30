@@ -20,6 +20,8 @@ import proposal_ranking
 import position_execution_state as pes
 import hypothesis_library
 import hypothesis_candidates
+import strategy_registry
+from backtest_engine import load_bars, run_backtest
 import dataclasses
 
 log = logging.getLogger(__name__)
@@ -2047,6 +2049,54 @@ def list_candidate_batches_endpoint(hypothesis_type: str | None = None):
         return [dataclasses.asdict(b) for b in hypothesis_candidates.list_candidate_batches(conn, hypothesis_type=hypothesis_type)]
 
 
+# ── Backtest Visualization (PR 17, Hypothesis-Driven Trading Architecture ──
+# epic). Runs a registered strategy (shared/strategy_registry.py) through
+# PR 15's shared/backtest_engine.py and returns bars/overlays/signals/fills
+# as separate series -- signals (strategy decisions) and fills (actual
+# executions) are kept visually/structurally distinct so a same-bar
+# signal+fill (a timing bug) is obvious versus the correct signal-then-
+# next-bar-fill shape. Plain psycopg2.connect(DB_DSN), same reasoning as
+# the hypothesis-types/candidates endpoints -- load_bars()/run_backtest()
+# expect tuple-row cursors.
+
+@app.get("/api/backtest-strategies")
+def list_backtest_strategies():
+    return [{"key": k, "display_name": v["display_name"]} for k, v in strategy_registry.STRATEGIES.items()]
+
+@app.get("/api/backtest/{strategy_key}/{symbol}")
+def run_backtest_endpoint(strategy_key: str, symbol: str, days: int = 180, execution_timing: str = "next_bar_open"):
+    if strategy_key not in strategy_registry.STRATEGIES:
+        raise HTTPException(404, f"unknown strategy '{strategy_key}'")
+    spec = strategy_registry.STRATEGIES[strategy_key]
+    symbol = symbol.upper()
+    with psycopg2.connect(DB_DSN) as conn:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=days)
+        bars = load_bars(conn, symbol, start, end)
+    if not bars:
+        raise HTTPException(404, f"no price history for {symbol}")
+
+    result = run_backtest(bars, spec["make_strategy"](), execution_timing=execution_timing)
+    return {
+        "symbol": result.symbol,
+        "strategy": strategy_key,
+        "execution_timing": result.execution_timing,
+        "bars": [
+            {"ts": b.ts.isoformat(), "open": b.open, "high": b.high, "low": b.low, "close": b.close, "volume": b.volume}
+            for b in bars
+        ],
+        "overlays": spec["compute_overlays"](bars),
+        "signals": [
+            {"ts": s.bar_ts.isoformat(), "side": s.side, "reason": s.reason, "actionable": s.actionable}
+            for s in result.signals
+        ],
+        "fills": [{"ts": f.execution_ts.isoformat(), "side": f.side, "price": f.price} for f in result.fills],
+        "trade_count": result.trade_count,
+        "win_rate": result.win_rate,
+        "total_pnl": result.total_pnl,
+    }
+
+
 # ── App Settings ─────────────────────────────────────────────────────────────
 
 _SETTINGS_DEFAULTS = {
@@ -2182,6 +2232,10 @@ def symbol_page(request: Request, symbol: str):
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request):
     return templates.TemplateResponse("settings.html", {"request": request})
+
+@app.get("/backtest/{strategy_key}/{symbol}", response_class=HTMLResponse)
+def backtest_page(request: Request, strategy_key: str, symbol: str):
+    return templates.TemplateResponse("backtest.html", {"request": request, "strategy_key": strategy_key, "symbol": symbol.upper()})
 
 
 # ── User Profile / Wizard ─────────────────────────────────────────────────────

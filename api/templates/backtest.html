@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backtest — {{ symbol }} — Invest</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d0f1a; color: #ccc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: .9rem; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px; }
+  .back { color: #4f8ef7; font-size: .85rem; text-decoration: none; display: inline-block; margin-bottom: 16px; }
+  .back:hover { text-decoration: underline; }
+  .header { display: flex; align-items: flex-start; gap: 20px; margin-bottom: 24px; flex-wrap: wrap; }
+  .header h1 { font-size: 1.5rem; font-weight: 700; color: #fff; }
+  .header .sub { color: #666; font-size: .85rem; margin-top: 2px; }
+  h2 { font-size: .85rem; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: .05em; margin: 0 0 10px; }
+  .card { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; padding: 18px; margin-bottom: 20px; }
+  .controls { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px; }
+  .field label { display: block; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: #555; margin-bottom: 5px; }
+  .field select, .field input { background: #0d0f1a; border: 1px solid #2a2d3a; border-radius: 5px; color: #ccc; padding: 7px 10px; font-size: .85rem; }
+  .range-btns { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  .range-btn { padding: 3px 10px; border-radius: 4px; border: 1px solid #2a2d3a; background: transparent; color: #888; font-size: .78rem; cursor: pointer; }
+  .range-btn.active { background: #4f8ef7; color: #fff; border-color: #4f8ef7; }
+  .stat-row { display: flex; gap: 24px; margin-bottom: 16px; flex-wrap: wrap; }
+  .stat { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 6px; padding: 10px 16px; flex: 1; min-width: 120px; }
+  .stat .label { font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; color: #555; margin-bottom: 4px; }
+  .stat .val { font-size: 1.05rem; font-weight: 700; color: #fff; }
+  .up { color: #3ecf6e; }
+  .down { color: #f75f5f; }
+  .legend-note { font-size: .75rem; color: #888; background: #161822; border: 1px solid #2a2d3a; border-radius: 6px; padding: 8px 12px; margin-top: 12px; }
+  .no-data { color: #444; text-align: center; padding: 40px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/">← Dashboard</a>
+
+  <div class="header">
+    <div>
+      <h1 id="page-title">Backtest — {{ symbol }}</h1>
+      <div class="sub" id="page-sub">Loading…</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="controls">
+      <div class="field">
+        <label>Strategy</label>
+        <select id="strategy-select" onchange="loadBacktest()"></select>
+      </div>
+      <div class="field">
+        <label>Symbol</label>
+        <input id="symbol-input" value="{{ symbol }}" style="width:100px;text-transform:uppercase" onkeydown="if(event.key==='Enter') loadBacktest()">
+      </div>
+      <div class="field">
+        <label>Execution Timing</label>
+        <select id="timing-select" onchange="loadBacktest()">
+          <option value="next_bar_open" selected>next_bar_open</option>
+          <option value="same_bar_close">same_bar_close</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="range-btns">
+      <button class="range-btn" onclick="loadBacktest(90,this)">3M</button>
+      <button class="range-btn active" onclick="loadBacktest(180,this)">6M</button>
+      <button class="range-btn" onclick="loadBacktest(365,this)">1Y</button>
+      <button class="range-btn" onclick="loadBacktest(730,this)">2Y</button>
+    </div>
+
+    <div class="stat-row" id="stat-row" style="display:none">
+      <div class="stat"><div class="label">Trades</div><div class="val" id="stat-trades">—</div></div>
+      <div class="stat"><div class="label">Win Rate</div><div class="val" id="stat-winrate">—</div></div>
+      <div class="stat"><div class="label">Total P&amp;L</div><div class="val" id="stat-pnl">—</div></div>
+    </div>
+
+    <canvas id="backtest-chart" height="220"></canvas>
+    <div class="legend-note">
+      Hollow triangles = strategy <strong>signals</strong> (decisions). Solid triangles = actual <strong>fills</strong> (executions).
+      With next_bar_open timing, a fill sits one bar to the right of its signal — if they ever land on the same bar, that's a lookahead bug.
+    </div>
+  </div>
+</div>
+
+<script>
+let backtestChart = null;
+let currentDays = 180;
+
+async function loadStrategyOptions() {
+  const select = document.getElementById('strategy-select');
+  try {
+    const strategies = await fetch('/api/backtest-strategies').then(r => r.json());
+    select.innerHTML = strategies.map(s => `<option value="${s.key}">${s.display_name}</option>`).join('');
+    const initial = '{{ strategy_key }}';
+    if (strategies.some(s => s.key === initial)) select.value = initial;
+  } catch (e) { console.error(e); }
+}
+
+async function loadBacktest(days, btn) {
+  if (days) {
+    currentDays = days;
+    document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+  }
+  const strategyKey = document.getElementById('strategy-select').value;
+  const symbol = document.getElementById('symbol-input').value.toUpperCase().trim();
+  const timing = document.getElementById('timing-select').value;
+  if (!strategyKey || !symbol) return;
+
+  document.getElementById('page-sub').textContent = 'Loading…';
+  try {
+    const data = await fetch(`/api/backtest/${strategyKey}/${symbol}?days=${currentDays}&execution_timing=${timing}`).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    });
+    renderChart(data);
+    document.getElementById('page-title').textContent = `Backtest — ${data.symbol}`;
+    document.getElementById('page-sub').textContent = `${data.strategy}  ·  ${data.execution_timing}  ·  ${data.bars.length} bars`;
+
+    document.getElementById('stat-row').style.display = 'flex';
+    document.getElementById('stat-trades').textContent = data.trade_count;
+    document.getElementById('stat-winrate').textContent = data.win_rate == null ? '—' : (data.win_rate * 100).toFixed(0) + '%';
+    const pnlEl = document.getElementById('stat-pnl');
+    pnlEl.textContent = (data.total_pnl >= 0 ? '+' : '') + data.total_pnl.toFixed(2);
+    pnlEl.className = 'val ' + (data.total_pnl >= 0 ? 'up' : 'down');
+  } catch (e) {
+    console.error(e);
+    document.getElementById('page-sub').textContent = 'No data available for this symbol/strategy.';
+  }
+}
+
+function renderChart(data) {
+  const bars = data.bars;
+  const closeByTs = {};
+  bars.forEach(b => { closeByTs[b.ts] = b.close; });
+
+  const priceDataset = {
+    type: 'candlestick', label: 'Price',
+    data: bars.map(b => ({x: new Date(b.ts).getTime(), o: b.open, h: b.high, l: b.low, c: b.close})),
+    color: { up: '#3ecf6e', down: '#f75f5f', unchanged: '#888' },
+    borderColor: { up: '#3ecf6e', down: '#f75f5f', unchanged: '#888' },
+  };
+
+  // chartjs-chart-financial@0.2.1 doesn't feed candlestick o/h/l/c into
+  // Chart.js 4's y-scale auto-range -- same fix symbol.html's chart uses.
+  const overlayValues = data.overlays.flatMap(o => o.values.map(v => v.value)).filter(v => v != null);
+  const yValues = bars.flatMap(b => [b.low, b.high]).concat(overlayValues).filter(v => v != null);
+  const yPad = yValues.length ? (Math.max(...yValues) - Math.min(...yValues)) * 0.05 || 1 : 1;
+  const yMin = yValues.length ? Math.min(...yValues) - yPad : undefined;
+  const yMax = yValues.length ? Math.max(...yValues) + yPad : undefined;
+
+  const overlayColors = ['#4f8ef7', '#f7c94f', '#c77dff'];
+  const overlayDatasets = data.overlays.map((o, i) => ({
+    label: o.name, type: 'line',
+    data: o.values.map(v => ({x: new Date(v.ts).getTime(), y: v.value})),
+    borderColor: overlayColors[i % overlayColors.length], borderWidth: 1, borderDash: [4, 3],
+    pointRadius: 0, tension: 0.2, fill: false,
+  }));
+
+  // Signals (decisions) -- hollow triangles, plotted at the signal bar's
+  // close. Fills (executions) -- solid triangles, plotted at the actual
+  // fill price. Deliberately two separate datasets per side so a
+  // same-bar signal+fill is visually obvious rather than overlapping into
+  // one indistinguishable marker.
+  const signalPoints = { buy: [], sell: [] };
+  data.signals.filter(s => s.actionable).forEach(s => {
+    const y = closeByTs[s.ts];
+    if (y != null) signalPoints[s.side].push({x: new Date(s.ts).getTime(), y});
+  });
+  const fillPoints = { buy: [], sell: [] };
+  data.fills.forEach(f => {
+    fillPoints[f.side].push({x: new Date(f.ts).getTime(), y: f.price});
+  });
+
+  const markerDataset = (label, points, color, hollow) => ({
+    type: 'scatter', label, data: points,
+    backgroundColor: hollow ? 'transparent' : color,
+    borderColor: color, borderWidth: 2,
+    pointRadius: hollow ? 7 : 8, pointStyle: 'triangle',
+    rotation: label.includes('Sell') ? 180 : 0,
+    pointHoverRadius: 10,
+  });
+
+  if (backtestChart) backtestChart.destroy();
+  backtestChart = new Chart(document.getElementById('backtest-chart'), {
+    type: 'line',
+    data: {
+      datasets: [
+        priceDataset,
+        ...overlayDatasets,
+        markerDataset('Buy Signal', signalPoints.buy, '#3ecf6e', true),
+        markerDataset('Sell Signal', signalPoints.sell, '#f75f5f', true),
+        markerDataset('Buy Fill', fillPoints.buy, '#3ecf6e', false),
+        markerDataset('Sell Fill', fillPoints.sell, '#f75f5f', false),
+      ],
+    },
+    options: {
+      interaction: { mode: 'nearest', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#888', boxWidth: 12, font: { size: 10 } } },
+        tooltip: {
+          backgroundColor: '#1a1d27', borderColor: '#2a2d3a', borderWidth: 1,
+          titleColor: '#888', bodyColor: '#e8eaf6',
+          callbacks: {
+            label: ctx => {
+              if (ctx.dataset.type === 'candlestick') {
+                const p = ctx.raw;
+                return ` O ${p.o.toFixed(2)}  H ${p.h.toFixed(2)}  L ${p.l.toFixed(2)}  C ${p.c.toFixed(2)}`;
+              }
+              return ctx.parsed.y == null ? null : ` ${ctx.dataset.label}: $${ctx.parsed.y.toFixed(2)}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { type: 'timeseries', time: { unit: 'day', tooltipFormat: 'MMM d, yyyy' }, grid: { color: '#1a1d27' }, ticks: { color: '#555', maxTicksLimit: 8 } },
+        y: { min: yMin, max: yMax, grid: { color: '#1a1d27' }, ticks: { color: '#555', callback: v => '$' + v.toFixed(0) } },
+      },
+      animation: false,
+    },
+  });
+}
+
+loadStrategyOptions().then(() => loadBacktest(180, document.querySelector('.range-btn.active')));
+</script>
+</body>
+</html>
