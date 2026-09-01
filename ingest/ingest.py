@@ -646,6 +646,91 @@ def send_digest(conn):
         log.error(f"Digest failed: {e}")
 
 
+def build_postmortem_html(result):
+    """Render run_postmortem_review()'s result dict as the same dark-card
+    layout send_digest() uses, instead of dumping the pipe-delimited
+    `finding` string into a single <p> -- that string is built for the
+    WhatsApp/log line (see postmortem.py), not for an email body."""
+    today = date.today().strftime("%B %d, %Y")
+    proposal = result.get("proposal")
+    status = result.get("calibration_status")
+
+    if status == "insufficient_data":
+        calibration_section = f"""
+        <div style="background:#1a1d27;border-radius:8px;padding:14px 20px;margin-bottom:20px">
+          <div style="color:#888;font-size:11px;margin-bottom:4px">SCORE CALIBRATION</div>
+          <div style="font-size:14px;color:#aaa">{result['finding'].split(' | ')[0]}</div>
+        </div>"""
+    elif proposal:
+        worst, best = proposal["worst_bucket"], proposal["best_bucket"]
+
+        def _bucket_row(b):
+            avg_loss = f"{b['avg_loss']:.2f}" if b["avg_loss"] is not None else "&mdash;"
+            avg_win = f"{b['avg_win']:.2f}" if b["avg_win"] is not None else "&mdash;"
+            return f"""
+            <tr>
+              <td style="padding:6px 12px;font-weight:600">{b['label']}</td>
+              <td style="padding:6px 12px">{b['avg_return']}%</td>
+              <td style="padding:6px 12px">{b['win_rate']}%</td>
+              <td style="padding:6px 12px">{avg_win}</td>
+              <td style="padding:6px 12px">{avg_loss}</td>
+              <td style="padding:6px 12px">{b['n']}</td>
+            </tr>"""
+
+        calibration_section = f"""
+        <div style="background:#1a1d27;border-radius:8px;padding:14px 20px;margin-bottom:20px;border-left:3px solid #f7b731">
+          <div style="color:#f7b731;font-size:11px;margin-bottom:8px">SCORE CALIBRATION GAP FOUND</div>
+          <table style="border-collapse:collapse;width:100%;margin-bottom:10px">
+            <tr style="color:#888;font-size:11px">
+              <td style="padding:4px 12px">BUCKET</td><td style="padding:4px 12px">AVG RETURN</td>
+              <td style="padding:4px 12px">WIN RATE</td><td style="padding:4px 12px">AVG WIN</td>
+              <td style="padding:4px 12px">AVG LOSS</td><td style="padding:4px 12px">N</td>
+            </tr>
+            {_bucket_row(worst)}
+            {_bucket_row(best)}
+          </table>
+          <div style="font-size:13px;color:#ccc">
+            {proposal['gap_pct']}pp avg-return gap (over the {proposal['gap_threshold_pct']}pp threshold).
+            Suggest raising <code>score_proposal_min</code> from
+            <strong>{proposal['current_value']}</strong> to <strong>{proposal['proposed_value']}</strong>.
+          </div>
+        </div>"""
+    else:
+        calibration_section = f"""
+        <div style="background:#1a1d27;border-radius:8px;padding:14px 20px;margin-bottom:20px">
+          <div style="color:#888;font-size:11px;margin-bottom:4px">SCORE CALIBRATION</div>
+          <div style="font-size:14px;color:#aaa">No calibration change proposed this cycle.</div>
+        </div>"""
+
+    def _stat_card(label, value):
+        return f"""
+        <div style="background:#1a1d27;border-radius:8px;padding:14px 20px;flex:1;min-width:130px">
+          <div style="color:#888;font-size:11px;margin-bottom:4px">{label}</div>
+          <div style="font-size:16px;font-weight:700">{value}</div>
+        </div>"""
+
+    stats_section = f"""
+    <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px">
+      {_stat_card("TRADE EXPECTANCY", f"{result.get('lifecycle_count', 0)} closed &middot; {result.get('lifecycle_segment_views', 0)} segments")}
+      {_stat_card("RULE ADHERENCE", f"{result.get('adherence_count', 0)} checks")}
+      {_stat_card("RISK ENGINE", f"{result.get('risk_count', 0)} sizing decisions")}
+      {_stat_card("HYPOTHESES", f"{result.get('hypothesis_count', 0)} instances &middot; {result.get('hypothesis_types', 0)} types")}
+    </div>"""
+
+    return f"""
+    <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:600px">
+      <h2 style="margin:0 0 4px">Weekly Strategy Review &mdash; {today}</h2>
+      <p style="color:#888;margin:0 0 20px;font-size:13px">N resolved: {result['n_resolved']}</p>
+
+      {calibration_section}
+      {stats_section}
+
+      <p style="color:#555;font-size:11px;margin-top:24px">
+        <a href="http://10.10.10.13:8100" style="color:#4f8ef7">Open Dashboard</a>
+      </p>
+    </div>"""
+
+
 def send_notification(cfg, subject, html_body, whatsapp_text, log_label="notification"):
     """Send email + WhatsApp based on cfg toggles."""
     if cfg["notify_email"] and cfg["smtp_user"] and cfg["smtp_pass"]:
@@ -1319,7 +1404,7 @@ if __name__ == "__main__":
                         set_last_postmortem_at(conn, now_utc)
                         try:
                             subject = "📊 Weekly Strategy Review"
-                            html = f"<p>{result['finding']}</p><p>N resolved: {result['n_resolved']}</p>"
+                            html = build_postmortem_html(result)
                             wa_text = f"{subject}\n{result['finding']}"
                             send_notification(cfg, subject, html, wa_text, "postmortem review")
                         except Exception as e:
