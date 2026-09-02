@@ -611,18 +611,30 @@ async function submitTrade() {
   btn.disabled = false; btn.textContent = 'Submit';
 
   if (r.ok) {
+    // The order already executed at this point -- refreshing position/trade
+    // state must happen unconditionally, never gated on the confirmation
+    // message below rendering cleanly (same bug class fixed in
+    // dashboard.html's submitTrade() on 2026-09-02: order filled, but no
+    // confirmation ever appeared, because message-formatting and the
+    // refresh calls used to be one undifferentiated block).
+    loadPosition(); loadTrades();
     document.getElementById('modal-form').style.display = 'none';
     const confirmEl = document.getElementById('modal-confirm');
     confirmEl.style.display = 'block';
-    document.getElementById('modal-confirm-msg').textContent = data.booked_for_next_open
-      ? `${side.toUpperCase()} ${qty} ${SYMBOL} booked — will execute at ${data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open'}`
-      : `${side.toUpperCase()} ${qty} ${SYMBOL} — order received`;
+    let msg;
+    try {
+      msg = data.booked_for_next_open
+        ? `${side.toUpperCase()} ${qty} ${SYMBOL} booked — will execute at ${data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open'}`
+        : `${side.toUpperCase()} ${qty} ${SYMBOL} — order received`;
+    } catch (e) {
+      msg = `${side.toUpperCase()} ${qty} ${SYMBOL} submitted`;
+    }
+    document.getElementById('modal-confirm-msg').textContent = msg;
     setTimeout(() => {
       closeModal();
       document.getElementById('modal-form').style.display = 'block';
       confirmEl.style.display = 'none';
     }, 2500);
-    loadPosition(); loadTrades();
   } else {
     showToast(data.detail || 'Error', 'error');
   }
