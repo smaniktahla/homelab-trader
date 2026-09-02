@@ -44,7 +44,7 @@ def _set_signal_param(conn, key, value):
 @pytest.fixture(autouse=True)
 def _reset_param_after(conn):
     yield
-    _set_signal_param(conn, "portfolio_stop_loss_pct", 0.12)
+    _set_signal_param(conn, "portfolio_stop_loss_pct", 0.05)
 
 
 @pytest.fixture

@@ -1174,5 +1174,18 @@ ALTER TABLE price_history_hourly ADD COLUMN IF NOT EXISTS source TEXT NOT NULL D
 -- trimming the whole book (including positions still in profit)
 -- uniformly.
 INSERT INTO signal_params (key, value, description) VALUES
-    ('portfolio_stop_loss_pct', 0.12, 'If the combined book''s unrealized loss exceeds this fraction of total cost basis (12%), propose selling every position currently showing an unrealized loss (not the whole book). Independent of circuit_breaker_drawdown_pct, which only pauses new buys and never sells.')
+    ('portfolio_stop_loss_pct', 0.05, 'If the combined book''s unrealized loss exceeds this fraction of total cost basis (5%), propose selling every position currently showing an unrealized loss (not the whole book). Independent of circuit_breaker_drawdown_pct, which only pauses new buys and never sells.')
 ON CONFLICT (key) DO NOTHING;
+
+-- Default revised from 0.12 to 0.05, same day. At 0.12 -- ABOVE the 8%
+-- per-symbol stop_loss_pct -- this check could almost never fire before
+-- individual stops already had: absent a gap-down past a check, the
+-- cost-basis-weighted loss across the book is bounded by its single
+-- worst-held position's own loss, which check_stop_losses already exits
+-- once it crosses stop_loss_pct. Set BELOW stop_loss_pct, it becomes a
+-- genuine backstop -- it can catch a broad, correlated decline across
+-- many positions each still individually under their own stop, which the
+-- per-symbol check structurally cannot see. Guarded to only touch
+-- installs still sitting on the original seeded value -- never overwrites
+-- a value someone has since tuned via the Settings UI.
+UPDATE signal_params SET value = 0.05 WHERE key = 'portfolio_stop_loss_pct' AND value = 0.12;

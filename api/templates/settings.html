@@ -316,7 +316,7 @@ const EDITABLE_PARAMS = {
   stop_loss_pct:        { label: 'Stop-loss (%)', scale: 100, step: 0.5, min: 1, max: 30,
     tip: 'If a position loses more than this, you\'ll get an alert to sell. Limits your worst-case loss on any single trade.' },
   portfolio_stop_loss_pct: { label: 'Portfolio stop-loss (%)', scale: 100, step: 0.5, min: 1, max: 50,
-    tip: 'If your combined book\'s unrealized loss exceeds this % of total cost basis, sell proposals are created for every position currently in loss (not the whole book). Independent of the drawdown circuit breaker, which only pauses new buys and never sells.' },
+    tip: 'Backstop below the per-position stop-loss: if your combined book\'s unrealized loss exceeds this % of total cost basis, sell proposals are created for every position currently in loss (not the whole book) -- catches many positions bleeding together before any one of them hits its own stop. Independent of the drawdown circuit breaker, which only pauses new buys and never sells.' },
   score_proposal_min:   { label: 'Min signal score', scale: 1, step: 1, min: 0, max: 100,
     tip: 'Signals below this score are ignored. Higher = fewer but more confident proposals. Lower = more signals, more noise.' },
   max_open_positions:   { label: 'Max open positions', scale: 1, step: 1, min: 1, max: 50,
