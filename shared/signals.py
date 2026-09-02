@@ -70,7 +70,7 @@ DEFAULTS = {
     "sector_max_pct": 0.30,
     "earnings_blackout_days": 3,
     "circuit_breaker_drawdown_pct": 0.15,
-    "portfolio_stop_loss_pct": 0.12,
+    "portfolio_stop_loss_pct": 0.05,
     "buy_cooldown_days": 2,
     # Risk engine (shared/risk_engine.py) -- see
     # docs/risk-engine-architecture-reconciliation.md
@@ -682,7 +682,18 @@ def check_portfolio_loss_sell(conn, positions, p, thesis_id):
     the account overall is under water; a position already past its own
     check_stop_losses() threshold is skipped here too, via the same
     _open_sell_exists() dedup every other check_* function in this module
-    uses, since that proposal already covers it."""
+    uses, since that proposal already covers it.
+
+    portfolio_stop_loss_pct is deliberately set BELOW stop_loss_pct
+    (default 5% vs. 8%), not above. Absent a gap-down past a check, the
+    cost-basis-weighted loss across the whole book is bounded by its
+    single worst-held position's own loss -- so a threshold ABOVE
+    stop_loss_pct could almost never fire before check_stop_losses()
+    already had, on every position simultaneously. Set below it, this
+    becomes a genuine backstop: it catches a broad, correlated decline
+    across many positions each still individually under their own stop
+    (e.g. five positions each down 6%, none of which trips its own 8%
+    line), which check_stop_losses() structurally cannot see."""
     if not positions:
         return
     threshold = p["portfolio_stop_loss_pct"]
