@@ -640,7 +640,11 @@
   </div>
 </div>
 
-<div id="toast" style="display:none;position:fixed;bottom:24px;right:24px;padding:12px 18px;border-radius:8px;font-size:.85rem;font-weight:600;z-index:200"></div>
+<!-- top-anchored, not bottom: a bottom-fixed element is the one that gets
+     clipped/mispositioned by a mobile browser's on-screen-keyboard-driven
+     viewport resize (the form field just above it may still be focused when
+     Submit is tapped) -- top is unaffected by that resize entirely. -->
+<div id="toast" style="display:none;position:fixed;top:16px;right:16px;padding:12px 18px;border-radius:8px;font-size:.85rem;font-weight:600;z-index:200"></div>
 
 <script>
 const fmt = (n, d=2) => n == null ? '—' : Number(n).toLocaleString('en-US', {minimumFractionDigits:d, maximumFractionDigits:d});
@@ -1207,13 +1211,20 @@ async function approveProposal(btn, id, symbol, side, qty, currentPrice) {
     return;
   }
   if (r.ok) {
-    if (data.booked_for_next_open) {
-      const when = data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open';
-      showToast(`${side.toUpperCase()} ${symbol} booked — will execute at ${when}`);
-    } else {
+    // Same ordering fix as submitTrade() below: the order already executed,
+    // so refreshing state must never be gated on the confirmation message
+    // formatting below (see that function's comment for the bug this traces to).
+    loadProposals(); loadPositions(); loadAccount(); loadTrades();
+    try {
+      if (data.booked_for_next_open) {
+        const when = data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open';
+        showToast(`${side.toUpperCase()} ${symbol} booked — will execute at ${when}`);
+      } else {
+        showToast(`${side.toUpperCase()} ${symbol} approved`);
+      }
+    } catch (e) {
       showToast(`${side.toUpperCase()} ${symbol} approved`);
     }
-    loadProposals(); loadPositions(); loadAccount(); loadTrades();
   } else {
     showToast(data.detail || 'Error', 'error');
     if (btn) { btn.disabled = false; btn.textContent = 'Approve'; }
@@ -1715,14 +1726,27 @@ async function submitTrade() {
   }
 
   if (r.ok) {
-    if (data.booked_for_next_open) {
-      const when = data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open';
-      showToast(`${side.toUpperCase()} ${qty} ${symbol} booked — will execute at ${when}`);
-    } else {
-      showToast(`${side.toUpperCase()} ${qty} ${symbol} — ${data.status}`);
-    }
+    // The order already executed at this point (the fetch above succeeded) --
+    // closing the modal and refreshing state must happen unconditionally,
+    // never gated on the confirmation message below rendering cleanly. A bug
+    // report on 2026-09-02 (order filled, but no confirmation toast ever
+    // appeared) traced to exactly this: the toast-message building and the
+    // modal-close/refresh calls were one undifferentiated block, so if
+    // anything in the message formatting below ever threw, the whole
+    // function silently died and the user was left staring at an unchanged
+    // modal with no feedback that anything had happened at all.
     closeModal();
     loadTrades(); loadPositions(); loadAccount();
+    try {
+      if (data.booked_for_next_open) {
+        const when = data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open';
+        showToast(`${side.toUpperCase()} ${qty} ${symbol} booked — will execute at ${when}`);
+      } else {
+        showToast(`${side.toUpperCase()} ${qty} ${symbol} — ${data.status}`);
+      }
+    } catch (e) {
+      showToast(`${side.toUpperCase()} ${qty} ${symbol} submitted`);
+    }
   } else {
     showToast(data.detail || 'Error', 'error');
   }
@@ -1743,13 +1767,18 @@ async function advisorApprove(symbol, side, qty) {
     return;
   }
   if (r.ok) {
-    if (data.booked_for_next_open) {
-      const when = data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open';
-      showToast(`${side.toUpperCase()} ${qty} ${symbol} booked — will execute at ${when}`);
-    } else {
-      showToast(`${side.toUpperCase()} ${qty} ${symbol} — ${data.status}`);
-    }
+    // Same ordering fix as submitTrade() above.
     loadAdvisor(); loadPositions(); loadAccount(); loadTrades();
+    try {
+      if (data.booked_for_next_open) {
+        const when = data.next_open ? new Date(data.next_open).toLocaleString() : 'the next market open';
+        showToast(`${side.toUpperCase()} ${qty} ${symbol} booked — will execute at ${when}`);
+      } else {
+        showToast(`${side.toUpperCase()} ${qty} ${symbol} — ${data.status}`);
+      }
+    } catch (e) {
+      showToast(`${side.toUpperCase()} ${qty} ${symbol} submitted`);
+    }
   } else {
     showToast(data.detail || 'Error', 'error');
   }
