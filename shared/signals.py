@@ -70,6 +70,7 @@ DEFAULTS = {
     "sector_max_pct": 0.30,
     "earnings_blackout_days": 3,
     "circuit_breaker_drawdown_pct": 0.15,
+    "portfolio_stop_loss_pct": 0.12,
     "buy_cooldown_days": 2,
     # Risk engine (shared/risk_engine.py) -- see
     # docs/risk-engine-architecture-reconciliation.md
@@ -663,6 +664,65 @@ def check_regime_deterioration_sell(conn, positions, market_overall, market_rati
         log.info(f"Regime-deterioration PROPOSAL created: sell {pos['qty']} {sym}")
 
 
+def check_portfolio_loss_sell(conn, positions, p, thesis_id):
+    """Account-wide stop-loss. Measures cumulative loss the same way
+    check_stop_losses measures a single position's -- % of cost basis
+    (avg_entry * qty), not drawdown from a trailing high-water mark like
+    circuit_breaker.py's threshold -- so a slow multi-week bleed and a fast
+    multi-day crash of the same total magnitude trigger identically, and
+    the two account-wide thresholds stay independently interpretable: this
+    one is loss on capital actually deployed; circuit_breaker_drawdown_pct
+    is retreat from a peak (and only pauses new entries -- see that
+    module's own docstring -- it never sells anything).
+
+    When the combined book crosses portfolio_stop_loss_pct, this proposes
+    exiting every position CURRENTLY showing an unrealized loss -- the
+    ones actually responsible for the drawdown -- rather than trimming the
+    whole book uniformly. A position still green is left alone even while
+    the account overall is under water; a position already past its own
+    check_stop_losses() threshold is skipped here too, via the same
+    _open_sell_exists() dedup every other check_* function in this module
+    uses, since that proposal already covers it."""
+    if not positions:
+        return
+    threshold = p["portfolio_stop_loss_pct"]
+    longs = {sym: pos for sym, pos in positions.items() if pos["qty"] > 0}
+    if not longs:
+        return
+
+    total_cost_basis = sum(pos["avg_entry"] * pos["qty"] for pos in longs.values())
+    if total_cost_basis <= 0:
+        return
+    total_unrealized_pl = sum(pos["market_value"] - pos["avg_entry"] * pos["qty"] for pos in longs.values())
+    portfolio_loss_pct = -total_unrealized_pl / total_cost_basis
+    if portfolio_loss_pct < threshold:
+        return
+
+    log.warning(
+        f"Portfolio stop-loss triggered: book down {portfolio_loss_pct*100:.1f}% of cost basis "
+        f"(threshold {threshold*100:.0f}%) -- exiting positions currently in loss"
+    )
+    for sym, pos in longs.items():
+        if pos["unrealized_plpc"] >= 0:
+            continue  # currently profitable -- not part of the loss, leave it
+        if _open_sell_exists(conn, sym):
+            log.info(f"Portfolio stop-loss proposal for {sym} already open, skipping")
+            continue
+        rationale = (
+            f"PORTFOLIO STOP-LOSS: book down {portfolio_loss_pct*100:.1f}% of cost basis "
+            f"(threshold {threshold*100:.0f}%) -- exiting {sym} "
+            f"(down {pos['unrealized_plpc']*100:.1f}% from avg entry ${pos['avg_entry']:.2f})"
+        )
+        log.warning(f"Exit [portfolio_stop_loss]: {rationale}")
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO trade_proposals (symbol, side, qty, rationale, signal_score, exit_reason, thesis_id)
+                VALUES (%s, 'sell', %s, %s, 96, 'portfolio_stop_loss', %s)
+            """, (sym, pos["qty"], rationale, thesis_id))
+        conn.commit()
+        log.info(f"Portfolio stop-loss PROPOSAL created: sell {pos['qty']} {sym}")
+
+
 # Exit taxonomy (PR 8, Hypothesis-Driven Trading Architecture epic) --
 # per docs/trade-thesis-architecture-reconciliation.md §5's PR 8 bullet:
 # normalize/extend exit_reason using the trade_thesis_id threading from
@@ -889,6 +949,11 @@ def compute_signals(conn, symbols):
     # Bear_fear regime: proactively de-risk open longs rather than wait for
     # each position's own stop-loss to trigger one at a time
     check_regime_deterioration_sell(conn, positions, market_overall, market_rationale, thesis_id)
+
+    # Account-wide cumulative loss (cost-basis based, independent of the
+    # circuit breaker's HWM-drawdown metric): exit positions currently
+    # underwater once the combined book's loss crosses portfolio_stop_loss_pct
+    check_portfolio_loss_sell(conn, positions, p, thesis_id)
 
     # Exit taxonomy (PR 8): dark unless a human has explicitly flipped
     # thesis_invalidation_exit_enabled on, separately from

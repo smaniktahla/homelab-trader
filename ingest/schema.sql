@@ -132,7 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_security_regime_history_symbol ON security_regime
 
 -- exit_reason classifies sell proposals by which rule triggered them:
 -- thesis_complete | time_stop | stop_loss | overbought | regime_deterioration |
--- thesis_invalidated | manual
+-- thesis_invalidated | portfolio_stop_loss | manual
 -- thesis_invalidated added PR 8 (Hypothesis-Driven Trading Architecture epic,
 -- shared/signals.py::check_thesis_invalidation_sell) -- structure/regime
 -- deterioration or the thesis's own invalidation_spec, distinct from the
@@ -1161,3 +1161,18 @@ ON CONFLICT (type_key) DO NOTHING;
 -- second migration later.
 ALTER TABLE price_history ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'unknown';
 ALTER TABLE price_history_hourly ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'unknown';
+
+-- Portfolio stop-loss (shared/signals.py::check_portfolio_loss_sell) --
+-- account-wide cumulative-loss stop, measured the same way
+-- check_stop_losses measures a single position (% of cost basis, i.e.
+-- loss from purchase price), NOT drawdown from a trailing high-water mark
+-- like circuit_breaker_drawdown_pct. That keeps the two account-wide
+-- thresholds independently interpretable: circuit_breaker_drawdown_pct
+-- only pauses new BUYs and never sells anything; this one proposes
+-- exiting whichever currently-held positions are actually underwater
+-- once the combined book's loss crosses the threshold, rather than
+-- trimming the whole book (including positions still in profit)
+-- uniformly.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('portfolio_stop_loss_pct', 0.12, 'If the combined book''s unrealized loss exceeds this fraction of total cost basis (12%), propose selling every position currently showing an unrealized loss (not the whole book). Independent of circuit_breaker_drawdown_pct, which only pauses new buys and never sells.')
+ON CONFLICT (key) DO NOTHING;
