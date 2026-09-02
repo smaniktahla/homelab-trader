@@ -784,6 +784,63 @@ def send_morning_digest(conn, cfg):
         log.error(f"Morning digest failed: {e}")
 
 
+def query_hot_signals(conn, min_score):
+    """Signals scoring >= min_score in the last 2 hours that are genuinely
+    actionable -- i.e. NOT blocked by any gate in signals.py's proposal
+    pipeline. A signal scores and logs in signals/signal_outcomes
+    unconditionally in compute_signals(), independent of whether it
+    actually became an actionable trade_proposals row -- signals.py's
+    gating chain can block a high-scoring signal for many reasons
+    (no_position_held, max_open_positions, sector_cap, cooldown,
+    trading_permission_denied, etc.; see shared/signals.py's
+    _block_outcome() call sites), and every one of those sets
+    signal_outcomes.block_reason to a non-NULL string -- block_reason is
+    NULL only for a signal that actually became a proposal
+    (proposal_status='proposed', signals.py:531).
+
+    Originally this only excluded block_reason='no_position_held' (the
+    2026-07-23 RTX incident fix), which meant any OTHER block reason --
+    e.g. max_open_positions -- still slipped through and produced a
+    "Review Proposals" alert email for a proposal that was never created
+    (found via a DOV alert on 2026-09-02 with 17/15 positions already
+    held). Excluding any non-NULL block_reason, not just one specific
+    value, is what the original comment's intent ("can't drift from what
+    actually blocked the proposal") already called for.
+
+    Secondary sort: volume spike ratio (today ÷ 30d avg) -- elevated
+    volume on a dip is a capitulation signal; a normally-high-volume
+    stock trading at its usual level is not."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT s.symbol, s.signal_type, s.score, s.rationale,
+                   COALESCE((
+                       SELECT ph.volume
+                       FROM price_history ph
+                       WHERE ph.symbol = s.symbol
+                       ORDER BY ph.ts DESC LIMIT 1
+                   ), 0) AS latest_volume,
+                   COALESCE((
+                       SELECT AVG(ph.volume)
+                       FROM price_history ph
+                       WHERE ph.symbol = s.symbol
+                         AND ph.ts > NOW() - INTERVAL '30 days'
+                   ), 1) AS avg_volume
+            FROM signals s
+            WHERE s.score >= %s AND s.generated_at > NOW() - INTERVAL '2 hours'
+              AND NOT EXISTS (
+                  SELECT 1 FROM signal_outcomes so
+                  WHERE so.signal_id = s.id AND so.block_reason IS NOT NULL
+              )
+            ORDER BY s.score DESC,
+                     LEAST(4.0,
+                       COALESCE((SELECT ph2.volume FROM price_history ph2 WHERE ph2.symbol = s.symbol ORDER BY ph2.ts DESC LIMIT 1), 0)::FLOAT
+                       / NULLIF((SELECT AVG(ph3.volume) FROM price_history ph3 WHERE ph3.symbol = s.symbol AND ph3.ts > NOW() - INTERVAL '30 days'), 0)
+                     ) DESC NULLS LAST
+            LIMIT 5
+        """, (min_score,))
+        return cur.fetchall()
+
+
 def check_alerts(conn, cfg):
     """Check for drastic conditions each cycle and send immediate alerts."""
     try:
@@ -841,49 +898,7 @@ def check_alerts(conn, cfg):
     # ── High-score signal alert ───────────────────────────────────────────
     if cfg["alert_high_score"]:
         min_score = cfg["alert_high_score_min"]
-        with conn.cursor() as cur:
-            # Secondary sort: volume spike ratio (today ÷ 30d avg).
-            # Elevated volume on a dip is a capitulation signal; a normally-high-volume
-            # stock trading at its usual level is not.
-            cur.execute("""
-                SELECT s.symbol, s.signal_type, s.score, s.rationale,
-                       COALESCE((
-                           SELECT ph.volume
-                           FROM price_history ph
-                           WHERE ph.symbol = s.symbol
-                           ORDER BY ph.ts DESC LIMIT 1
-                       ), 0) AS latest_volume,
-                       COALESCE((
-                           SELECT AVG(ph.volume)
-                           FROM price_history ph
-                           WHERE ph.symbol = s.symbol
-                             AND ph.ts > NOW() - INTERVAL '30 days'
-                       ), 1) AS avg_volume
-                FROM signals s
-                WHERE s.score >= %s AND s.generated_at > NOW() - INTERVAL '2 hours'
-                  -- A sell signal scores and logs unconditionally in
-                  -- compute_signals() even for symbols not held -- there's
-                  -- nothing to actually sell, so it can never become a
-                  -- proposal (signals.py blocks it with reason
-                  -- 'no_position_held', recorded in signal_outcomes right
-                  -- next to it). Alerting on those anyway is what made the
-                  -- 2026-07-23 RTX email look like a bug: "high-confidence
-                  -- signal" for something with zero path to the dashboard.
-                  -- Reuses signals.py's own gating decision rather than
-                  -- re-deriving "is this held" from Alpaca here, so this
-                  -- can't drift from what actually blocked the proposal.
-                  AND NOT EXISTS (
-                      SELECT 1 FROM signal_outcomes so
-                      WHERE so.signal_id = s.id AND so.block_reason = 'no_position_held'
-                  )
-                ORDER BY s.score DESC,
-                         LEAST(4.0,
-                           COALESCE((SELECT ph2.volume FROM price_history ph2 WHERE ph2.symbol = s.symbol ORDER BY ph2.ts DESC LIMIT 1), 0)::FLOAT
-                           / NULLIF((SELECT AVG(ph3.volume) FROM price_history ph3 WHERE ph3.symbol = s.symbol AND ph3.ts > NOW() - INTERVAL '30 days'), 0)
-                         ) DESC NULLS LAST
-                LIMIT 5
-            """, (min_score,))
-            hot_signals = cur.fetchall()
+        hot_signals = query_hot_signals(conn, min_score)
 
         if hot_signals:
             alert_key = f"highscore_{date.today().isoformat()}"
