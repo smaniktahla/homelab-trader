@@ -458,6 +458,13 @@ def _propose_score_threshold_change(conn, score_stats):
             f"(win_rate {best['win_rate']}%, avg_win {best['avg_win']}, avg_loss {best['avg_loss']}, "
             f"N={best['n']}), a {gap:.1f}pp avg-return gap over the {MIN_RETURN_GAP_PCT}pp threshold"
         ),
+        # Structured form of the same comparison, so a notification renderer
+        # (see ingest.py's postmortem email) can lay it out as a table
+        # instead of re-parsing the prose "reason" string above.
+        "worst_bucket": {"label": worst_label, **worst},
+        "best_bucket": {"label": best_label, **best},
+        "gap_pct": round(gap, 1),
+        "gap_threshold_pct": MIN_RETURN_GAP_PCT,
     }
 
 
@@ -497,13 +504,28 @@ def run_postmortem_review(conn):
     n_hypothesis_types = len(hypothesis_segments["hypothesis_status_by_type"])
     hypothesis_note = f" | Hypotheses: {len(hypothesis_rows)} trade thesis instance(s) across {n_hypothesis_types} type(s)."
 
+    # Structured counts backing lifecycle_note/adherence_note/risk_note/
+    # hypothesis_note above -- returned alongside the plain-text `finding`
+    # so a notification renderer (see ingest.py's postmortem email) can lay
+    # these out as a table/cards instead of re-parsing the " | "-joined
+    # prose string.
+    data_sources = {
+        "lifecycle_count": len(lifecycle_rows),
+        "lifecycle_segment_views": len(lifecycle_segments),
+        "adherence_count": len(adherence_rows),
+        "risk_count": len(risk_rows),
+        "hypothesis_count": len(hypothesis_rows),
+        "hypothesis_types": n_hypothesis_types,
+    }
+
     if n < MIN_BUCKET_N:
         finding = (
             f"Insufficient data: {n} resolved buy signals in the last {WINDOW_DAYS}d "
             f"(need {MIN_BUCKET_N}+ per bucket). Skipping calibration check."
         ) + lifecycle_note + adherence_note + risk_note + hypothesis_note
         _insert_review(conn, n, {**lifecycle_segments, **adherence_segments, **risk_segments, **hypothesis_segments}, finding, None)
-        return {"n_resolved": n, "finding": finding, "proposal": None}
+        return {"n_resolved": n, "finding": finding, "proposal": None,
+                "calibration_status": "insufficient_data", **data_sources}
 
     score_rows = [(_score_bucket(float(s)), float(r)) for s, _, _, r, _ in rows if s is not None]
     score_rows = [(b, r) for b, r in score_rows if b is not None]
@@ -539,7 +561,8 @@ def run_postmortem_review(conn):
         )
 
     _insert_review(conn, n, metric_summary, finding, proposal)
-    return {"n_resolved": n, "finding": finding, "proposal": proposal}
+    return {"n_resolved": n, "finding": finding, "proposal": proposal,
+            "calibration_status": "proposal" if proposal else "no_change", **data_sources}
 
 
 def _insert_review(conn, n_resolved, metric_summary, finding, proposal):
