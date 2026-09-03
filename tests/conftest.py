@@ -27,7 +27,7 @@ RESET_TABLES = [
     "position_trades", "position_lifecycles", "position_lifecycle_symbol_status",
     "rule_adherence_checks", "risk_decisions", "trade_theses",
     "candidate_batches", "candidates",
-    "structural_swings", "structural_zones",
+    "structural_swings", "structural_zones", "structural_events",
 ]
 
 

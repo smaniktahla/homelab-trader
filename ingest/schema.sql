@@ -861,6 +861,47 @@ CREATE TABLE IF NOT EXISTS structural_zones (
 CREATE INDEX IF NOT EXISTS idx_structural_zones_symbol_tf
     ON structural_zones (symbol, timeframe, active);
 
+-- Price Structure epic PR B (see shared/structural_events.py). Append-only
+-- event log for price/zone interactions (breakout/breakdown/acceptance/
+-- rejection/failed_breakout/failed_breakdown/sweep_reclaim) and swing-
+-- anchored structure-failure warnings (possible_bullish_structure_failure/
+-- possible_bearish_structure_failure). Never rewritten: a later
+-- reclassification (e.g. a confirmed breakout that fails) is always a NEW
+-- row referencing the earlier one via reference_type='event', not an
+-- UPDATE -- the log represents the sequence of facts as they became known,
+-- not today's final interpretation of old bars.
+--
+-- reference_type/reference_id is a typed nullable reference rather than a
+-- single FK, since events anchor to different tables depending on type:
+-- 'zone' -> structural_zones.id (breakout/breakdown/acceptance/rejection/
+-- failed_breakout/failed_breakdown/sweep_reclaim), 'swing' ->
+-- structural_swings.id (possible_*_structure_failure), 'event' ->
+-- structural_events.id (acceptance/failed_breakout/failed_breakdown,
+-- which reference the original breakout/breakdown event they derive from,
+-- not the zone directly).
+--
+-- calculation_version + metadata.params together let a later parameter
+-- change (bar-count thresholds) be reconstructed per-event rather than
+-- silently reinterpreted -- see EVENT_DETECTION_PARAMS in
+-- shared/structural_events.py.
+CREATE TABLE IF NOT EXISTS structural_events (
+    id                    BIGSERIAL PRIMARY KEY,
+    symbol                TEXT NOT NULL,
+    timeframe             TEXT NOT NULL,
+    event_type            TEXT NOT NULL,
+    reference_type        TEXT NOT NULL,
+    reference_id          BIGINT NOT NULL,
+    event_time            DATE NOT NULL,
+    confirmation_time     DATE NOT NULL,
+    metadata              JSONB,
+    calculation_version   INTEGER NOT NULL DEFAULT 1,
+    computed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (symbol, timeframe, event_type, reference_type, reference_id, event_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_structural_events_symbol_tf
+    ON structural_events (symbol, timeframe, confirmation_time);
+
 -- Relative-strength risk eligibility filter (see shared/relative_strength_risk.py).
 -- RISK CONTROL ONLY, never a score adjustment -- backed by backtest_results
 -- experiment_ids 009/010/011: stock-vs-sector underperformance is
@@ -1241,3 +1282,55 @@ ON CONFLICT (key) DO NOTHING;
 -- installs still sitting on the original seeded value -- never overwrites
 -- a value someone has since tuned via the Settings UI.
 UPDATE signal_params SET value = 0.05 WHERE key = 'portfolio_stop_loss_pct' AND value = 0.12;
+
+-- Volatility Forecasting & Risk-Targeted Position Sizing epic, VR-1 (see
+-- docs/volatility-sizing-vr0-reconciliation.md). One row per
+-- (symbol, as_of, horizon, estimator) -- unlike market_structure_history's
+-- one-row-per-symbol-per-day, multiple estimators/horizons can coexist for
+-- the same symbol+day (realized_vol and ewma today; garch_1_1 in VR-4,
+-- implied_vol in a later phase, all sharing this same table per the
+-- reconciliation doc's coexistence design). daily_vol is the canonical
+-- native unit; annualized_vol/horizon_vol/expected_move_dollars are always
+-- DERIVED from it by shared/volatility_forecast.py, never computed ad hoc
+-- per estimator -- see that module's docstring. Not read by any live path
+-- yet: shared/risk_engine.py does not consume this table until VR-2.
+CREATE TABLE IF NOT EXISTS volatility_forecast_history (
+    id                     BIGSERIAL PRIMARY KEY,
+    symbol                 TEXT NOT NULL,
+    timeframe              TEXT NOT NULL,
+    as_of                  DATE NOT NULL,
+    available_at           TIMESTAMPTZ NOT NULL,
+    horizon                TEXT NOT NULL,
+    estimator              TEXT NOT NULL,
+    calculation_version    INTEGER NOT NULL DEFAULT 1,
+    input_cutoff           DATE,
+    daily_vol              NUMERIC,
+    annualized_vol         NUMERIC,
+    horizon_vol            NUMERIC,
+    expected_move_dollars  NUMERIC,
+    percentile             NUMERIC,
+    regime                 TEXT,
+    observation_count      INTEGER NOT NULL DEFAULT 0,
+    status                 TEXT NOT NULL CHECK (status IN ('ok', 'insufficient_history', 'stale', 'zero_or_nonfinite_input', 'estimator_failed')),
+    fit_metadata           JSONB,
+    computed_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (symbol, as_of, horizon, estimator)
+);
+
+CREATE INDEX IF NOT EXISTS idx_volatility_forecast_history_symbol ON volatility_forecast_history (symbol);
+CREATE INDEX IF NOT EXISTS idx_volatility_forecast_history_estimator ON volatility_forecast_history (estimator);
+
+-- Volatility forecast config -- flat signal_params rows, same pattern as
+-- every other estimator/scoring module in this codebase. No
+-- "*_enabled" switch here yet: VR-1 computes and persists forecasts but
+-- nothing reads them for sizing/gating (that gate is VR-2's
+-- volatility_sizing_enabled, added when the risk-engine candidate exists
+-- to actually toggle).
+INSERT INTO signal_params (key, value, description) VALUES
+    ('volatility_realized_vol_window', 20, 'Trailing return-observation window for the realized_vol estimator (VR-1)'),
+    ('volatility_ewma_lambda', 0.94, 'RiskMetrics-style decay factor for the ewma volatility estimator (VR-1)'),
+    ('volatility_ewma_min_periods', 30, 'Minimum trailing returns before the ewma estimator seeds its recurrence (VR-1)'),
+    ('volatility_percentile_lookback', 100, 'Trailing observation count used to rank a volatility estimate into a percentile/regime bucket (VR-1)'),
+    ('volatility_sessions_per_year', 252, 'Equity trading-sessions-per-year convention used to annualize daily_vol (VR-1)'),
+    ('volatility_stale_after_days', 5, 'A forecast whose input_cutoff is more than this many days before as_of is marked status=stale rather than ok (VR-1)')
+ON CONFLICT (key) DO NOTHING;
