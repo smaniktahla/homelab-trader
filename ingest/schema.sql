@@ -809,6 +809,58 @@ INSERT INTO signal_params (key, value, description) VALUES
     ('structure_bos_bonus', 5, 'Score adjustment when a break-of-structure confirmation is active on daily or weekly structure')
 ON CONFLICT (key) DO NOTHING;
 
+-- Price Structure epic PR A (see shared/market_structure.py). Persistent
+-- swing/zone tables, replacing the capped-to-5 JSONB nesting inside
+-- market_structure_history.component_values as the queryable source of
+-- truth for individual swing points and support/resistance zones.
+-- market_structure_history itself is untouched -- it stays the daily
+-- trend/BOS/CHoCH snapshot table it already was.
+--
+-- event_time is the swing's own bar date; confirmation_time is the
+-- earliest date the swing was actually knowable (event_time + SWING_K
+-- confirming bars). Every as-of-safe consumer must filter on
+-- confirmation_time, never event_time -- see detect_swings'/
+-- classify_timeframe_structure's docstrings in market_structure.py.
+CREATE TABLE IF NOT EXISTS structural_swings (
+    id                    BIGSERIAL PRIMARY KEY,
+    symbol                TEXT NOT NULL,
+    timeframe             TEXT NOT NULL,
+    swing_type            TEXT NOT NULL,
+    event_time            DATE NOT NULL,
+    confirmation_time     DATE NOT NULL,
+    price                 NUMERIC NOT NULL,
+    calculation_version   INTEGER NOT NULL DEFAULT 1,
+    computed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (symbol, timeframe, swing_type, event_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_structural_swings_symbol_tf
+    ON structural_swings (symbol, timeframe, confirmation_time);
+
+-- Persistent support/resistance zone identity: unlike market_structure.py's
+-- _cluster_zones() (a fresh greedy re-cluster every call), a zone here is
+-- an ongoing entity -- created once, then matched and updated (touch_count,
+-- last_touched, refined center_price) on every subsequent confirmed swing
+-- that falls within its tolerance, rather than being torn down and rebuilt
+-- daily. `active` lets a zone be retired (e.g. superseded by a tighter
+-- cluster) without deleting its history.
+CREATE TABLE IF NOT EXISTS structural_zones (
+    id                    BIGSERIAL PRIMARY KEY,
+    symbol                TEXT NOT NULL,
+    timeframe             TEXT NOT NULL,
+    zone_type             TEXT NOT NULL,
+    center_price          NUMERIC NOT NULL,
+    upper                 NUMERIC NOT NULL,
+    lower                 NUMERIC NOT NULL,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    touch_count           INTEGER NOT NULL DEFAULT 1,
+    last_touched          DATE NOT NULL,
+    active                BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE INDEX IF NOT EXISTS idx_structural_zones_symbol_tf
+    ON structural_zones (symbol, timeframe, active);
+
 -- Relative-strength risk eligibility filter (see shared/relative_strength_risk.py).
 -- RISK CONTROL ONLY, never a score adjustment -- backed by backtest_results
 -- experiment_ids 009/010/011: stock-vs-sector underperformance is
