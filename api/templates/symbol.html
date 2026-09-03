@@ -143,6 +143,10 @@
             <input type="checkbox" id="bb-toggle" checked onchange="loadChart(currentChartDays,null)">
             Bollinger Bands
           </label>
+          <label style="display:flex;align-items:center;gap:5px;font-size:.78rem;color:#888;cursor:pointer">
+            <input type="checkbox" id="vp-toggle" onchange="toggleVolumeProfile()">
+            Volume Profile
+          </label>
         </div>
       </div>
       <div class="range-btns">
@@ -155,7 +159,22 @@
         <button class="range-btn" onclick="loadChart(1095,this)">3Y</button>
         <button class="range-btn" onclick="loadChart(1825,this)">5Y</button>
       </div>
-      <canvas id="price-chart" height="200"></canvas>
+      <!-- Volume Profile's own range control -- deliberately separate from
+           the price chart's range-btns above: the profile is built from
+           price_history_hourly, which only has a few weeks of real depth
+           (see shared/volume_profile.py's module docstring), so reusing
+           the price chart's much wider range options (up to 5Y) would
+           silently produce empty/near-empty profiles for most of them. -->
+      <div class="range-btns" id="vp-range-btns" style="display:none">
+        <span style="font-size:.72rem;color:#555;align-self:center;margin-right:2px">Profile:</span>
+        <button class="range-btn" onclick="loadVolumeProfile(7,this)">1W</button>
+        <button class="range-btn active" onclick="loadVolumeProfile(14,this)">2W</button>
+        <button class="range-btn" onclick="loadVolumeProfile(30,this)">1M</button>
+      </div>
+      <div style="display:flex;gap:6px">
+        <canvas id="price-chart" height="200" style="flex:1;min-width:0"></canvas>
+        <canvas id="volume-profile-chart" height="200" width="110" style="display:none;flex:0 0 110px"></canvas>
+      </div>
     </div>
 
     <!-- Signal history -->
@@ -270,6 +289,10 @@ const fmtUSD = n => n == null ? '—' : '$' + fmt(n);
 let priceChart = null;
 let currentChartDays = 14;
 let currentPositionQty = null;
+let volumeProfileChart = null;
+let currentVPDays = 14;
+let volumeProfileData = null;   // last-fetched /api/volume-profile response, or null when the toggle is off
+let lastPriceYMin = null, lastPriceYMax = null;  // set by loadChart(), reused so the profile panel + POC/VAH/VAL lines align with the price chart's own y-range
 
 function showToast(msg, type='success') {
   const t = document.getElementById('toast');
@@ -390,6 +413,7 @@ async function loadChart(days, btn) {
     const yPad = yValues.length ? (Math.max(...yValues) - Math.min(...yValues)) * 0.05 || 1 : 1;
     const yMin = yValues.length ? Math.min(...yValues) - yPad : undefined;
     const yMax = yValues.length ? Math.max(...yValues) + yPad : undefined;
+    lastPriceYMin = yMin; lastPriceYMax = yMax;
 
     const priceDataset = showCandles ? {
       type: 'candlestick', label: 'Price',
@@ -461,6 +485,26 @@ async function loadChart(days, btn) {
               pointRadius: 0, tension: 0.2, fill: '-2', backgroundColor: '#4f8ef70c',
             },
           ] : []),
+          // POC/VAH/VAL -- observational Volume Profile levels, not a
+          // trade signal, hence the same #f7c94f accent this repo already
+          // uses elsewhere for advisory/research-only annotations (not
+          // the buy/sell green/red or the BB blue). Distinct dash style
+          // from BB bands so the two overlays are never confused. Spans
+          // the visible chart width using this render's own first/last
+          // timestamps, not a fixed x-range.
+          ...(document.getElementById('vp-toggle').checked && volumeProfileData && data.length ? (() => {
+            const x0 = new Date(data[0].ts).getTime(), x1 = new Date(data[data.length - 1].ts).getTime();
+            const line = (label, y, dash) => ({
+              label, data: [{x: x0, y}, {x: x1, y}],
+              borderColor: '#f7c94f', borderWidth: label === 'POC' ? 1.5 : 1, borderDash: dash,
+              pointRadius: 0, fill: false,
+            });
+            const lines = [];
+            if (volumeProfileData.poc != null) lines.push(line('POC', volumeProfileData.poc, [6, 3]));
+            if (volumeProfileData.vah != null) lines.push(line('VAH', volumeProfileData.vah, [2, 3]));
+            if (volumeProfileData.val != null) lines.push(line('VAL', volumeProfileData.val, [2, 3]));
+            return lines;
+          })() : []),
         ]
       },
       options: {
@@ -516,6 +560,88 @@ async function loadChart(days, btn) {
       }
     });
   } catch(e) { console.error(e); }
+}
+
+function toggleVolumeProfile() {
+  const on = document.getElementById('vp-toggle').checked;
+  document.getElementById('vp-range-btns').style.display = on ? 'flex' : 'none';
+  document.getElementById('volume-profile-chart').style.display = on ? '' : 'none';
+  if (on) {
+    loadVolumeProfile(currentVPDays, document.querySelector('#vp-range-btns .range-btn.active'));
+  } else {
+    volumeProfileData = null;
+    if (volumeProfileChart) { volumeProfileChart.destroy(); volumeProfileChart = null; }
+    loadChart(currentChartDays, null);  // redraw price chart without POC/VAH/VAL lines
+  }
+}
+
+async function loadVolumeProfile(days, btn) {
+  currentVPDays = days;
+  document.querySelectorAll('#vp-range-btns .range-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  try {
+    const data = await fetch(`/api/volume-profile/${SYMBOL}?days=${days}`).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    });
+    volumeProfileData = data;
+    renderVolumeProfileChart(data);
+    loadChart(currentChartDays, null);  // refresh POC/VAH/VAL lines on the price chart
+  } catch (e) {
+    console.error(e);
+    volumeProfileData = null;
+  }
+}
+
+function renderVolumeProfileChart(data) {
+  const buckets = data.buckets || [];
+  const yMin = lastPriceYMin != null ? lastPriceYMin : (buckets.length ? buckets[0].price_low : 0);
+  const yMax = lastPriceYMax != null ? lastPriceYMax : (buckets.length ? buckets[buckets.length - 1].price_high : 1);
+
+  const barData = buckets.map(b => ({
+    x: b.volume,
+    y: (b.price_low + b.price_high) / 2,
+    _lo: b.price_low, _hi: b.price_high,
+  }));
+
+  if (volumeProfileChart) volumeProfileChart.destroy();
+  volumeProfileChart = new Chart(document.getElementById('volume-profile-chart'), {
+    type: 'bar',
+    data: {
+      datasets: [{
+        label: 'Volume Profile',
+        data: barData,
+        backgroundColor: '#4f8ef755',
+        borderColor: '#4f8ef7',
+        borderWidth: 1,
+        barThickness: buckets.length ? Math.max(2, Math.floor(200 / buckets.length)) : 6,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      interaction: { mode: 'nearest', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1a1d27', borderColor: '#2a2d3a', borderWidth: 1,
+          titleColor: '#888', bodyColor: '#e8eaf6',
+          callbacks: {
+            title: () => '',
+            label: ctx => {
+              const r = ctx.raw;
+              const fmt = v => v >= 1e6 ? (v/1e6).toFixed(2)+'M' : v >= 1e3 ? (v/1e3).toFixed(1)+'K' : v.toFixed(0);
+              return ` $${r._lo.toFixed(2)}–$${r._hi.toFixed(2)}: ${fmt(r.x)} vol`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { display: false, beginAtZero: true },
+        y: { type: 'linear', min: yMin, max: yMax, display: false },
+      },
+      animation: false,
+    },
+  });
 }
 
 async function loadSignals() {
