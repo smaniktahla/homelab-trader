@@ -23,6 +23,7 @@ import hypothesis_library
 import hypothesis_candidates
 import strategy_registry
 from backtest_engine import load_bars, run_backtest
+from volume_profile import load_volume_profile
 import dataclasses
 
 log = logging.getLogger(__name__)
@@ -209,6 +210,28 @@ def get_prices(symbol: str, days: int = 30, include_bb: bool = False,
 
         rows = rows[-days:]
         return rows
+
+
+# ── Volume Profile (PR D, Volume & Volume Profile epic). Stock-detail ──────
+# only, per the spec's own guidance -- POC/VAH/VAL + bucket histogram,
+# built on price_history_hourly (PR C's data-source decision, ~6.5-7 weeks
+# of real depth). `days` defaults to 14, not the price chart's 30-day
+# default, since the profile's usable window is much narrower than the
+# price chart's. Plain psycopg2.connect(DB_DSN), same reasoning as every
+# other shared-module-backed endpoint -- load_volume_profile() expects
+# tuple-row cursors.
+
+@app.get("/api/volume-profile/{symbol}")
+def get_volume_profile(symbol: str, days: int = 14, bucket_count: int = 30):
+    symbol = symbol.upper()
+    with psycopg2.connect(DB_DSN) as conn:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=days)
+        profile = load_volume_profile(conn, symbol, start, end, bucket_count=bucket_count)
+    if profile is None:
+        raise HTTPException(404, f"no hourly price history for {symbol} in the last {days} days")
+    return profile.to_json()
+
 
 @app.get("/api/news/{symbol}")
 def get_news(symbol: str, limit: int = 20):
