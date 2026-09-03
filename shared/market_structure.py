@@ -173,18 +173,41 @@ def detect_swings(ohlc, k=SWING_K):
     the max high in the symmetric window [i-k, i+k] (swing low symmetric on
     lows). Deterministic, no external dependency. Returns
     (swing_highs, swing_lows), each a chronological list of
-    {"date", "price"} dicts."""
+    {"date", "confirmation_time", "price"} dicts.
+
+    "date" (== event_time) is bar i's own date -- when the pivot happened.
+    "confirmation_time" is ohlc[i+k][0] -- the earliest date the pivot is
+    actually knowable, since nothing can confirm bar i as a swing until the
+    k bars after it exist. The two are never the same bar (k>=1). Callers
+    that need an as-of-safe read of these swings (anything evaluating
+    "what was known on date X") must filter on confirmation_time, never on
+    "date" -- see classify_timeframe_structure's as_of parameter."""
     n = len(ohlc)
     swing_highs, swing_lows = [], []
     for i in range(k, n - k):
         window = ohlc[i - k:i + k + 1]
         highs = [b[2] for b in window]
         lows = [b[3] for b in window]
+        confirmation_time = ohlc[i + k][0]
         if ohlc[i][2] == max(highs):
-            swing_highs.append({"date": ohlc[i][0], "price": ohlc[i][2]})
+            swing_highs.append({"date": ohlc[i][0], "confirmation_time": confirmation_time, "price": ohlc[i][2]})
         if ohlc[i][3] == min(lows):
-            swing_lows.append({"date": ohlc[i][0], "price": ohlc[i][3]})
+            swing_lows.append({"date": ohlc[i][0], "confirmation_time": confirmation_time, "price": ohlc[i][3]})
     return swing_highs, swing_lows
+
+
+def _confirmed_as_of(swings, as_of):
+    """Filter a swing_highs/swing_lows list down to only points whose
+    confirmation_time <= as_of. This is the explicit lookahead guard: bar-
+    range gating in detect_swings already makes single-call use safe, but
+    any caller handing in more trailing history than "as of this date"
+    intends (a backtest re-deriving structure over a full price series,
+    for instance) must not silently pick up swings event-dated on/before
+    as_of but not yet confirmable by then. Always filters on
+    confirmation_time, never on "date"/event_time."""
+    if as_of is None:
+        return swings
+    return [s for s in swings if s["confirmation_time"] <= as_of]
 
 
 def _cluster_zones(points, tolerance):
@@ -328,11 +351,18 @@ def _volatility_context(ohlc):
     return {"atr": round(latest, 4), "atr_percentile": pct, "regime": regime}
 
 
-def classify_timeframe_structure(ohlc, k=SWING_K):
+def classify_timeframe_structure(ohlc, k=SWING_K, as_of=None):
     """Pure function: given one timeframe's OHLC bars (oldest->newest,
     already whatever lookback the caller wants), classify swing structure,
     trend direction/strength, BOS/CHoCH, volatility, and nearest support/
-    resistance. No DB, no network -- see module docstring."""
+    resistance. No DB, no network -- see module docstring.
+
+    as_of: if given, swings whose confirmation_time > as_of are excluded
+    before trend/BOS/CHoCH/S-R are derived from them -- see detect_swings'
+    docstring and _confirmed_as_of. Defaults to None (no filtering) only
+    for callers that have already as-of-sliced `ohlc` themselves and want
+    the implicit range-bound safety detect_swings already provides;
+    compute_market_structure always passes an explicit as_of."""
     if len(ohlc) < 2 * k + 1:
         return {
             "price": None,
@@ -347,6 +377,8 @@ def classify_timeframe_structure(ohlc, k=SWING_K):
     closes = [b[4] for b in ohlc]
     price = closes[-1]
     swing_highs, swing_lows = detect_swings(ohlc, k)
+    swing_highs = _confirmed_as_of(swing_highs, as_of)
+    swing_lows = _confirmed_as_of(swing_lows, as_of)
     trend_direction = _trend_direction(swing_highs, swing_lows)
     ema20, ema50, ema200 = ema(closes, EMA_FAST), ema(closes, EMA_MID), ema(closes, EMA_SLOW)
     adx_val = adx(ohlc)
@@ -563,9 +595,17 @@ def compute_market_structure(conn, symbol, as_of_date=None):
     weekly_ohlc = resample_weekly(daily_ohlc)
     monthly_ohlc = resample_monthly(daily_ohlc)
 
-    daily = classify_timeframe_structure(daily_ohlc)
-    weekly = classify_timeframe_structure(weekly_ohlc)
-    monthly = classify_timeframe_structure(monthly_ohlc)
+    # as_of=target_date on every timeframe: a swing is only usable here if
+    # its confirmation_time (not its event date) is on or before the date
+    # this whole structure is being evaluated for. daily_ohlc is already
+    # sliced to target_date via asof_index above, so this is currently a
+    # no-op against that slice's own range-bound safety -- but it makes the
+    # guarantee explicit and correct even if a future caller (a backtest
+    # re-deriving structure over a longer, non-re-sliced series) passes
+    # more trailing history than "as of target_date" intends.
+    daily = classify_timeframe_structure(daily_ohlc, as_of=target_date)
+    weekly = classify_timeframe_structure(weekly_ohlc, as_of=target_date)
+    monthly = classify_timeframe_structure(monthly_ohlc, as_of=target_date)
 
     combined = combine_timeframe_structures(monthly, weekly, daily)
     combined["symbol"] = symbol
@@ -652,6 +692,106 @@ def snapshot_market_structure_for_symbol(conn, symbol):
     }
 
 
+def store_structural_swings(conn, symbol, timeframe, swing_highs, swing_lows, calculation_version=CALCULATION_VERSION):
+    """Upsert confirmed swing points into structural_swings. ON CONFLICT DO
+    NOTHING -- a (symbol, timeframe, swing_type, event_time) swing's price
+    is a historical bar value that doesn't change once confirmed, so a
+    re-run (e.g. classify_timeframe_structure's swing_highs[-5:] cap
+    re-covering the same points on consecutive days) is a pure no-op, not
+    an update."""
+    with conn.cursor() as cur:
+        for swing_type, points in (("high", swing_highs), ("low", swing_lows)):
+            for p in points:
+                cur.execute("""
+                    INSERT INTO structural_swings
+                        (symbol, timeframe, swing_type, event_time, confirmation_time, price, calculation_version)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (symbol, timeframe, swing_type, event_time) DO NOTHING
+                """, (symbol, timeframe, swing_type, p["date"], p["confirmation_time"], p["price"], calculation_version))
+    conn.commit()
+
+
+def _load_confirmed_swing_points(conn, symbol, timeframe, swing_type, as_of):
+    """Every persisted swing of this type confirmed on or before as_of --
+    the canonical source structural_zones is rebuilt from, not just
+    whatever a single classify_timeframe_structure() call happened to
+    return (which caps to the most recent 5)."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT event_time, price FROM structural_swings
+            WHERE symbol=%s AND timeframe=%s AND swing_type=%s AND confirmation_time<=%s
+            ORDER BY event_time ASC
+        """, (symbol, timeframe, swing_type, as_of))
+        rows = cur.fetchall()
+    return [{"date": r[0], "price": float(r[1])} for r in rows]
+
+
+def update_structural_zones(conn, symbol, timeframe, tolerance, as_of):
+    """Recompute persistent support/resistance zone identity for one
+    (symbol, timeframe) from every currently-confirmed swing in
+    structural_swings, matching each freshly-clustered zone against an
+    existing active zone within `tolerance` of its center (update
+    touch_count/last_touched/center_price in place) or creating a new one.
+    Recomputing fresh from the full persisted swing history every call
+    (rather than incrementally bumping touch_count per cron cycle) keeps
+    this idempotent regardless of how many times or how often it runs.
+    Zones are never deactivated here -- `active` exists for a future
+    retirement rule, not touched by PR A, per "preserve current behavior,
+    don't redesign the scoring model" -- every zone this creates starts
+    and stays active."""
+    for swing_type, zone_type in (("high", "resistance"), ("low", "support")):
+        points = _load_confirmed_swing_points(conn, symbol, timeframe, swing_type, as_of)
+        clusters = _cluster_zones(points, tolerance)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, center_price FROM structural_zones
+                WHERE symbol=%s AND timeframe=%s AND zone_type=%s AND active=TRUE
+            """, (symbol, timeframe, zone_type))
+            existing = cur.fetchall()
+            for cluster in clusters:
+                match_id = None
+                for zid, center in existing:
+                    if abs(float(center) - cluster["price"]) <= tolerance:
+                        match_id = zid
+                        break
+                if match_id is not None:
+                    cur.execute("""
+                        UPDATE structural_zones
+                        SET center_price=%s, upper=%s, lower=%s, touch_count=%s, last_touched=%s
+                        WHERE id=%s
+                    """, (cluster["price"], cluster["price"] + tolerance, cluster["price"] - tolerance,
+                          cluster["touch_count"], cluster["last_touched"], match_id))
+                else:
+                    cur.execute("""
+                        INSERT INTO structural_zones
+                            (symbol, timeframe, zone_type, center_price, upper, lower, touch_count, last_touched, active)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+                    """, (symbol, timeframe, zone_type, cluster["price"], cluster["price"] + tolerance,
+                          cluster["price"] - tolerance, cluster["touch_count"], cluster["last_touched"]))
+    conn.commit()
+
+
+def _persist_structural_swings_and_zones(conn, symbol, ctx, as_of):
+    """Persist confirmed swings + refresh zone identity for each of ctx's
+    three timeframes (monthly/weekly/daily). Deliberately not wrapped in
+    its own try/except -- update_market_structure's per-symbol isolation
+    already covers this, and store_market_structure_day (the load-bearing
+    daily snapshot write) has already committed by the time this runs, so
+    a failure here can't lose that."""
+    for timeframe, tf_ctx in (("daily", ctx["daily"]), ("weekly", ctx["weekly"]), ("monthly", ctx["monthly"])):
+        swing_highs, swing_lows = tf_ctx.get("swing_highs") or [], tf_ctx.get("swing_lows") or []
+        if not swing_highs and not swing_lows:
+            continue
+        store_structural_swings(conn, symbol, timeframe, swing_highs, swing_lows)
+        atr = (tf_ctx.get("volatility") or {}).get("atr")
+        price = tf_ctx.get("price")
+        tolerance = (atr or 0) * SR_ATR_MULT
+        if tolerance <= 0 and price:
+            tolerance = price * 0.005
+        if tolerance > 0:
+            update_structural_zones(conn, symbol, timeframe, tolerance, as_of)
+
+
 def update_market_structure(conn, symbols):
     """Compute + persist today's market structure for every symbol. Each
     symbol is isolated in its own try/except -- one bad symbol must never
@@ -662,6 +802,7 @@ def update_market_structure(conn, symbols):
         try:
             ctx = compute_market_structure(conn, symbol)
             store_market_structure_day(conn, today, symbol, ctx)
+            _persist_structural_swings_and_zones(conn, symbol, ctx, today)
         except Exception as e:
             log.warning(f"Market structure update failed for {symbol}: {e}")
             try:

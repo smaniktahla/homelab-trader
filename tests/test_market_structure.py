@@ -422,3 +422,200 @@ def test_update_market_structure_persists_rows_from_real_price_history(conn):
     empty_row = ms.load_latest_market_structure(conn, "NO_PRICE_DATA_AT_ALL")
     assert empty_row is not None
     assert empty_row["trend"] == "insufficient_data"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Price Structure epic PR A: confirmation_time retrofit. detect_swings now
+# emits confirmation_time alongside the existing event-date "date" key;
+# classify_timeframe_structure's as_of parameter must filter on
+# confirmation_time, never on "date"/event_time.
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_detect_swings_confirmation_time_is_k_bars_after_event_date():
+    closes = [5, 6, 7, 8, 7, 6, 5, 6, 7, 8, 9, 8, 7, 6, 5]
+    d = date(2020, 1, 1)
+    ohlc = [(d + timedelta(days=i), c, c, c, c) for i, c in enumerate(closes)]
+
+    swing_highs, swing_lows = ms.detect_swings(ohlc, k=3)
+
+    # swing high at index 3 (price 8) -> confirmed at index 6
+    assert swing_highs[0]["date"] == d + timedelta(days=3)
+    assert swing_highs[0]["confirmation_time"] == d + timedelta(days=6)
+    # swing high at index 10 (price 9) -> confirmed at index 13
+    assert swing_highs[1]["date"] == d + timedelta(days=10)
+    assert swing_highs[1]["confirmation_time"] == d + timedelta(days=13)
+    # confirmation_time is always strictly after event date (k=3 >= 1)
+    for s in swing_highs + swing_lows:
+        assert s["confirmation_time"] > s["date"]
+
+
+def test_confirmed_as_of_filters_on_confirmation_time_not_event_date():
+    swings = [
+        {"date": date(2020, 1, 1), "confirmation_time": date(2020, 1, 4), "price": 10},
+        {"date": date(2020, 1, 10), "confirmation_time": date(2020, 1, 13), "price": 12},
+    ]
+    # as_of sits between the second swing's event date and its confirmation
+    # -- a naive event_time filter would keep it, confirmation_time must not.
+    as_of = date(2020, 1, 11)
+    filtered = ms._confirmed_as_of(swings, as_of)
+    assert [s["price"] for s in filtered] == [10]
+
+    naive_event_time_filtered = [s for s in swings if s["date"] <= as_of]
+    assert [s["price"] for s in naive_event_time_filtered] == [10, 12]
+    assert filtered != naive_event_time_filtered
+
+
+def test_as_of_filtering_changes_trend_classification_vs_event_time_filtering():
+    """The concrete, end-to-end version of the above: a synthetic series
+    with two rising swing highs and two rising swing lows, where the
+    second high's event date has already passed as_of but its
+    confirmation_time has not. Filtering correctly (on confirmation_time)
+    must degrade to insufficient_data (only one confirmed high exists);
+    filtering naively on event_time would wrongly report a confident
+    higher-highs/higher-lows trend three days before that read is actually
+    knowable. This is the "would produce a different answer" proof, not
+    just a check that the new field exists."""
+    ohlc = _zigzag_ohlc(n=24, start=100.0, trend_pct_per_bar=0.01, cycle_len=8,
+                         amplitude_frac=0.05, start_date=date(2020, 1, 1))
+    swing_highs, swing_lows = ms.detect_swings(ohlc, k=3)
+    # sanity-check the fixture actually produces the 2-high/2-low, rising/
+    # rising shape this test depends on, and that the second high's
+    # confirmation genuinely lands after the chosen as_of.
+    assert [round(s["price"], 1) for s in swing_highs] == [117.3, 127.0]
+    assert [round(s["price"], 1) for s in swing_lows] == [101.8, 110.2]
+    as_of = date(2020, 1, 20)
+    assert swing_highs[1]["date"] <= as_of < swing_highs[1]["confirmation_time"]
+
+    correct = ms.classify_timeframe_structure(ohlc, k=3, as_of=as_of)
+    assert correct["trend_direction"] == "insufficient_data"
+
+    naive_highs = [s for s in swing_highs if s["date"] <= as_of]
+    naive_lows = [s for s in swing_lows if s["date"] <= as_of]
+    naive_trend = ms._trend_direction(naive_highs, naive_lows)
+    assert naive_trend == "higher_highs_higher_lows"
+    assert naive_trend != correct["trend_direction"]
+
+
+def test_classify_timeframe_structure_as_of_none_matches_prior_behavior():
+    """as_of=None (the default) must reproduce exactly what this function
+    already returned before PR A -- no as_of filtering applied, same as a
+    caller who has already as-of-sliced their own ohlc input."""
+    ohlc = _zigzag_ohlc(n=24, start=100.0, trend_pct_per_bar=0.01, cycle_len=8,
+                         amplitude_frac=0.05, start_date=date(2020, 1, 1))
+    result = ms.classify_timeframe_structure(ohlc, k=3)
+    assert result["trend_direction"] == "higher_highs_higher_lows"
+    assert len(result["swing_highs"]) == 2
+    assert len(result["swing_lows"]) == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Price Structure epic PR A: structural_swings / structural_zones
+# persistence -- persistent zone identity + idempotent re-runs.
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_store_structural_swings_persists_and_is_idempotent(conn):
+    swing_highs = [
+        {"date": date(2024, 1, 4), "confirmation_time": date(2024, 1, 7), "price": 105.0},
+    ]
+    swing_lows = [
+        {"date": date(2024, 1, 2), "confirmation_time": date(2024, 1, 5), "price": 95.0},
+    ]
+    ms.store_structural_swings(conn, "XYZ", "daily", swing_highs, swing_lows)
+    ms.store_structural_swings(conn, "XYZ", "daily", swing_highs, swing_lows)  # re-run, must not duplicate
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT swing_type, event_time, confirmation_time, price FROM structural_swings "
+                     "WHERE symbol='XYZ' AND timeframe='daily' ORDER BY swing_type")
+        rows = cur.fetchall()
+    assert len(rows) == 2
+    by_type = {r[0]: r for r in rows}
+    assert by_type["high"][1] == date(2024, 1, 4)
+    assert by_type["high"][2] == date(2024, 1, 7)
+    assert float(by_type["high"][3]) == 105.0
+    assert by_type["low"][1] == date(2024, 1, 2)
+
+
+def test_update_structural_zones_creates_zone_and_accumulates_touch_count(conn):
+    # two lows close enough together (within tolerance=1.0) to cluster into
+    # one persistent support zone with touch_count=2
+    ms.store_structural_swings(
+        conn, "XYZ", "daily",
+        swing_highs=[],
+        swing_lows=[
+            {"date": date(2024, 1, 2), "confirmation_time": date(2024, 1, 5), "price": 100.0},
+            {"date": date(2024, 2, 2), "confirmation_time": date(2024, 2, 5), "price": 100.4},
+        ],
+    )
+    ms.update_structural_zones(conn, "XYZ", "daily", tolerance=1.0, as_of=date(2024, 2, 5))
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT zone_type, touch_count, last_touched, active FROM structural_zones "
+                     "WHERE symbol='XYZ' AND timeframe='daily'")
+        rows = cur.fetchall()
+    assert len(rows) == 1
+    zone_type, touch_count, last_touched, active = rows[0]
+    assert zone_type == "support"
+    assert touch_count == 2
+    assert last_touched == date(2024, 2, 2)
+    assert active is True
+
+
+def test_update_structural_zones_respects_as_of_and_is_idempotent(conn):
+    """A swing confirmed after as_of must not count toward the zone yet;
+    re-running update_structural_zones for the same as_of must not
+    double-count touches (recomputed fresh from persisted swings each
+    call, not incrementally bumped)."""
+    ms.store_structural_swings(
+        conn, "XYZ", "daily",
+        swing_highs=[],
+        swing_lows=[
+            {"date": date(2024, 1, 2), "confirmation_time": date(2024, 1, 5), "price": 100.0},
+            {"date": date(2024, 2, 2), "confirmation_time": date(2024, 2, 5), "price": 100.4},
+        ],
+    )
+    early_as_of = date(2024, 1, 10)
+    ms.update_structural_zones(conn, "XYZ", "daily", tolerance=1.0, as_of=early_as_of)
+    with conn.cursor() as cur:
+        cur.execute("SELECT touch_count FROM structural_zones WHERE symbol='XYZ' AND timeframe='daily'")
+        rows = cur.fetchall()
+    assert len(rows) == 1 and rows[0][0] == 1  # only the first swing is confirmed by early_as_of
+
+    # re-run for the same as_of: must not double-count
+    ms.update_structural_zones(conn, "XYZ", "daily", tolerance=1.0, as_of=early_as_of)
+    with conn.cursor() as cur:
+        cur.execute("SELECT touch_count FROM structural_zones WHERE symbol='XYZ' AND timeframe='daily'")
+        rows = cur.fetchall()
+    assert len(rows) == 1 and rows[0][0] == 1
+
+    # advance as_of past the second swing's confirmation: touch_count grows
+    ms.update_structural_zones(conn, "XYZ", "daily", tolerance=1.0, as_of=date(2024, 2, 5))
+    with conn.cursor() as cur:
+        cur.execute("SELECT touch_count FROM structural_zones WHERE symbol='XYZ' AND timeframe='daily'")
+        rows = cur.fetchall()
+    assert len(rows) == 1 and rows[0][0] == 2
+
+
+def test_update_market_structure_persists_structural_swings_and_zones(conn):
+    """End-to-end: update_market_structure (the real ingest.py entry point)
+    must also populate structural_swings/structural_zones, not just
+    market_structure_history."""
+    ohlc = _zigzag_ohlc(n=300, start=50.0, trend_pct_per_bar=0.001, cycle_len=20,
+                         start_date=date(2024, 1, 1))
+    with conn.cursor() as cur:
+        for d, o, h, l, c in ohlc:
+            cur.execute("""
+                INSERT INTO price_history (symbol, ts, open, high, low, close, volume)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (symbol, ts) DO NOTHING
+            """, ("ZIGZAG", d, o, h, l, c, 1000))
+    conn.commit()
+
+    ms.update_market_structure(conn, ["ZIGZAG"])
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM structural_swings WHERE symbol='ZIGZAG'")
+        swing_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM structural_zones WHERE symbol='ZIGZAG'")
+        zone_count = cur.fetchone()[0]
+    assert swing_count > 0
+    assert zone_count > 0
