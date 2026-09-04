@@ -168,6 +168,16 @@ def _percentile_rank(value, series):
     return round(100.0 * below / len(series), 1)
 
 
+# Public aliases -- shared/volatility_forecast.py (VR-1, see
+# docs/volatility-sizing-vr0-reconciliation.md §7) reuses these two
+# primitives rather than reimplementing ATR-series/percentile math a
+# second time. Exported under non-underscore names for that external use;
+# the module-internal call sites above keep using the underscore names
+# unchanged.
+atr_series = _atr_series
+percentile_rank = _percentile_rank
+
+
 def detect_swings(ohlc, k=SWING_K):
     """Fractal swing-point detection: bar i is a swing high if its high is
     the max high in the symmetric window [i-k, i+k] (swing low symmetric on

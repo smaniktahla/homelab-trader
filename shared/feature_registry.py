@@ -317,7 +317,27 @@ PROVIDERS = {
         version_field="calculation_version",
         description="Append-only structural event log: breakout/breakdown/acceptance/rejection/sweep/structure-failure (Price Structure epic PR B).",
     ),
+    "volatility": ProviderSpec(
+        provider_id="volatility",
+        source_table="volatility_forecast_history",
+        version_field="calculation_version",
+        description=(
+            "Volatility forecasts (realized_vol/ewma today, garch_1_1/implied_vol "
+            "later) keyed by symbol+as_of+horizon+estimator (shared/volatility_forecast.py, "
+            "VR-1 of the Volatility Forecasting & Risk-Targeted Position Sizing epic)."
+        ),
+    ),
 }
+
+# No FEATURES leaves registered for the "volatility" provider yet -- unlike
+# the technical/market_regime providers above, this provider has multiple
+# rows per symbol+day (one per estimator+horizon), so a single
+# "volatility.annualized_vol"-style leaf would be ambiguous about which
+# estimator/horizon it means. Wiring volatility into trade_thesis condition
+# trees (if ever needed) is out of scope for VR-1 and deferred to whatever
+# PR actually needs it -- this registry entry only makes the provider/table
+# legal to reference, per this module's own docstring ("describes what
+# exists; does not enforce anything").
 
 FEATURES = {
     "technical.close": FeatureSpec(

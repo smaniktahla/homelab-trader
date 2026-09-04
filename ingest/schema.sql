@@ -1367,3 +1367,4 @@ INSERT INTO signal_params (key, value, description) VALUES
     ('volatility_sessions_per_year', 252, 'Equity trading-sessions-per-year convention used to annualize daily_vol (VR-1)'),
     ('volatility_stale_after_days', 5, 'A forecast whose input_cutoff is more than this many days before as_of is marked status=stale rather than ok (VR-1)')
 ON CONFLICT (key) DO NOTHING;
+
