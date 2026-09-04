@@ -22,6 +22,7 @@ from fundamentals import compute_fundamental_score
 from hierarchy_regime import snapshot_hierarchy_for_symbol
 from regime_scoring import load_regime_scoring_params, compute_regime_adjustment
 from market_structure import snapshot_market_structure_for_symbol
+from volatility_forecast import load_latest_volatility_forecast, SIZING_ESTIMATOR, SIZING_HORIZON
 from structure_scoring import load_structure_scoring_params, compute_structure_adjustment
 from relative_strength_risk import load_relative_strength_risk_params, evaluate_relative_strength_risk
 from sector_mapping import get_sector_etf
@@ -77,6 +78,14 @@ DEFAULTS = {
     "risk_per_trade_pct": 0.01,
     "max_portfolio_open_risk_pct": 0.06,
     "loss_streak_limit": 4,
+    # Volatility-sizing overlay (shared/risk_engine.py's volatility_budget
+    # candidate) -- VR-2, see docs/volatility-sizing-vr0-reconciliation.md.
+    # Off by default; see risk_engine.py::VOLATILITY_SIZING_DEFAULTS for
+    # what each key does.
+    "volatility_sizing_enabled": 0,
+    "volatility_reference_vol": 0.25,
+    "volatility_vol_floor": 0.05,
+    "volatility_max_multiplier": 1.0,
 }
 
 # Relative strength vs SPY and ATR-normalized move: score modifiers layered
@@ -1253,10 +1262,21 @@ def compute_signals(conn, symbols):
                 # this is the proposal-time record for audit/comparison.
                 if side == "buy":
                     try:
+                        # VR-2: only bother loading a forecast when the
+                        # overlay is actually enabled -- p.get(...) rather
+                        # than p[...] since older signal_params rows/tests
+                        # may not have this key at all, in which case the
+                        # overlay is inert regardless (see risk_engine.py).
+                        volatility_forecast = None
+                        if p.get("volatility_sizing_enabled"):
+                            volatility_forecast = load_latest_volatility_forecast(
+                                conn, sym, SIZING_ESTIMATOR, SIZING_HORIZON
+                            )
                         decision = evaluate_proposal(
                             sym, price, qty, planned_initial_stop_price,
                             cash, portfolio_value, positions, sector_map,
                             open_risk_dollars, p, drawdown_multiplier=drawdown_mult,
+                            volatility_forecast=volatility_forecast,
                         )
                         _record_risk_decision(conn, "proposal_generated", proposal_id, sym, side,
                                                qty, decision, market_overall)

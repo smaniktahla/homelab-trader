@@ -200,6 +200,117 @@ def test_decimal_inputs_do_not_crash():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# VR-2: volatility_budget candidate (see
+# docs/volatility-sizing-vr0-reconciliation.md §6.1/§6.5). P (above) has no
+# volatility_* keys at all -- p.get(...) returns None/falsy for every one
+# of them, which is exactly the "disabled" case these tests lean on.
+# ─────────────────────────────────────────────────────────────────────────
+
+def _enabled_p(**overrides):
+    p = dict(P)
+    p.update({
+        "volatility_sizing_enabled": 1,
+        "volatility_reference_vol": 0.25,
+        "volatility_vol_floor": 0.05,
+        "volatility_max_multiplier": 1.0,
+    })
+    p.update(overrides)
+    return p
+
+
+def test_disabled_volatility_overlay_is_bit_for_bit_identical_to_pre_vr2():
+    """The VR-2 acceptance criterion: with the feature flag off (P has no
+    volatility_sizing_enabled key at all), passing a volatility_forecast --
+    even a fully valid, would-otherwise-bind one -- must not change
+    anything. constraint_detail gets no 'volatility_budget' key whatsoever,
+    not even an inert one; the disabled path never even looks at
+    volatility_forecast."""
+    forecast = {"status": "ok", "annualized_vol": 0.60, "estimator": "realized_vol"}
+    without_forecast = re_mod.evaluate_proposal(**_base_kwargs(requested_qty=10_000))
+    with_forecast = re_mod.evaluate_proposal(
+        **_base_kwargs(requested_qty=10_000), volatility_forecast=forecast
+    )
+    assert without_forecast == with_forecast
+    assert "volatility_budget" not in with_forecast["constraint_detail"]
+
+
+def test_enabled_but_no_forecast_falls_back_to_pre_vr2_sizing():
+    """Enabled, but the caller has no forecast to offer (volatility_forecast
+    left at its default None) -- approved_quantity/outcome/binding_constraint
+    must exactly match the disabled case; constraint_detail differs only by
+    one added, inert 'volatility_budget' key (per the reconciliation doc's
+    own acceptance-criterion wording: 'apart from the added inert fields')."""
+    baseline = re_mod.evaluate_proposal(**_base_kwargs(requested_qty=10_000))
+    d = re_mod.evaluate_proposal(**_base_kwargs(requested_qty=10_000, p=_enabled_p()))
+    assert d["approved_quantity"] == baseline["approved_quantity"]
+    assert d["outcome"] == baseline["outcome"]
+    assert d["binding_constraint"] == baseline["binding_constraint"]
+    assert d["constraint_detail"]["volatility_budget"] == {
+        "skipped": "no_valid_forecast", "forecast_status": None,
+    }
+    del d["constraint_detail"]["volatility_budget"]
+    assert d["constraint_detail"] == baseline["constraint_detail"]
+
+
+def test_enabled_with_stale_forecast_falls_back():
+    """Same fallback behavior for a forecast that exists but isn't status
+    'ok' -- a stale/insufficient-history/failed forecast must never be
+    treated as if it were a valid reading."""
+    forecast = {"status": "stale", "annualized_vol": 0.40, "estimator": "realized_vol"}
+    d = re_mod.evaluate_proposal(
+        **_base_kwargs(requested_qty=10_000, p=_enabled_p()), volatility_forecast=forecast
+    )
+    assert d["constraint_detail"]["volatility_budget"] == {
+        "skipped": "no_valid_forecast", "forecast_status": "stale",
+    }
+    assert d["binding_constraint"] != "volatility_budget"
+
+
+def test_volatility_budget_reduces_size_when_forecast_above_reference():
+    """forecast_vol=0.50 vs reference_vol=0.25 -> multiplier=0.5.
+    base_notional = requested_qty(10) * price(100) = 1000 -> volatility_qty
+    = floor(1000 * 0.5 / 100) = 5, tighter than every other constraint
+    (risk_budget alone would allow 125)."""
+    forecast = {"status": "ok", "annualized_vol": 0.50, "estimator": "realized_vol"}
+    d = re_mod.evaluate_proposal(
+        **_base_kwargs(requested_qty=10, p=_enabled_p()), volatility_forecast=forecast
+    )
+    assert d["binding_constraint"] == "volatility_budget"
+    assert d["approved_quantity"] == 5
+    assert d["constraint_detail"]["volatility_budget"]["multiplier"] == pytest.approx(0.5)
+    assert d["constraint_detail"]["volatility_budget"]["estimator"] == "realized_vol"
+
+
+def test_volatility_multiplier_capped_at_max_multiplier_never_increases_size():
+    """forecast_vol=0.05 (== the floor) vs reference_vol=0.25 would imply a
+    5x multiplier -- capped at volatility_max_multiplier=1.0, so
+    volatility_budget never binds tighter than 'requested' and never scales
+    a position up. This is the roadmap's own non-negotiable: reductions
+    only, no leverage increase."""
+    forecast = {"status": "ok", "annualized_vol": 0.05, "estimator": "realized_vol"}
+    d = re_mod.evaluate_proposal(
+        **_base_kwargs(requested_qty=10, p=_enabled_p()), volatility_forecast=forecast
+    )
+    assert d["constraint_detail"]["volatility_budget"]["multiplier"] == pytest.approx(1.0)
+    assert d["outcome"] == "approved"
+    assert d["approved_quantity"] == 10
+
+
+def test_volatility_floor_prevents_extreme_multiplier_from_near_zero_forecast():
+    """A near-zero forecast_vol (0.001) would imply an enormous multiplier
+    (0.25/0.001 = 250x) without a floor -- vol_floor=0.05 caps the
+    denominator, giving 0.25/0.05 = 5.0 (still further capped by
+    max_multiplier, set generously high here to isolate the floor's own
+    effect from the multiplier cap)."""
+    forecast = {"status": "ok", "annualized_vol": 0.001, "estimator": "realized_vol"}
+    d = re_mod.evaluate_proposal(
+        **_base_kwargs(requested_qty=10, p=_enabled_p(volatility_max_multiplier=10.0)),
+        volatility_forecast=forecast,
+    )
+    assert d["constraint_detail"]["volatility_budget"]["multiplier"] == pytest.approx(5.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # load_open_risk_dollars -- real DB
 # ─────────────────────────────────────────────────────────────────────────
 
