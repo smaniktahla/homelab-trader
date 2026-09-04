@@ -11,7 +11,10 @@ Two separate vocabularies, both scoped by provider:
   what table/version field does it point at" (§1b). One entry per
   provider table trade_theses.evidence_context can cite:
   symbol_features, market_structure_history, market_regime_history,
-  sector_regime_history, security_regime_history.
+  sector_regime_history, security_regime_history, structural_swings
+  (behind the "structural_zones" provider id -- see its ProviderSpec),
+  structural_events (Price Structure epic PR C, added alongside PR A/B's
+  structural_swings/structural_zones/structural_events tables).
 - FEATURES answers "which 'feature' identifier is legal inside an
   entry_conditions/invalidation_spec/success_spec leaf" (deferred by PR 1
   per its own §6/§7 -- grammar shape only, no vocabulary). Namespaced
@@ -33,6 +36,20 @@ can never see a bar/row dated after `as_of`. eval_fn wraps existing pure
 math (shared/signals.py's compute_rsi/compute_bollinger) rather than
 reimplementing indicator calculation a second time.
 
+One deliberate exception to "just query the table with a date filter":
+the structural_zones provider's features never read shared/
+market_structure.py's structural_zones table directly, because that
+table is mutable current-state (each cron cycle recomputes a zone's
+center/bounds from ALL swings confirmed by today, not by any particular
+historical as_of). Reading it for an arbitrary past as_of would leak
+later zone refinement backward -- exactly the lookahead risk PR A fixed
+for individual swings. Those eval_fns instead recompute zone clustering
+fresh from structural_swings (which does carry a real confirmation_time
+per row) filtered to as_of, reusing market_structure.py's own
+_cluster_zones/_atr_series primitives. structural_events' features don't
+have this problem -- that table is genuinely append-only with its own
+confirmation_time, so a direct filtered read is as-of-safe as-is.
+
 Nothing in this module is called from any live path yet -- registering and
 evaluating a feature is possible and tested, but no signal-generation or
 proposal code calls evaluate_feature() in this PR. That wiring, plus the
@@ -48,8 +65,9 @@ from datetime import date as date_cls
 from datetime import datetime
 from typing import Callable, Optional
 
-from regime_common import asof_index, load_daily_series
+from regime_common import asof_index, load_daily_series, load_daily_ohlc
 from signals import compute_bollinger, compute_rsi
+from market_structure import _cluster_zones, _atr_series, SR_ATR_MULT
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +148,127 @@ def _eval_market_regime_overall(conn, symbol, as_of):
     return row[0] if row else None
 
 
+def _eval_market_structure_trend_state(conn, symbol, as_of):
+    """market_structure_history is already a proper daily snapshot table
+    (one row per symbol per trading_date, never mutated after the day it
+    was written) -- a direct trading_date <= as_of read is as-of-safe on
+    its own, unlike structural_zones below."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT trend FROM market_structure_history
+            WHERE symbol=%s AND trading_date <= %s
+            ORDER BY trading_date DESC LIMIT 1
+            """,
+            (symbol, _as_date(as_of)),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _load_confirmed_swings_asof(conn, symbol, timeframe, swing_type, as_of):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT event_time, price FROM structural_swings
+            WHERE symbol=%s AND timeframe=%s AND swing_type=%s AND confirmation_time <= %s
+            ORDER BY event_time ASC
+            """,
+            (symbol, timeframe, swing_type, _as_date(as_of)),
+        )
+        rows = cur.fetchall()
+    return [{"date": r[0], "price": float(r[1])} for r in rows]
+
+
+def _nearest_zone_distance_atr(conn, symbol, as_of, direction):
+    """Distance (in ATR units) from as-of price to the nearest support
+    ("below") or resistance ("above") zone, recomputed fresh from
+    structural_swings confirmed as of as_of -- deliberately NOT a read of
+    the structural_zones table, which only holds today's final, mutable
+    zone state (see PR C's design note: a zone's center/bounds get
+    refined by touches confirmed after as_of, so reading that table
+    directly for a historical as_of would leak future refinement
+    backward, the same lookahead risk PR A fixed for swings themselves).
+    timeframe is fixed to "daily" -- the only timeframe with enough real
+    depth for this to be meaningful today; weekly/monthly can be added
+    once there's history to back them."""
+    dates, closes = load_daily_series(conn, symbol)
+    idx = asof_index(dates, _as_date(as_of))
+    if idx is None:
+        return None
+    price = closes[idx]
+
+    try:
+        daily_ohlc = load_daily_ohlc(conn, symbol)
+    except Exception:
+        daily_ohlc = []
+    ohlc_dates = [b[0] for b in daily_ohlc]
+    ohlc_idx = asof_index(ohlc_dates, _as_date(as_of))
+    ohlc_asof = daily_ohlc[: ohlc_idx + 1] if ohlc_idx is not None else []
+    atr_series = _atr_series(ohlc_asof)
+    atr = atr_series[-1] if atr_series else None
+    tolerance = (atr or 0) * SR_ATR_MULT
+    if tolerance <= 0:
+        tolerance = price * 0.005
+
+    swing_type = "low" if direction == "below" else "high"
+    points = _load_confirmed_swings_asof(conn, symbol, "daily", swing_type, as_of)
+    zones = _cluster_zones(points, tolerance)
+    candidates = [z for z in zones if (z["price"] < price if direction == "below" else z["price"] > price)]
+    if not candidates or not atr:
+        return None
+    nearest = max(candidates, key=lambda z: z["price"]) if direction == "below" else min(candidates, key=lambda z: z["price"])
+    return abs(price - nearest["price"]) / atr
+
+
+def _eval_nearest_support_distance_atr(conn, symbol, as_of):
+    return _nearest_zone_distance_atr(conn, symbol, as_of, "below")
+
+
+def _eval_nearest_resistance_distance_atr(conn, symbol, as_of):
+    return _nearest_zone_distance_atr(conn, symbol, as_of, "above")
+
+
+def _eval_recent_event_type(conn, symbol, as_of):
+    """structural_events carries its own confirmation_time -- a direct
+    filtered read is as-of-safe as-is, unlike zones above."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT event_type FROM structural_events
+            WHERE symbol=%s AND timeframe='daily' AND confirmation_time <= %s
+            ORDER BY confirmation_time DESC, id DESC LIMIT 1
+            """,
+            (symbol, _as_date(as_of)),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _eval_bars_since_last_breakout(conn, symbol, as_of):
+    dates, _closes = load_daily_series(conn, symbol)
+    idx = asof_index(dates, _as_date(as_of))
+    if idx is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT confirmation_time FROM structural_events
+            WHERE symbol=%s AND timeframe='daily' AND event_type IN ('breakout', 'breakdown')
+              AND confirmation_time <= %s
+            ORDER BY confirmation_time DESC LIMIT 1
+            """,
+            (symbol, _as_date(as_of)),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    event_idx = asof_index(dates, row[0])
+    if event_idx is None:
+        return None
+    return idx - event_idx
+
+
 PROVIDERS = {
     "technical": ProviderSpec(
         provider_id="technical",
@@ -161,6 +300,23 @@ PROVIDERS = {
         version_field="calculation_version",
         description="Stock-level trend/relative-strength regime (shared/security_regime.py).",
     ),
+    "structural_zones": ProviderSpec(
+        provider_id="structural_zones",
+        source_table="structural_swings",
+        version_field=None,
+        # source_table intentionally points at structural_swings, not
+        # structural_zones -- every eval_fn under this provider recomputes
+        # zone clustering fresh from confirmed swings as of the query
+        # date rather than reading structural_zones' mutable current-state
+        # rows (see _nearest_zone_distance_atr's docstring).
+        description="Support/resistance zone proximity, recomputed as-of-safe from confirmed swings (Price Structure epic PR A/C).",
+    ),
+    "structural_events": ProviderSpec(
+        provider_id="structural_events",
+        source_table="structural_events",
+        version_field="calculation_version",
+        description="Append-only structural event log: breakout/breakdown/acceptance/rejection/sweep/structure-failure (Price Structure epic PR B).",
+    ),
 }
 
 FEATURES = {
@@ -191,6 +347,43 @@ FEATURES = {
         output_type="text",
         description="market_regime_history.overall as-of the given date (last trading_date <= as_of).",
         eval_fn=_eval_market_regime_overall,
+    ),
+    "market_structure.trend_state": FeatureSpec(
+        feature_id="market_structure.trend_state",
+        provider_id="market_structure",
+        output_type="text",
+        description="market_structure_history.trend as-of the given date (last trading_date <= as_of).",
+        eval_fn=_eval_market_structure_trend_state,
+    ),
+    "structural_zones.nearest_support_distance_atr": FeatureSpec(
+        feature_id="structural_zones.nearest_support_distance_atr",
+        provider_id="structural_zones",
+        output_type="numeric",
+        description="Distance from as-of close to the nearest support zone below it, in ATR units. "
+                     "Recomputed from confirmed daily swings as of the given date, not the live zone table.",
+        eval_fn=_eval_nearest_support_distance_atr,
+    ),
+    "structural_zones.nearest_resistance_distance_atr": FeatureSpec(
+        feature_id="structural_zones.nearest_resistance_distance_atr",
+        provider_id="structural_zones",
+        output_type="numeric",
+        description="Distance from as-of close to the nearest resistance zone above it, in ATR units. "
+                     "Recomputed from confirmed daily swings as of the given date, not the live zone table.",
+        eval_fn=_eval_nearest_resistance_distance_atr,
+    ),
+    "structural_events.recent_event_type": FeatureSpec(
+        feature_id="structural_events.recent_event_type",
+        provider_id="structural_events",
+        output_type="text",
+        description="event_type of the most recently confirmed daily structural event as-of the given date.",
+        eval_fn=_eval_recent_event_type,
+    ),
+    "structural_events.bars_since_last_breakout": FeatureSpec(
+        feature_id="structural_events.bars_since_last_breakout",
+        provider_id="structural_events",
+        output_type="numeric",
+        description="Trading days elapsed since the last confirmed daily breakout or breakdown event, as-of the given date.",
+        eval_fn=_eval_bars_since_last_breakout,
     ),
 }
 

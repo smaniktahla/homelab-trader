@@ -13,6 +13,7 @@ from feature_registry import (
     is_legal_provider,
 )
 from signals import compute_bollinger, compute_rsi
+from market_structure import _cluster_zones, _atr_series, SR_ATR_MULT
 
 SYMBOL = "AAPL"
 START = date(2026, 1, 1)
@@ -195,3 +196,147 @@ def test_evaluate_feature_fails_open_on_eval_fn_exception(conn, monkeypatch):
     broken_spec = dataclasses.replace(FEATURES["technical.close"], eval_fn=_boom)
     monkeypatch.setitem(FEATURES, "technical.close", broken_spec)
     assert evaluate_feature(conn, "technical.close", SYMBOL, date(2026, 1, 1)) is None
+
+
+# --- Price Structure epic PR C: market_structure.trend_state -----------------
+
+def _insert_market_structure_history(conn, symbol, rows):
+    """rows: list of (trading_date, trend)."""
+    with conn.cursor() as cur:
+        for trading_date, trend in rows:
+            cur.execute(
+                """
+                INSERT INTO market_structure_history (trading_date, symbol, trend)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (trading_date, symbol) DO UPDATE SET trend = EXCLUDED.trend
+                """,
+                (trading_date, symbol, trend),
+            )
+    conn.commit()
+
+
+def test_eval_market_structure_trend_state_uses_last_date_leq_as_of(conn):
+    _insert_market_structure_history(conn, SYMBOL, [
+        (date(2026, 1, 1), "higher_highs_higher_lows"),
+        (date(2026, 1, 10), "mixed"),
+    ])
+    assert evaluate_feature(conn, "market_structure.trend_state", SYMBOL, date(2026, 1, 5)) == "higher_highs_higher_lows"
+    assert evaluate_feature(conn, "market_structure.trend_state", SYMBOL, date(2026, 1, 10)) == "mixed"
+
+
+def test_eval_market_structure_trend_state_none_before_any_history(conn):
+    _insert_market_structure_history(conn, SYMBOL, [(date(2026, 1, 10), "mixed")])
+    assert evaluate_feature(conn, "market_structure.trend_state", SYMBOL, date(2026, 1, 1)) is None
+
+
+# --- Price Structure epic PR C: structural_zones.nearest_*_distance_atr ------
+
+def _insert_daily_swing(conn, symbol, timeframe, swing_type, event_time, confirmation_time, price):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO structural_swings
+                (symbol, timeframe, swing_type, event_time, confirmation_time, price)
+            VALUES (%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (symbol, timeframe, swing_type, event_time) DO NOTHING
+            """,
+            (symbol, timeframe, swing_type, event_time, confirmation_time, price),
+        )
+    conn.commit()
+
+
+# Steady, mildly noisy 20-day close series centered around 105, long enough
+# for _atr_series (needs ATR_PERIOD+1 = 15 bars) to produce a real value.
+_STRUCTURE_CLOSES = [105, 106, 104, 105, 106, 104, 105, 106, 104, 105,
+                      106, 104, 105, 106, 104, 105, 106, 104, 105, 106]
+
+
+def test_eval_nearest_support_distance_atr_matches_direct_cluster_computation(conn):
+    _insert_price_history(conn, SYMBOL, _STRUCTURE_CLOSES, start=date(2026, 1, 1))
+    as_of = date(2026, 1, 1) + timedelta(days=19)  # last close, index 19 = 106
+
+    # two confirmed lows near 100 (support, below current price 106)
+    _insert_daily_swing(conn, SYMBOL, "daily", "low", date(2026, 1, 3), date(2026, 1, 6), 100.0)
+    _insert_daily_swing(conn, SYMBOL, "daily", "low", date(2026, 1, 10), date(2026, 1, 13), 100.2)
+
+    result = evaluate_feature(conn, "structural_zones.nearest_support_distance_atr", SYMBOL, as_of)
+    assert result is not None
+
+    ohlc = [(date(2026, 1, 1) + timedelta(days=i), c, c, c, c) for i, c in enumerate(_STRUCTURE_CLOSES)]
+    atr = _atr_series(ohlc)[-1]
+    tolerance = atr * SR_ATR_MULT
+    zones = _cluster_zones([{"date": date(2026, 1, 3), "price": 100.0}, {"date": date(2026, 1, 10), "price": 100.2}], tolerance)
+    expected = abs(106 - zones[0]["price"]) / atr
+    assert result == pytest.approx(expected)
+
+
+def test_eval_nearest_support_distance_atr_excludes_swing_not_yet_confirmed(conn):
+    """The core lookahead proof for this feature: a swing whose
+    confirmation_time is AFTER as_of must never move the result, even
+    though its event_time (and its dramatic proximity to price) would
+    make it very tempting to include if confirmation_time were ignored."""
+    _insert_price_history(conn, SYMBOL, _STRUCTURE_CLOSES, start=date(2026, 1, 1))
+    as_of = date(2026, 1, 1) + timedelta(days=19)
+
+    _insert_daily_swing(conn, SYMBOL, "daily", "low", date(2026, 1, 3), date(2026, 1, 6), 100.0)
+    baseline = evaluate_feature(conn, "structural_zones.nearest_support_distance_atr", SYMBOL, as_of)
+
+    # a much closer low, but not confirmed until AFTER as_of -- must not
+    # change the result at all.
+    _insert_daily_swing(conn, SYMBOL, "daily", "low", date(2026, 1, 18), date(2026, 1, 25), 105.9)
+    result = evaluate_feature(conn, "structural_zones.nearest_support_distance_atr", SYMBOL, as_of)
+
+    assert result == pytest.approx(baseline)
+
+
+def test_eval_nearest_resistance_distance_atr_none_when_no_resistance_swings(conn):
+    _insert_price_history(conn, SYMBOL, _STRUCTURE_CLOSES, start=date(2026, 1, 1))
+    as_of = date(2026, 1, 1) + timedelta(days=19)
+    assert evaluate_feature(conn, "structural_zones.nearest_resistance_distance_atr", SYMBOL, as_of) is None
+
+
+# --- Price Structure epic PR C: structural_events.* --------------------------
+
+def _insert_structural_event(conn, symbol, event_type, event_time, confirmation_time, reference_id=1):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO structural_events
+                (symbol, timeframe, event_type, reference_type, reference_id, event_time, confirmation_time, metadata)
+            VALUES (%s,'daily',%s,'zone',%s,%s,%s,'{}')
+            ON CONFLICT (symbol, timeframe, event_type, reference_type, reference_id, event_time) DO NOTHING
+            """,
+            (symbol, event_type, reference_id, event_time, confirmation_time),
+        )
+    conn.commit()
+
+
+def test_eval_recent_event_type_uses_last_confirmation_time_leq_as_of(conn):
+    _insert_structural_event(conn, SYMBOL, "breakout", date(2026, 1, 1), date(2026, 1, 2), reference_id=1)
+    _insert_structural_event(conn, SYMBOL, "acceptance", date(2026, 1, 5), date(2026, 1, 5), reference_id=1)
+    _insert_structural_event(conn, SYMBOL, "failed_breakout", date(2026, 1, 20), date(2026, 1, 20), reference_id=1)
+
+    assert evaluate_feature(conn, "structural_events.recent_event_type", SYMBOL, date(2026, 1, 10)) == "acceptance"
+
+
+def test_eval_bars_since_last_breakout_counts_trading_days(conn):
+    _insert_price_history(conn, SYMBOL, _STRUCTURE_CLOSES, start=date(2026, 1, 1))
+    _insert_structural_event(conn, SYMBOL, "breakout", date(2026, 1, 3), date(2026, 1, 6), reference_id=1)
+    as_of = date(2026, 1, 1) + timedelta(days=19)  # index 19
+
+    result = evaluate_feature(conn, "structural_events.bars_since_last_breakout", SYMBOL, as_of)
+    # confirmation_time 2026-01-06 is index 5 in price_history (Jan 1 = index 0); as_of is index 19.
+    assert result == 14
+
+
+def test_eval_bars_since_last_breakout_none_when_no_breakout_yet(conn):
+    _insert_price_history(conn, SYMBOL, _STRUCTURE_CLOSES, start=date(2026, 1, 1))
+    as_of = date(2026, 1, 1) + timedelta(days=19)
+    assert evaluate_feature(conn, "structural_events.bars_since_last_breakout", SYMBOL, as_of) is None
+
+
+def test_structural_providers_and_features_are_legal():
+    assert is_legal_provider("structural_zones") is True
+    assert is_legal_provider("structural_events") is True
+    assert is_legal_feature("structural_zones.nearest_support_distance_atr") is True
+    assert is_legal_feature("structural_events.recent_event_type") is True
