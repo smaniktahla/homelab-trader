@@ -902,6 +902,39 @@ CREATE TABLE IF NOT EXISTS structural_events (
 CREATE INDEX IF NOT EXISTS idx_structural_events_symbol_tf
     ON structural_events (symbol, timeframe, confirmation_time);
 
+-- Price Structure epic PR B2 (see shared/fair_value_gaps.py). Fair Value
+-- Gap identity, IMMUTABLE once created -- same "identity table separate
+-- from its append-only event log" split PR A/B established for swings/
+-- zones/events. A gap's zone bounds and creation date never change after
+-- insertion; every later fill-status milestone (partially_entered/
+-- midpoint_reached/fully_filled/invalidated/expired) is instead logged as
+-- a new structural_events row (reference_type='fvg', reference_id ->
+-- this table's id), reusing PR B's append-only infrastructure rather than
+-- a second parallel mutable-status system.
+--
+-- A 3-candle pattern (A, B, C oldest to newest): bullish when
+-- high(A) < low(C) (strict -- an exact touch is not a gap), zone =
+-- [high(A), low(C)]; bearish when low(A) > high(C), zone =
+-- [high(C), low(A)]. confirmation_time = event_time = candle C's own
+-- date -- unlike a swing, an FVG needs no bars beyond its own 3rd candle
+-- to be confirmed, so there is no separate confirmation delay here.
+CREATE TABLE IF NOT EXISTS fair_value_gaps (
+    id                    BIGSERIAL PRIMARY KEY,
+    symbol                TEXT NOT NULL,
+    timeframe             TEXT NOT NULL,
+    gap_type              TEXT NOT NULL,
+    zone_upper            NUMERIC NOT NULL,
+    zone_lower            NUMERIC NOT NULL,
+    event_time            DATE NOT NULL,
+    confirmation_time     DATE NOT NULL,
+    calculation_version   INTEGER NOT NULL DEFAULT 1,
+    computed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (symbol, timeframe, gap_type, event_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fair_value_gaps_symbol_tf
+    ON fair_value_gaps (symbol, timeframe, confirmation_time);
+
 -- Relative-strength risk eligibility filter (see shared/relative_strength_risk.py).
 -- RISK CONTROL ONLY, never a score adjustment -- backed by backtest_results
 -- experiment_ids 009/010/011: stock-vs-sector underperformance is
