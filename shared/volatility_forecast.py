@@ -418,6 +418,17 @@ def load_latest_volatility_forecast(conn, symbol, estimator, horizon):
         return None
 
 
+def volatility_size_multiplier(forecast_annualized_vol, reference_vol, vol_floor, max_multiplier):
+    """The exact inverse-volatility scaling formula VR-2 (shared/risk_engine.py's
+    volatility_budget candidate) and VR-3a (shared/sizing_policy_comparison.py's
+    backtest qty_fn) both use -- pulled out into one place so live sizing and
+    backtest sizing can never drift apart, same "one shared function" precedent
+    as shared/signals.py::calc_buy_qty()/classify_overall() being reused
+    identically by both the live pipeline and backtest_portfolio_montecarlo.py.
+    See docs/volatility-sizing-vr0-reconciliation.md §6.5."""
+    return min(max_multiplier, reference_vol / max(forecast_annualized_vol, vol_floor))
+
+
 def update_volatility_forecasts(conn, symbols, estimators=("realized_vol", "ewma"), horizon="1d", as_of_date=None):
     """Batch compute+store, one call per (symbol, estimator) -- same shape
     as market_structure.update_market_structure. Not called from
