@@ -188,7 +188,23 @@ def run_backtest(bars, strategy, *, execution_timing="next_bar_open", qty=1.0):
     i -- the strategy never sees bar i+1 or later. A returned "buy"/"sell"
     becomes a Signal (always recorded); it becomes a Fill only if
     `actionable` (buy while flat, sell while long) -- see module docstring
-    for execution_timing semantics. Returns a BacktestResult."""
+    for execution_timing semantics. Returns a BacktestResult.
+
+    qty: a fixed scalar (the original, still-default behavior -- every
+    fill uses this same quantity), OR a callable
+    `qty_fn(bars_so_far, signal) -> float` for per-signal sizing (VR-3a,
+    see docs/volatility-sizing-vr0-reconciliation.md §4.1 -- needed to
+    compare *size-weighted* outcomes across sizing policies, which a
+    single fixed qty for the whole run cannot express). qty_fn is called
+    only on BUY signals, with the same `bars[: i + 1]` slice the strategy
+    itself just saw -- it can never see bar i+1 or later, preserving this
+    engine's structural no-lookahead guarantee. The resolved quantity is
+    captured once, at entry, and reused for that position's matching exit
+    fill (a position's exit quantity is whatever was bought, not
+    re-sized at sell time) -- exactly how a real closed trade works, and
+    the only way entry/exit qty can stay consistent for one Trade's P&L.
+    This is a single-symbol, no-ledger engine still: qty_fn sizes one
+    position at a time, it does not see or reason about a portfolio."""
     if execution_timing not in EXECUTION_TIMINGS:
         raise ValueError(f"execution_timing must be one of {sorted(EXECUTION_TIMINGS)}, got {execution_timing!r}")
     if not bars:
@@ -199,22 +215,24 @@ def run_backtest(bars, strategy, *, execution_timing="next_bar_open", qty=1.0):
     fills = []
     trades = []
     open_trade = None          # dict of in-progress trade fields, or None if flat
-    pending_fill = None        # (Signal, target_index) scheduled for next_bar_open
+    pending_fill = None        # (Signal, target_index, qty) scheduled for next_bar_open
 
-    def _apply_fill(signal, bar, price):
+    def _apply_fill(signal, bar, price, fill_qty):
         nonlocal open_trade
-        fill = Fill(signal_ts=signal.bar_ts, execution_ts=bar.ts, side=signal.side, price=price, qty=qty)
+        fill = Fill(signal_ts=signal.bar_ts, execution_ts=bar.ts, side=signal.side, price=price, qty=fill_qty)
         fills.append(fill)
         if signal.side == "buy":
             open_trade = {
                 "entry_signal_ts": signal.bar_ts, "entry_execution_ts": bar.ts, "entry_price": fill.price,
+                "qty": fill_qty,
             }
         else:  # "sell"
-            gross_pnl = (fill.price - open_trade["entry_price"]) * qty
+            exit_qty = open_trade["qty"]
+            gross_pnl = (fill.price - open_trade["entry_price"]) * exit_qty
             trades.append(Trade(
                 symbol=symbol, status="closed",
                 entry_signal_ts=open_trade["entry_signal_ts"], entry_execution_ts=open_trade["entry_execution_ts"],
-                entry_price=open_trade["entry_price"], qty=qty,
+                entry_price=open_trade["entry_price"], qty=exit_qty,
                 exit_signal_ts=signal.bar_ts, exit_execution_ts=bar.ts, exit_price=fill.price,
                 gross_pnl=gross_pnl, net_pnl=gross_pnl,
             ))
@@ -222,8 +240,8 @@ def run_backtest(bars, strategy, *, execution_timing="next_bar_open", qty=1.0):
 
     for i, bar in enumerate(bars):
         if pending_fill is not None and pending_fill[1] == i:
-            pending_signal, _ = pending_fill
-            _apply_fill(pending_signal, bar, bar.open)
+            pending_signal, _, pending_qty = pending_fill
+            _apply_fill(pending_signal, bar, bar.open, pending_qty)
             pending_fill = None
 
         decision = strategy(bars[: i + 1])
@@ -235,18 +253,22 @@ def run_backtest(bars, strategy, *, execution_timing="next_bar_open", qty=1.0):
             signals.append(signal)
 
             if actionable:
+                if decision == "buy":
+                    fill_qty = qty(bars[: i + 1], signal) if callable(qty) else qty
+                else:  # "sell" always closes whatever the open position was sized at
+                    fill_qty = open_trade["qty"]
                 if execution_timing == "same_bar_close":
-                    _apply_fill(signal, bar, bar.close)
+                    _apply_fill(signal, bar, bar.close, fill_qty)
                 else:  # next_bar_open
                     if i + 1 < len(bars):
-                        pending_fill = (signal, i + 1)
+                        pending_fill = (signal, i + 1, fill_qty)
                     # else: no next bar -- signal recorded, never filled.
 
     if open_trade is not None:
         trades.append(Trade(
             symbol=symbol, status="open",
             entry_signal_ts=open_trade["entry_signal_ts"], entry_execution_ts=open_trade["entry_execution_ts"],
-            entry_price=open_trade["entry_price"], qty=qty,
+            entry_price=open_trade["entry_price"], qty=open_trade["qty"],
             exit_signal_ts=None, exit_execution_ts=None, exit_price=None,
             gross_pnl=0.0, net_pnl=0.0,
         ))

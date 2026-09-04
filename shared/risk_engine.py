@@ -49,6 +49,8 @@ import math
 
 import psycopg2.extensions
 
+from volatility_forecast import volatility_size_multiplier
+
 # Policy defaults -- mirrors shared/signals.py's DEFAULTS precedent (also
 # overridden at runtime by signal_params, same load_params() call site).
 RISK_ENGINE_DEFAULTS = {
@@ -243,7 +245,7 @@ def evaluate_proposal(symbol, price, requested_qty, planned_initial_stop_price,
         if forecast_status == "ok" and forecast_vol is not None and reference_vol is not None:
             vol_floor = float(p.get("volatility_vol_floor", 0.0))
             max_multiplier = float(p.get("volatility_max_multiplier", 1.0))
-            multiplier = min(max_multiplier, reference_vol / max(forecast_vol, vol_floor))
+            multiplier = volatility_size_multiplier(forecast_vol, reference_vol, vol_floor, max_multiplier)
             base_notional = requested_qty * price
             volatility_qty = math.floor((base_notional * multiplier) / price)
             detail["volatility_budget"] = {
