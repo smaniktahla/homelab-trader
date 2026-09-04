@@ -94,25 +94,33 @@ def test_no_sell_proposal_when_book_loss_under_threshold(conn, alpaca_base):
 
 def test_sell_proposals_created_for_losing_positions_only(conn, alpaca_base):
     _mean_reversion_thesis_id(conn)
-    _set_signal_param(conn, "portfolio_stop_loss_pct", 0.12)
-    # Combined book: AAPL down 20% ($200 cost basis), MSFT up 10% ($200
-    # cost basis) -- net book loss is ($200*0.20 - $200*0.10) / $400 = 5%,
-    # under threshold, so bump AAPL's loss further to push the combined
-    # book past 12%. AAPL cost basis $1000, down 20% = -$200. MSFT cost
-    # basis $1000, up 5% = +$50. Net: -$150 / $2000 = 7.5% -- still under.
-    # Make AAPL down 30% instead: -$300. Net: (-$300+$50)/$2000 = 12.5%.
+    # portfolio_stop_loss_pct must stay BELOW stop_loss_pct (default 8%,
+    # see check_stop_losses) for this check to ever fire on its own -- per
+    # check_portfolio_loss_sell's docstring, a threshold ABOVE stop_loss_pct
+    # can (almost) never trigger before check_stop_losses already has, on
+    # whichever position is driving the loss, which claims the
+    # _open_sell_exists() dedup slot first and starves this check's own
+    # insert. Use 0.05, matching the real signal_params default.
+    _set_signal_param(conn, "portfolio_stop_loss_pct", 0.05)
+    # AAPL is down 7.9% -- under its own 8% stop_loss_pct, so
+    # check_stop_losses leaves it alone -- but at a $10,000 cost basis it
+    # dominates the book. MSFT is up 5% on a much smaller $200 cost basis,
+    # so it can't dilute AAPL's loss enough to pull the combined book back
+    # under the 5% portfolio threshold.
+    # AAPL: cost basis $10,000, loss = $790. MSFT: cost basis $200, gain = $10.
+    # Net: -$780 / $10,200 = ~7.65%, over the 5% portfolio threshold.
     positions = [
-        _position("AAPL", 10, 100.0, 70.0),   # down 30%, cost basis $1000
-        _position("MSFT", 5, 200.0, 210.0),   # up 5%, cost basis $1000
+        _position("AAPL", 100, 100.0, 92.10),  # down 7.9%, cost basis $10,000
+        _position("MSFT", 1, 200.0, 210.0),    # up 5%, cost basis $200
     ]
 
-    _run_with_positions(conn, alpaca_base, cash=8000, portfolio_value=8000 + 700 + 1050, positions=positions)
+    _run_with_positions(conn, alpaca_base, cash=1000, portfolio_value=1000 + 9210 + 210, positions=positions)
 
     rows = [r for r in _sell_proposals(conn) if r[1] == "portfolio_stop_loss"]
     assert len(rows) == 1
     symbol, exit_reason, qty = rows[0]
     assert symbol == "AAPL"  # the losing position, not the profitable MSFT
-    assert float(qty) == 10.0
+    assert float(qty) == 100.0
 
 
 def test_no_duplicate_when_sell_already_open(conn, alpaca_base):
