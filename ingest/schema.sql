@@ -1368,3 +1368,16 @@ INSERT INTO signal_params (key, value, description) VALUES
     ('volatility_stale_after_days', 5, 'A forecast whose input_cutoff is more than this many days before as_of is marked status=stale rather than ok (VR-1)')
 ON CONFLICT (key) DO NOTHING;
 
+-- VR-2 (see docs/volatility-sizing-vr0-reconciliation.md §6.1/§6.5):
+-- shared/risk_engine.py::evaluate_proposal()'s volatility_budget candidate.
+-- Master switch defaults OFF -- existing sizing/approved_quantity behavior
+-- is byte-for-byte unchanged until a human flips volatility_sizing_enabled
+-- to 1 via PATCH /api/signal-params/volatility_sizing_enabled, same
+-- dark-by-default convention as structure_scoring_enabled/
+-- regime_scoring_enabled above.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('volatility_sizing_enabled', 0, 'Master switch for the risk engine''s volatility_budget sizing candidate (0=off, matches pre-VR-2 behavior)'),
+    ('volatility_reference_vol', 0.25, 'Annualized volatility a proposal''s base (pre-volatility) notional is treated as implicitly sized for; forecasts above this shrink the volatility_budget candidate, below it multiplier is capped at volatility_max_multiplier'),
+    ('volatility_vol_floor', 0.05, 'Numerical safeguard: forecast_vol is floored at this annualized level before dividing, to prevent a near-zero forecast from producing an extreme multiplier'),
+    ('volatility_max_multiplier', 1.0, 'Upper bound on the volatility multiplier -- 1.0 means reductions only, never scales a position above its base notional')
+ON CONFLICT (key) DO NOTHING;
