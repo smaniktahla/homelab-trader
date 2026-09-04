@@ -29,6 +29,20 @@ load_open_risk_dollars() is the one DB-touching function in this module
 already uses) -- live callers use it; the backtest computes its own
 equivalent from its simulated ledger instead, since it has no
 position_lifecycles table to query.
+
+VR-2 (see docs/volatility-sizing-vr0-reconciliation.md §6.1/§6.5, Volatility
+Forecasting & Risk-Targeted Position Sizing epic) adds one more optional
+candidate to the min()-of-constraints combination below: volatility_budget,
+an inverse-volatility exposure scaling against a fixed reference volatility
+(NOT a second dollar-risk budget, and NOT portfolio-volatility targeting --
+see the reconciliation doc for why those are deliberately different from
+what this does). It is gated by p["volatility_sizing_enabled"] (dark by
+default, same "*_enabled" convention as structure_scoring_enabled/
+regime_scoring_enabled elsewhere in this codebase) and only ever active
+when the caller supplies a volatility_forecast with status=="ok" -- any
+other case (disabled, no forecast, invalid forecast) leaves this function's
+behavior identical to before VR-2 existed, see
+tests/test_risk_engine.py::test_disabled_volatility_overlay_is_bit_for_bit_identical_to_pre_vr2.
 """
 
 import math
@@ -40,6 +54,16 @@ import psycopg2.extensions
 RISK_ENGINE_DEFAULTS = {
     "risk_per_trade_pct": 0.01,           # 1% of portfolio at risk per new position
     "max_portfolio_open_risk_pct": 0.06,  # 6% of portfolio at risk across all open positions combined
+}
+
+# VR-2 volatility-sizing defaults -- see module docstring. Off by default
+# (volatility_sizing_enabled=0); the reference/floor/multiplier values only
+# matter once a human explicitly flips it on.
+VOLATILITY_SIZING_DEFAULTS = {
+    "volatility_sizing_enabled": 0,
+    "volatility_reference_vol": 0.25,   # annualized -- the vol level base_notional was implicitly sized for
+    "volatility_vol_floor": 0.05,       # annualized -- numerical safeguard against dividing by a near-zero forecast
+    "volatility_max_multiplier": 1.0,   # paper-eligible default: reductions only, never scales exposure up
 }
 
 
@@ -75,7 +99,7 @@ def _reject(detail, reason):
 
 def evaluate_proposal(symbol, price, requested_qty, planned_initial_stop_price,
                        cash, portfolio_value, positions, sector_map, open_risk_dollars, p,
-                       drawdown_multiplier=1.0):
+                       drawdown_multiplier=1.0, volatility_forecast=None):
     """
     Evaluate one BUY sizing request and return a risk decision dict:
       {
@@ -103,6 +127,17 @@ def evaluate_proposal(symbol, price, requested_qty, planned_initial_stop_price,
     exposure caps unrelated to recent performance; only the risk-taking
     knob (how much NEW risk to add per trade) shrinks under stress.
     Defaults to 1.0 (no tapering) so existing callers/tests are unaffected.
+
+    volatility_forecast: VR-2, optional. A dict shaped like
+    shared/volatility_forecast.py::load_latest_volatility_forecast()'s
+    return value (status, annualized_vol, estimator, ...), or None. Only
+    consulted when p["volatility_sizing_enabled"] is truthy; ignored
+    entirely otherwise (default None, so existing callers are unaffected).
+    A forecast whose status isn't "ok", or a missing/None annualized_vol,
+    is treated identically to "no forecast at all" -- per
+    docs/volatility-sizing-vr0-reconciliation.md §6.4, a missing/invalid
+    forecast falls back to pre-VR-2 sizing behavior, it never rejects a
+    proposal or substitutes a different estimate on its own.
     """
     detail = {}
 
@@ -187,6 +222,45 @@ def evaluate_proposal(symbol, price, requested_qty, planned_initial_stop_price,
     else:
         detail["sector_exposure"] = {"skipped": "no_sector_mapped"}
 
+    # ── Volatility-scaled exposure budget (VR-2, optional, dark-by-default) ──
+    # Inverse-volatility scaling of the strategy's own pre-volatility
+    # notional (requested_qty * price) against a fixed reference
+    # volatility -- deliberately NOT combined into risk_budget's
+    # stop-distance formula above; the two stay separate, separately
+    # labeled candidates so VR-3a/VR-3b can measure whether they compound
+    # (see docs/volatility-sizing-vr0-reconciliation.md §6.5). Completely
+    # inert -- no key added to detail or candidates at all -- unless
+    # p["volatility_sizing_enabled"] is truthy AND a valid forecast is
+    # supplied, which is what makes the disabled/fallback case bit-for-bit
+    # identical to pre-VR-2 behavior.
+    volatility_qty = None
+    if p.get("volatility_sizing_enabled"):
+        forecast_status = volatility_forecast.get("status") if volatility_forecast else None
+        forecast_vol = None
+        if volatility_forecast is not None and volatility_forecast.get("annualized_vol") is not None:
+            forecast_vol = float(volatility_forecast["annualized_vol"])
+        reference_vol = p.get("volatility_reference_vol")
+        if forecast_status == "ok" and forecast_vol is not None and reference_vol is not None:
+            vol_floor = float(p.get("volatility_vol_floor", 0.0))
+            max_multiplier = float(p.get("volatility_max_multiplier", 1.0))
+            multiplier = min(max_multiplier, reference_vol / max(forecast_vol, vol_floor))
+            base_notional = requested_qty * price
+            volatility_qty = math.floor((base_notional * multiplier) / price)
+            detail["volatility_budget"] = {
+                "estimator": volatility_forecast.get("estimator"),
+                "forecast_annualized_vol": forecast_vol,
+                "reference_vol": reference_vol,
+                "vol_floor": vol_floor,
+                "max_multiplier": max_multiplier,
+                "multiplier": multiplier,
+                "qty": volatility_qty,
+            }
+        else:
+            detail["volatility_budget"] = {
+                "skipped": "no_valid_forecast",
+                "forecast_status": forecast_status,
+            }
+
     # ── Combine: approved qty is the tightest of every applicable constraint ──
     candidates = {"requested": requested_qty, "buying_power": max_affordable, "position_allocation": alloc_qty}
     if risk_qty is not None:
@@ -195,6 +269,8 @@ def evaluate_proposal(symbol, price, requested_qty, planned_initial_stop_price,
         candidates["portfolio_open_risk"] = open_risk_qty
     if sector_qty is not None:
         candidates["sector_exposure"] = sector_qty
+    if volatility_qty is not None:
+        candidates["volatility_budget"] = volatility_qty
 
     binding_name = min(candidates, key=candidates.get)
     approved_quantity = max(0, int(candidates[binding_name]))
