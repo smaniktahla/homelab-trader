@@ -1091,16 +1091,24 @@ def _build_proposal_price_map(cur, proposals, alpaca_positions, pending_orders):
 def _load_latest_risk_decisions(cur, proposal_ids):
     """Latest context='proposal_generated' risk_decisions row per proposal
     -- a read-only signal for proposal_ranking.py, never recomputed or
-    overridden here."""
+    overridden here. approved_quantity included (not just outcome/
+    binding_constraint) so the dashboard can show what the risk engine
+    would actually approve alongside the proposal's raw requested qty --
+    previously selected but silently dropped, which is how a proposal
+    could show e.g. "17 shares" and still get rejected outright the
+    moment a human clicked Approve, with no warning beforehand."""
     if not proposal_ids:
         return {}
     cur.execute("""
-        SELECT DISTINCT ON (proposal_id) proposal_id, outcome, binding_constraint
+        SELECT DISTINCT ON (proposal_id) proposal_id, outcome, binding_constraint, approved_quantity
         FROM risk_decisions
         WHERE proposal_id = ANY(%s) AND context = 'proposal_generated'
         ORDER BY proposal_id, id DESC
     """, (proposal_ids,))
-    return {r["proposal_id"]: {"outcome": r["outcome"], "binding_constraint": r["binding_constraint"]}
+    return {r["proposal_id"]: {
+                "outcome": r["outcome"], "binding_constraint": r["binding_constraint"],
+                "approved_quantity": r["approved_quantity"],
+            }
             for r in cur.fetchall()}
 
 
@@ -2346,6 +2354,57 @@ def save_profile(body: ProfileCreate):
 # ── Portfolio Advisor ─────────────────────────────────────────────────────────
 
 @app.get("/api/advisor")
+def _build_advisor_candidates(top_buys, held_symbols, per_trade_notional, stop_loss_pct,
+                               cash, portfolio_value, positions_by_symbol, sector_map,
+                               open_risk_dollars, params, drawdown_mult):
+    """Size each advisor candidate through shared/risk_engine.py's
+    evaluate_proposal() -- the same authoritative function the live trade
+    path uses -- rather than a bare notional/price calc with zero
+    portfolio-risk awareness. Extracted out of get_advisor() as a pure
+    function (no DB/Alpaca access) so it's directly testable: get_advisor()
+    itself hits a `user_profile` table this repo's schema.sql/migrations
+    never define, which makes the endpoint itself untestable against the
+    disposable test Postgres -- this function has no such dependency.
+
+    suggested_shares becomes what the risk engine would actually approve
+    right now (0 if rejected outright), with risk_outcome/
+    risk_binding_constraint exposed so the UI can show why. Candidates have
+    no persisted planned_initial_stop_price yet (these aren't
+    trade_proposals rows) -- estimated here via the same stop_loss_pct
+    convention shared/signals.py itself uses, purely so risk_per_share is
+    non-None and the stop-distance/portfolio-open-risk constraints
+    actually get evaluated instead of silently skipping (see
+    risk_engine.py: both skip entirely with no stop price). Advisory/
+    preview only -- the binding evaluation still happens at trade-
+    submission time via _clamp_to_risk_engine()."""
+    candidates = []
+    for r in top_buys:
+        price = float(r["price"]) if r.get("price") else 0
+        requested_qty = int(per_trade_notional / price) if price > 0 else 0
+        risk_decision = None
+        if price > 0 and requested_qty > 0:
+            planned_stop_price = price * (1 - stop_loss_pct)
+            risk_decision = risk_engine.evaluate_proposal(
+                r["symbol"], price, requested_qty, planned_stop_price,
+                cash, portfolio_value, positions_by_symbol, sector_map,
+                open_risk_dollars, params, drawdown_multiplier=drawdown_mult,
+            )
+        suggested_shares = risk_decision["approved_quantity"] if risk_decision else None
+        suggested_notional = round(suggested_shares * price, 2) if suggested_shares else None
+        candidates.append({
+            "symbol": r["symbol"],
+            "rsi": round(float(r["rsi"]), 1),
+            "buy_score": int(r["buy_score"]),
+            "price": round(price, 2),
+            "is_held": r["symbol"] in held_symbols,
+            "suggested_shares": suggested_shares,
+            "suggested_notional": suggested_notional,
+            "risk_outcome": risk_decision["outcome"] if risk_decision else None,
+            "risk_binding_constraint": risk_decision["binding_constraint"] if risk_decision else None,
+        })
+    return candidates
+
+
 def get_advisor():
     # --- gather inputs ---
     with db() as conn, conn.cursor() as cur:
@@ -2498,22 +2557,28 @@ def get_advisor():
         "cautious": "Capital available but conditions are mixed — proceed selectively",
     }
 
-    # structured candidates for linked display
+    # Structured candidates for linked display -- sized through the risk
+    # engine, not a bare notional/price calc; see
+    # _build_advisor_candidates()'s docstring for why (bug fix: a
+    # candidate could previously be advertised as buyable and then get
+    # rejected outright the instant the user acted on it via /api/trade).
     per_trade_notional = investable_cash * params.get("trade_allocation_pct", 0.05)
-    candidates = []
-    for r in top_buys[:6]:
-        price = float(r["price"]) if r.get("price") else 0
-        suggested_shares = int(per_trade_notional / price) if price > 0 else None
-        suggested_notional = round(suggested_shares * price, 2) if suggested_shares else None
-        candidates.append({
-            "symbol": r["symbol"],
-            "rsi": round(float(r["rsi"]), 1),
-            "buy_score": int(r["buy_score"]),
-            "price": round(price, 2),
-            "is_held": r["symbol"] in held_symbols,
-            "suggested_shares": suggested_shares,
-            "suggested_notional": suggested_notional,
-        })
+    positions_by_symbol = {p["symbol"]: {"market_value": float(p["market_value"])} for p in raw_positions}
+    candidate_symbols = {r["symbol"] for r in top_buys[:6]}
+    with db() as conn:
+        sector_map = load_sector_map(conn, candidate_symbols | held_symbols)
+        open_risk_dollars = risk_engine.load_open_risk_dollars(conn)
+        hwm = circuit_breaker.current_high_water_mark(conn)
+    drawdown_pct = circuit_breaker.drawdown_pct_of(portfolio_value, hwm) if portfolio_value else 0.0
+    drawdown_mult = circuit_breaker.drawdown_size_multiplier(
+        drawdown_pct, params.get("circuit_breaker_drawdown_pct", 0.15)
+    )
+
+    candidates = _build_advisor_candidates(
+        top_buys[:6], held_symbols, per_trade_notional, stop_loss_pct,
+        cash, portfolio_value, positions_by_symbol, sector_map,
+        open_risk_dollars, params, drawdown_mult,
+    )
 
     return {
         "stance": stance,
