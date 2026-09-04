@@ -147,6 +147,10 @@
             <input type="checkbox" id="vp-toggle" onchange="toggleVolumeProfile()">
             Volume Profile
           </label>
+          <label style="display:flex;align-items:center;gap:5px;font-size:.78rem;color:#888;cursor:pointer">
+            <input type="checkbox" id="structure-toggle" onchange="toggleStructureOverlay()">
+            Structure
+          </label>
         </div>
       </div>
       <div class="range-btns">
@@ -293,6 +297,21 @@ let volumeProfileChart = null;
 let currentVPDays = 14;
 let volumeProfileData = null;   // last-fetched /api/volume-profile response, or null when the toggle is off
 let lastPriceYMin = null, lastPriceYMax = null;  // set by loadChart(), reused so the profile panel + POC/VAH/VAL lines align with the price chart's own y-range
+let structureOverlayData = null;  // last-fetched /api/structure-overlay response, or null when the toggle is off
+
+// Price Structure epic PR F. Event marker colors -- bullish-leaning event
+// types green/blue, bearish-leaning red/amber, rejection a muted neutral
+// gray. Not a trade signal (matches this repo's existing convention for
+// observational/research-only chart annotations, e.g. POC/VAH/VAL's
+// #f7c94f) -- purely "here's what the structure engine logged," no
+// buy/sell implication.
+const STRUCTURE_EVENT_COLORS = {
+  breakout: '#3ecf6e', breakdown: '#f75f5f', acceptance: '#3ecf6e',
+  failed_breakout: '#f75f5f', failed_breakdown: '#f75f5f',
+  sweep_reclaim: '#4f8ef7', rejection: '#666',
+  possible_bullish_structure_failure: '#4f8ef7',
+  possible_bearish_structure_failure: '#e8a33d',
+};
 
 function showToast(msg, type='success') {
   const t = document.getElementById('toast');
@@ -505,6 +524,7 @@ async function loadChart(days, btn) {
             if (volumeProfileData.val != null) lines.push(line('VAL', volumeProfileData.val, [2, 3]));
             return lines;
           })() : []),
+          ...buildStructureOverlayDatasets(data, nearestBar),
         ]
       },
       options: {
@@ -527,6 +547,10 @@ async function loadChart(days, btn) {
                 if (ctx.dataset.label === 'Buy' || ctx.dataset.label === 'Sell') {
                   const labels = ctx.dataset.tooltipLabels || [];
                   return ' ' + (labels[ctx.dataIndex] || (ctx.dataset.label === 'Buy' ? '▲ Buy' : '▼ Sell'));
+                }
+                if (ctx.dataset.label === 'Structural Event') {
+                  const labels = ctx.dataset.tooltipLabels || [];
+                  return ' ' + (labels[ctx.dataIndex] || 'event').replace(/_/g, ' ');
                 }
                 if (ctx.dataset.label === 'Volume') {
                   const v = ctx.parsed.y;
@@ -560,6 +584,110 @@ async function loadChart(days, btn) {
       }
     });
   } catch(e) { console.error(e); }
+}
+
+// Price Structure epic PR F. Builds every structure-overlay Chart.js
+// dataset from the last-fetched /api/structure-overlay response --
+// called from inside loadChart() so overlay datasets always share the
+// price chart's own current x-range/timestamps, not a separately-scaled
+// second chart. Returns [] whenever the toggle is off or nothing has
+// been fetched yet, so loadChart() can always safely spread this in.
+// Restrained by default per the epic's own ask: zones capped to the 3
+// nearest support + 3 nearest resistance to the latest close (not every
+// active zone ever formed), FVGs limited to ones not yet expired/
+// invalidated and within the chart's own visible x-range.
+function buildStructureOverlayDatasets(data, nearestBar) {
+  if (!document.getElementById('structure-toggle').checked || !structureOverlayData || !data.length) return [];
+  const so = structureOverlayData;
+  const x0 = new Date(data[0].ts).getTime(), x1 = new Date(data[data.length - 1].ts).getTime();
+  const lastClose = data[data.length - 1].close;
+  const datasets = [];
+
+  // -- zones: nearest 3 support + 3 resistance to the latest close, each
+  // a faint fill-band spanning the chart's full visible width, same
+  // two-line-fill technique as the Bollinger Band dataset above.
+  const zoneLine = (label, y, color, dash, fillFrom) => ({
+    label, data: [{x: x0, y}, {x: x1, y}],
+    borderColor: color, borderWidth: 1, borderDash: dash,
+    pointRadius: 0, fill: fillFrom, backgroundColor: color + '14',
+  });
+  const support = so.zones.filter(z => z.type === 'support' && z.center < lastClose)
+    .sort((a, b) => (lastClose - a.center) - (lastClose - b.center)).slice(0, 3);
+  const resistance = so.zones.filter(z => z.type === 'resistance' && z.center > lastClose)
+    .sort((a, b) => (a.center - lastClose) - (b.center - lastClose)).slice(0, 3);
+  [...support, ...resistance].forEach((z, i) => {
+    const color = z.type === 'support' ? '#3ecf6e' : '#f75f5f';
+    const idxBase = datasets.length;
+    datasets.push(zoneLine(`Zone ${z.type} upper`, z.upper, color, [2, 4], false));
+    datasets.push(zoneLine(`Zone ${z.type} lower`, z.lower, color, [2, 4], idxBase));
+  });
+
+  // -- swings: small muted markers, distinct from Buy/Sell trade
+  // triangles (different color + smaller radius) so the two are never
+  // visually confused.
+  const highs = so.swings.filter(s => s.type === 'high' && new Date(s.date).getTime() >= x0);
+  const lows = so.swings.filter(s => s.type === 'low' && new Date(s.date).getTime() >= x0);
+  if (highs.length) datasets.push({
+    type: 'scatter', label: 'Swing High',
+    data: highs.map(s => ({x: new Date(s.date).getTime(), y: s.price})),
+    backgroundColor: '#9a7fd1', pointRadius: 4, pointStyle: 'triangle', rotation: 180,
+  });
+  if (lows.length) datasets.push({
+    type: 'scatter', label: 'Swing Low',
+    data: lows.map(s => ({x: new Date(s.date).getTime(), y: s.price})),
+    backgroundColor: '#9a7fd1', pointRadius: 4, pointStyle: 'triangle',
+  });
+
+  // -- structural events: one point per event, positioned at the
+  // nearest bar's close (events don't carry their own price level),
+  // colored by event_type, with the exact type shown on hover.
+  const visibleEvents = so.events.filter(e => new Date(e.date).getTime() >= x0);
+  if (visibleEvents.length) {
+    const points = [], labels = [];
+    visibleEvents.forEach(e => {
+      const bar = nearestBar(new Date(e.date).getTime());
+      if (!bar) return;
+      points.push({x: new Date(e.date).getTime(), y: bar.close, _type: e.type});
+      labels.push(e.type);
+    });
+    datasets.push({
+      type: 'scatter', label: 'Structural Event', data: points, tooltipLabels: labels,
+      backgroundColor: ctx => STRUCTURE_EVENT_COLORS[ctx.raw && ctx.raw._type] || '#888',
+      pointRadius: 5, pointStyle: 'rectRot',
+    });
+  }
+
+  // -- fair value gaps: faint fill-band from the gap's own creation date
+  // to the chart's current right edge, skipped once expired/invalidated
+  // (a resolved gap isn't "currently relevant" any more).
+  so.fair_value_gaps
+    .filter(g => g.status !== 'fvg_expired' && g.status !== 'fvg_invalidated')
+    .filter(g => new Date(g.date).getTime() <= x1)
+    .forEach(g => {
+      const gx0 = new Date(g.date).getTime();
+      const color = g.type === 'bullish' ? '#3ecf6e' : '#f75f5f';
+      const idxBase = datasets.length;
+      datasets.push({
+        label: `FVG ${g.type} upper`, data: [{x: gx0, y: g.upper}, {x: x1, y: g.upper}],
+        borderColor: color, borderWidth: 1, borderDash: [1, 3], pointRadius: 0, fill: false,
+      });
+      datasets.push({
+        label: `FVG ${g.type} lower`, data: [{x: gx0, y: g.lower}, {x: x1, y: g.lower}],
+        borderColor: color, borderWidth: 1, borderDash: [1, 3], pointRadius: 0,
+        fill: idxBase, backgroundColor: color + '10',
+      });
+    });
+
+  return datasets;
+}
+
+function toggleStructureOverlay() {
+  const on = document.getElementById('structure-toggle').checked;
+  if (!on) { structureOverlayData = null; loadChart(currentChartDays, null); return; }
+  fetch(`/api/structure-overlay/${SYMBOL}?days=${Math.max(currentChartDays, 90)}`)
+    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .then(data => { structureOverlayData = data; loadChart(currentChartDays, null); })
+    .catch(e => { console.error(e); structureOverlayData = null; });
 }
 
 function toggleVolumeProfile() {
