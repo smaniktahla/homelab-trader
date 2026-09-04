@@ -53,8 +53,18 @@ if str(_here) not in sys.path:
 
 from regime_common import load_daily_ohlc, asof_index  # noqa: E402
 from market_structure import resample_weekly, resample_monthly  # noqa: E402
+from volume_metrics import relative_volume, dollar_volume  # noqa: E402
 
 log = logging.getLogger(__name__)
+
+# Price Structure epic PR E: relative_volume's own trailing-window
+# length, used to enrich every event's metadata at store time (see
+# _attach_volume_metadata). Not a versioned detection parameter -- unlike
+# EVENT_DETECTION_PARAMS, changing this doesn't change which events fire,
+# only the volume context attached to them, so it's a plain constant
+# rather than something a stored event needs to reconstruct a rule set
+# from.
+RELATIVE_VOLUME_PERIOD = 20
 
 # calculation_version -> the exact bar-count thresholds that version used.
 # A later parameter change adds a new version key rather than mutating
@@ -367,6 +377,51 @@ def compute_structural_events(conn, symbol, timeframe, as_of=None, calculation_v
     return events
 
 
+def _load_close_volume_series(conn, symbol):
+    """(dates, closes, volumes) ascending -- sibling to
+    regime_common.load_daily_ohlc/load_daily_series, but this module's
+    own local copy rather than adding a third shape to that shared
+    module, since only this file's volume-enrichment step needs
+    close+volume together (not the full OHLC bar)."""
+    with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
+        cur.execute("""
+            SELECT DATE(ts), close, volume FROM price_history
+            WHERE symbol=%s ORDER BY ts ASC
+        """, (symbol,))
+        rows = cur.fetchall()
+    dates = [r[0] for r in rows]
+    closes = [float(r[1]) if r[1] is not None else None for r in rows]
+    volumes = [float(r[2]) if r[2] is not None else None for r in rows]
+    return dates, closes, volumes
+
+
+def _attach_volume_metadata(conn, symbol, events):
+    """Price Structure epic PR E: enriches every event's metadata in
+    place with relative_volume/dollar_volume as of its own event_time,
+    reusing shared/volume_metrics.py's existing functions -- a single
+    call into that module at the event's bar, not a second, duplicate
+    volume calculation inside this one (per the epic's own explicit
+    integration note). Mutates event["metadata"]["volume"]; sets it to
+    None (fail-open, matching this module's existing conventions) rather
+    than raising when price_history has no data as of event_time --
+    callers that construct event dicts directly for unit tests without
+    seeding price_history simply get metadata["volume"]=None, same as
+    any other insufficient-data case elsewhere in this codebase."""
+    if not events:
+        return
+    dates, closes, volumes = _load_close_volume_series(conn, symbol)
+    for ev in events:
+        idx = asof_index(dates, ev["event_time"])
+        if idx is None or volumes[idx] is None or closes[idx] is None:
+            ev["metadata"]["volume"] = None
+            continue
+        ev["metadata"]["volume"] = {
+            "relative_volume": relative_volume(volumes[: idx + 1], RELATIVE_VOLUME_PERIOD),
+            "dollar_volume": dollar_volume(closes[idx], volumes[idx]),
+            "period": RELATIVE_VOLUME_PERIOD,
+        }
+
+
 def store_structural_events(conn, symbol, timeframe, events, calculation_version=EVENT_CALCULATION_VERSION):
     """Persists a flat event list from compute_structural_events, in
     order, resolving any "event"-typed reference (acceptance/
@@ -374,7 +429,10 @@ def store_structural_events(conn, symbol, timeframe, events, calculation_version
     dict that produced them, not yet a DB id) to the just-inserted row's
     real id first. ON CONFLICT DO NOTHING on the natural key makes this
     safe to call every cycle with the full replayed list -- already-
-    stored events are silently skipped, never rewritten."""
+    stored events are silently skipped, never rewritten. Every event's
+    metadata is enriched with volume context (see
+    _attach_volume_metadata) before insertion."""
+    _attach_volume_metadata(conn, symbol, events)
     resolved_ids = {}  # id(dict) -> real DB id, for events referencing an in-batch event dict
     with conn.cursor() as cur:
         for ev in events:
