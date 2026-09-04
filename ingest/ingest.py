@@ -16,6 +16,7 @@ from circuit_breaker import is_breached
 from hierarchy_regime import update_hierarchy_regime
 from market_structure import update_market_structure
 from structural_events import update_structural_events
+from fair_value_gaps import update_fair_value_gaps
 from sector_mapping import get_sector_etf
 from outcomes import update_signal_outcomes
 from build_position_lifecycles import build_position_lifecycles
@@ -1293,6 +1294,14 @@ def run_once(conn, last_universe_scan):
         update_structural_events(conn, symbols)
     except Exception as e:
         log.warning(f"Structural event update failed: {e}")
+
+    # Price Structure epic PR B2 -- Fair Value Gap detection + lifecycle,
+    # sibling to PR B's structural events (reuses the same
+    # structural_events table for FVG lifecycle milestones). Additive.
+    try:
+        update_fair_value_gaps(conn, symbols)
+    except Exception as e:
+        log.warning(f"Fair value gap update failed: {e}")
 
     sync_earnings_calendar(conn)
     refresh_fundamentals_if_due(conn, symbols)
