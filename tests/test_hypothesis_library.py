@@ -25,6 +25,12 @@ SEEDED_TYPE_KEYS = {"mean_reversion_oversold", "mean_reversion_overbought"}
 # default_entry_conditions=None can be asserted specifically without
 # complicating the PR13-era generic-loop test above.
 PR16_TYPE_KEYS = {"bollinger_breakout_continuation", "ema_crossover_trend"}
+# Price Structure epic PR G seed rows, built on PR A/B/B2's structural_
+# zones/structural_events infrastructure via PR C's feature_registry
+# providers.
+PRICE_STRUCTURE_TYPE_KEYS = {
+    "structural_support_bounce", "structural_breakout_momentum", "fvg_reaction_momentum",
+}
 
 
 def _cleanup(conn, type_key):
@@ -86,6 +92,40 @@ def test_ema_crossover_trend_has_no_condition_tree_template(conn):
     spec = get_hypothesis_type(conn, "ema_crossover_trend")
     assert spec.default_entry_conditions is None
     assert spec.default_invalidation_spec is None
+
+
+def test_price_structure_seeded_types_are_active_and_instantiable(conn):
+    for type_key in PRICE_STRUCTURE_TYPE_KEYS:
+        assert is_legal_hypothesis_type(conn, type_key)
+        assert is_instantiable_hypothesis_type(conn, type_key)
+        spec = get_hypothesis_type(conn, type_key)
+        assert spec.status == "active"
+        assert spec.schema_version == TRADE_THESIS_SCHEMA_VERSION
+        assert all(p in ("structural_zones", "structural_events") for p in spec.required_providers)
+
+
+def test_structural_support_bounce_has_a_condition_tree_template(conn):
+    spec = get_hypothesis_type(conn, "structural_support_bounce")
+    assert spec.default_entry_conditions == {
+        "feature": "structural_zones.nearest_support_distance_atr", "op": "lt", "value": 0.5}
+    assert spec.default_invalidation_spec == {
+        "feature": "structural_zones.nearest_support_distance_atr", "op": "gt", "value": 2.0}
+
+
+def test_structural_breakout_momentum_has_a_condition_tree_template(conn):
+    spec = get_hypothesis_type(conn, "structural_breakout_momentum")
+    assert spec.default_entry_conditions == {
+        "feature": "structural_events.recent_event_type", "op": "eq", "value": "breakout"}
+    assert spec.default_invalidation_spec == {
+        "feature": "structural_events.recent_event_type", "op": "eq", "value": "failed_breakout"}
+
+
+def test_fvg_reaction_momentum_has_a_condition_tree_template(conn):
+    spec = get_hypothesis_type(conn, "fvg_reaction_momentum")
+    assert spec.default_entry_conditions == {
+        "feature": "structural_events.recent_event_type", "op": "eq", "value": "fvg_midpoint_reached"}
+    assert spec.default_invalidation_spec == {
+        "feature": "structural_events.recent_event_type", "op": "eq", "value": "fvg_invalidated"}
 
 
 # --- list / get / exists --------------------------------------------------------

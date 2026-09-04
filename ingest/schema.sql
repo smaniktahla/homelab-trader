@@ -1269,6 +1269,49 @@ VALUES
      'active')
 ON CONFLICT (type_key) DO NOTHING;
 
+-- Price Structure epic PR G: three hypothesis_types built on PR A/B/B2's
+-- structural_zones/structural_events/fair_value_gaps infrastructure via
+-- PR C's feature_registry providers, same "catalog metadata here, the
+-- executable strategy in its own module" split PR 16 established.
+--
+-- structural_support_bounce is the only one of the three with an
+-- executable strategy module in this PR (shared/
+-- structural_support_bounce_strategy.py) -- structural_breakout_momentum
+-- and fvg_reaction_momentum are registered as templates whose condition
+-- trees are already expressible and correct, but whose backtest_engine
+-- wrappers are left for a follow-up, same "template registered,
+-- implementation trails" precedent ema_crossover_trend set above (that
+-- one for a genuine grammar limitation; these two simply weren't carried
+-- all the way to an executable wrapper in this PR).
+--
+-- fvg_reaction_momentum reuses structural_events.recent_event_type
+-- rather than a dedicated FVG feature -- FVG lifecycle milestones
+-- (fvg_midpoint_reached, etc., PR B2) are themselves rows in
+-- structural_events, so no new feature_registry entry was needed.
+INSERT INTO hypothesis_types
+    (type_key, display_name, description, category, schema_version, required_providers,
+     default_entry_conditions, default_invalidation_spec, status)
+VALUES
+    ('structural_support_bounce', 'Structural Support Bounce',
+     'Price trading within a tight distance of a confirmed support zone (structural_zones.nearest_support_distance_atr) is more likely to find support and bounce than continue falling. Invalidated once price has moved well clear of that zone again.',
+     'mean_reversion', 'v1', '["structural_zones"]'::jsonb,
+     '{"feature": "structural_zones.nearest_support_distance_atr", "op": "lt", "value": 0.5}'::jsonb,
+     '{"feature": "structural_zones.nearest_support_distance_atr", "op": "gt", "value": 2.0}'::jsonb,
+     'active'),
+    ('structural_breakout_momentum', 'Structural Breakout Momentum',
+     'A confirmed breakout of a resistance zone (structural_events.recent_event_type) indicates positive momentum more likely to continue. Invalidated if that same breakout is later reclassified as failed.',
+     'trend_following', 'v1', '["structural_events"]'::jsonb,
+     '{"feature": "structural_events.recent_event_type", "op": "eq", "value": "breakout"}'::jsonb,
+     '{"feature": "structural_events.recent_event_type", "op": "eq", "value": "failed_breakout"}'::jsonb,
+     'active'),
+    ('fvg_reaction_momentum', 'Fair Value Gap Reaction Momentum',
+     'Price returning to and reacting at a bullish Fair Value Gap''s midpoint (structural_events.recent_event_type = fvg_midpoint_reached, PR B2''s consequent-encroachment level) indicates the gap is acting as support. Invalidated if the gap is later closed through decisively (fvg_invalidated).',
+     'mean_reversion', 'v1', '["structural_events"]'::jsonb,
+     '{"feature": "structural_events.recent_event_type", "op": "eq", "value": "fvg_midpoint_reached"}'::jsonb,
+     '{"feature": "structural_events.recent_event_type", "op": "eq", "value": "fvg_invalidated"}'::jsonb,
+     'active')
+ON CONFLICT (type_key) DO NOTHING;
+
 -- Volume & Volume Profile epic, PR A: provenance tracking. price_history
 -- has always been an untracked blend of two sources -- the dominant,
 -- recurring Yahoo Finance scrape (ingest.py::ingest_prices) and a
