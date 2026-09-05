@@ -233,6 +233,100 @@ def get_volume_profile(symbol: str, days: int = 14, bucket_count: int = 30):
     return profile.to_json()
 
 
+# ── Price Structure epic PR F. Stock-detail chart overlay: confirmed ───────
+# swings, active support/resistance zones, structural events, and Fair
+# Value Gaps (with each gap's latest lifecycle status derived from
+# structural_events, not a mutable status column -- see shared/
+# fair_value_gaps.py's module docstring, PR B2). Restrained by default,
+# per the epic's own "nearest/currently-relevant, not full history" ask:
+# swings/events are bounded to the last `days` (default 90, independent
+# of the price chart's own range control, same reasoning as Volume
+# Profile PR D's separate range), zones/gaps to whatever is currently
+# active/recent -- not the symbol's entire multi-year history.
+@app.get("/api/structure-overlay/{symbol}")
+def get_structure_overlay(symbol: str, timeframe: str = "daily", days: int = 90):
+    symbol = symbol.upper()
+    if timeframe not in ("daily", "weekly", "monthly"):
+        raise HTTPException(400, "timeframe must be daily, weekly, or monthly")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date()
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT swing_type, event_time, price FROM structural_swings
+            WHERE symbol=%s AND timeframe=%s AND event_time >= %s
+            ORDER BY event_time ASC
+        """, (symbol, timeframe, cutoff))
+        swings = cur.fetchall()
+
+        cur.execute("""
+            SELECT zone_type, center_price, upper, lower, touch_count, last_touched
+            FROM structural_zones
+            WHERE symbol=%s AND timeframe=%s AND active=TRUE
+            ORDER BY center_price ASC
+        """, (symbol, timeframe))
+        zones = cur.fetchall()
+
+        cur.execute("""
+            SELECT event_type, event_time, confirmation_time
+            FROM structural_events
+            WHERE symbol=%s AND timeframe=%s AND event_time >= %s AND reference_type != 'fvg'
+            ORDER BY event_time ASC
+        """, (symbol, timeframe, cutoff))
+        events = cur.fetchall()
+
+        cur.execute("""
+            SELECT id, gap_type, zone_upper, zone_lower, event_time
+            FROM fair_value_gaps
+            WHERE symbol=%s AND timeframe=%s AND event_time >= %s
+            ORDER BY event_time ASC
+        """, (symbol, timeframe, cutoff))
+        gaps = cur.fetchall()
+
+        # Latest lifecycle status per gap -- read from structural_events,
+        # never a mutable status column (there isn't one), same "as-of
+        # state reconstructed from the append-only log" pattern PR C's
+        # feature_registry.structural_events.recent_event_type used.
+        gap_status = {}
+        if gaps:
+            gap_ids = [g["id"] for g in gaps]
+            cur.execute("""
+                SELECT reference_id, event_type FROM structural_events
+                WHERE symbol=%s AND timeframe=%s AND reference_type='fvg' AND reference_id = ANY(%s)
+                ORDER BY reference_id, confirmation_time ASC, id ASC
+            """, (symbol, timeframe, gap_ids))
+            for row in cur.fetchall():
+                gap_status[row["reference_id"]] = row["event_type"]  # last row per gap wins (ascending order)
+
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "swings": [
+            {"type": r["swing_type"], "date": r["event_time"].isoformat(), "price": float(r["price"])}
+            for r in swings
+        ],
+        "zones": [
+            {
+                "type": r["zone_type"], "center": float(r["center_price"]),
+                "upper": float(r["upper"]), "lower": float(r["lower"]),
+                "touch_count": r["touch_count"], "last_touched": r["last_touched"].isoformat(),
+            }
+            for r in zones
+        ],
+        "events": [
+            {"type": r["event_type"], "date": r["event_time"].isoformat()}
+            for r in events
+        ],
+        "fair_value_gaps": [
+            {
+                "id": g["id"], "type": g["gap_type"],
+                "upper": float(g["zone_upper"]), "lower": float(g["zone_lower"]),
+                "date": g["event_time"].isoformat(),
+                "status": gap_status.get(g["id"], "untouched"),
+            }
+            for g in gaps
+        ],
+    }
+
+
 @app.get("/api/news/{symbol}")
 def get_news(symbol: str, limit: int = 20):
     with db() as conn, conn.cursor() as cur:

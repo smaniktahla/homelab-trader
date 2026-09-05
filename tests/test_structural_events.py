@@ -11,15 +11,18 @@ import sys
 import pathlib
 from datetime import date, timedelta
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 p = str(ROOT / "shared")
 if p not in sys.path:
     sys.path.insert(0, p)
 
-for _mod in ("structural_events", "market_structure", "regime_common"):
+for _mod in ("structural_events", "market_structure", "regime_common", "volume_metrics"):
     sys.modules.pop(_mod, None)
 import structural_events as se
 import market_structure as ms
+from volume_metrics import relative_volume, dollar_volume
 
 D0 = date(2020, 1, 1)
 
@@ -346,3 +349,120 @@ def test_update_structural_events_end_to_end(conn):
         cur.execute("SELECT COUNT(*) FROM structural_events WHERE symbol='ZIGZAG'")
         count_again = cur.fetchone()[0]
     assert count_again == count
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Price Structure epic PR E: volume enrichment attached at store time
+# ─────────────────────────────────────────────────────────────────────────
+
+def _seed_price_history_with_volume(conn, symbol, closes, volumes, start=D0):
+    with conn.cursor() as cur:
+        for i, (c, v) in enumerate(zip(closes, volumes)):
+            d = start + timedelta(days=i)
+            cur.execute("""
+                INSERT INTO price_history (symbol, ts, open, high, low, close, volume)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (symbol, ts) DO NOTHING
+            """, (symbol, d, c, c, c, c, v))
+    conn.commit()
+
+
+def test_store_structural_events_attaches_relative_and_dollar_volume(conn):
+    closes = [100.0] * 25
+    volumes = [1000] * 24 + [3000]  # last day's volume is 3x its trailing average
+    _seed_price_history_with_volume(conn, "VOLTEST", closes, volumes)
+    zid = _insert_zone(conn, "VOLTEST", "daily", "resistance", 110.0, 105.0)
+    event_time = D0 + timedelta(days=24)
+    events = [{
+        "event_type": "breakout", "reference_type": "zone", "reference_id": zid,
+        "event_time": event_time, "confirmation_time": event_time, "metadata": {"params": {}},
+    }]
+
+    se.store_structural_events(conn, "VOLTEST", "daily", events)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT metadata FROM structural_events WHERE symbol='VOLTEST'")
+        metadata = cur.fetchone()[0]
+
+    expected_rvol = relative_volume([float(v) for v in volumes], se.RELATIVE_VOLUME_PERIOD)
+    expected_dvol = dollar_volume(100.0, 3000.0)
+    assert metadata["volume"]["relative_volume"] == pytest.approx(expected_rvol)
+    assert metadata["volume"]["dollar_volume"] == pytest.approx(expected_dvol)
+    assert metadata["volume"]["period"] == se.RELATIVE_VOLUME_PERIOD
+
+
+def test_store_structural_events_volume_is_none_without_price_history(conn):
+    zid = _insert_zone(conn, "NOVOLDATA", "daily", "resistance", 110.0, 105.0)
+    event_time = D0 + timedelta(days=1)
+    events = [{
+        "event_type": "breakout", "reference_type": "zone", "reference_id": zid,
+        "event_time": event_time, "confirmation_time": event_time, "metadata": {"params": {}},
+    }]
+
+    se.store_structural_events(conn, "NOVOLDATA", "daily", events)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT metadata FROM structural_events WHERE symbol='NOVOLDATA'")
+        metadata = cur.fetchone()[0]
+    assert metadata["volume"] is None
+
+
+def test_store_structural_events_volume_ignores_future_price_history(conn):
+    """The as-of-safety proof for this PR: a volume spike dated AFTER the
+    event's own event_time must never leak into that event's relative
+    volume, even though it's in the same price_history table."""
+    closes = [100.0] * 25
+    volumes = [1000] * 24 + [1000]
+    _seed_price_history_with_volume(conn, "VOLFUTURE", closes, volumes)
+    zid = _insert_zone(conn, "VOLFUTURE", "daily", "resistance", 110.0, 105.0)
+    event_time = D0 + timedelta(days=10)
+    events = [{
+        "event_type": "breakout", "reference_type": "zone", "reference_id": zid,
+        "event_time": event_time, "confirmation_time": event_time, "metadata": {"params": {}},
+    }]
+    se.store_structural_events(conn, "VOLFUTURE", "daily", events)
+    with conn.cursor() as cur:
+        cur.execute("SELECT metadata FROM structural_events WHERE symbol='VOLFUTURE'")
+        baseline_rvol = cur.fetchone()[0]["volume"]["relative_volume"]
+
+    # now add a dramatic future volume spike, far after event_time, and
+    # re-store the SAME event (natural key unchanged) -- must not alter
+    # the already-computed relative_volume even if store were re-run.
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE price_history SET volume=50000 WHERE symbol='VOLFUTURE' AND ts > %s
+        """, (event_time + timedelta(days=5),))
+    conn.commit()
+    se.store_structural_events(conn, "VOLFUTURE", "daily", events)
+    with conn.cursor() as cur:
+        cur.execute("SELECT metadata FROM structural_events WHERE symbol='VOLFUTURE'")
+        after_rvol = cur.fetchone()[0]["volume"]["relative_volume"]
+
+    assert after_rvol == pytest.approx(baseline_rvol)
+
+
+def test_fair_value_gap_lifecycle_events_also_get_volume_metadata(conn):
+    """fair_value_gaps.py's lifecycle events flow through this same
+    store_structural_events -- confirms the enrichment applies there too
+    without fair_value_gaps.py needing any changes of its own."""
+    import fair_value_gaps as fvg
+    closes_hi = [98, 107, 104, 101]
+    highs = [100, 108, 106, 102]
+    lows = [95, 104, 103, 100]
+    volumes = [1000, 1000, 1000, 1000]
+    with conn.cursor() as cur:
+        for i, (c, h, l, v) in enumerate(zip(closes_hi, highs, lows, volumes)):
+            cur.execute("""
+                INSERT INTO price_history (symbol, ts, open, high, low, close, volume)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (symbol, ts) DO NOTHING
+            """, ("FVGVOL", D0 + timedelta(days=i), c, h, l, c, v))
+    conn.commit()
+
+    fvg.compute_and_store_fair_value_gaps(conn, "FVGVOL", "daily", as_of=D0 + timedelta(days=3))
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT metadata FROM structural_events WHERE symbol='FVGVOL' AND reference_type='fvg'")
+        rows = cur.fetchall()
+    assert len(rows) > 0
+    assert all(r[0]["volume"] is not None for r in rows)
