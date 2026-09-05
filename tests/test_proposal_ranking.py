@@ -275,3 +275,29 @@ def test_rank_proposals_reflects_risk_engine_rejected_outcome():
     risk_decisions = {1: {"outcome": "rejected", "binding_constraint": "buying_power"}}
     result = pr.rank_proposals(proposals, {}, [], {}, 100000.0, 100000.0, price_map, risk_decisions, DEFAULT_PARAMS)
     assert result[0]["priority_tier"] == pr.TIER_MINIMAL
+
+
+def test_rank_proposals_surfaces_risk_decision_fields_on_the_row():
+    """Bug fix: a proposal's row must expose what the risk engine actually
+    approved (outcome/binding_constraint/approved_quantity), not just use
+    that data internally to pick a priority_tier and discard it -- this is
+    what lets the dashboard show '17 requested -> 3 approved
+    (portfolio_open_risk)' instead of only discovering the mismatch after
+    a rejected Approve click."""
+    proposals = [_proposal(1, "AAA", signal_score=90, current_price=10.0, qty=17)]
+    price_map = {"AAA": 10.0}
+    risk_decisions = {1: {"outcome": "reduced", "binding_constraint": "portfolio_open_risk", "approved_quantity": 3}}
+    result = pr.rank_proposals(proposals, {}, [], {}, 100000.0, 100000.0, price_map, risk_decisions, DEFAULT_PARAMS)
+    assert result[0]["risk_outcome"] == "reduced"
+    assert result[0]["risk_binding_constraint"] == "portfolio_open_risk"
+    assert result[0]["risk_approved_quantity"] == 3
+    assert result[0]["qty"] == 17  # the strategy's own requested qty is never overwritten
+
+
+def test_rank_proposals_missing_risk_decision_gives_none_fields_not_a_crash():
+    proposals = [_proposal(1, "AAA", signal_score=90, current_price=10.0, qty=5)]
+    price_map = {"AAA": 10.0}
+    result = pr.rank_proposals(proposals, {}, [], {}, 100000.0, 100000.0, price_map, {}, DEFAULT_PARAMS)
+    assert result[0]["risk_outcome"] is None
+    assert result[0]["risk_binding_constraint"] is None
+    assert result[0]["risk_approved_quantity"] is None

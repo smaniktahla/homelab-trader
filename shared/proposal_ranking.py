@@ -332,6 +332,18 @@ def rank_proposals(proposals, positions, pending_orders, sector_map,
             row["priority_stars"] = STARS_BY_TIER[tier]
             row["priority_label"] = LABEL_BY_TIER[tier]
             row["recommended_action"] = ACTION_BY_TIER[tier]
+            # Surfaced for display so a proposal's shown qty can be
+            # reconciled against what the risk engine actually approved at
+            # proposal-generation time -- previously computed here (via
+            # `decision`, used above only to pick a tier) but never
+            # attached to the row, so the dashboard showed the raw
+            # strategy-requested qty with no indication it might be
+            # reduced or rejected outright once a human tries to act on
+            # it. Still purely additive/display-only per this module's own
+            # contract -- `row["qty"]` itself is untouched.
+            row["risk_outcome"] = risk_outcome
+            row["risk_binding_constraint"] = decision.get("binding_constraint")
+            row["risk_approved_quantity"] = decision.get("approved_quantity")
             row["cluster_id"] = cluster_id if cluster_size > 1 else None
             row["cluster_label"] = cluster_label
             row["cluster_rank"] = rank if cluster_size > 1 else None
