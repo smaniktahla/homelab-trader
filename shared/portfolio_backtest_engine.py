@@ -234,6 +234,21 @@ def run_portfolio_backtest(bars_by_symbol, strategy, *, starting_cash,
         idx = index_by_symbol_date[symbol][date]
         return bars_by_symbol[symbol][: idx + 1]
 
+    def _positions_snapshot():
+        """positions dict for portfolio_state, with a `market_value` key
+        added (qty * last known price) alongside the raw qty/entry_price
+        fields -- needed by any qty_fn that wants to reuse
+        shared/risk_engine.py::evaluate_proposal()'s position-allocation/
+        sector-exposure math directly (VR-3b), which expects
+        positions[sym]["market_value"], not qty+entry_price. Marked at
+        last_price, same "may be a day stale, not the fill price itself"
+        caveat as _mark_equity()."""
+        snap = {}
+        for s, p in positions.items():
+            snap[s] = dict(p)
+            snap[s]["market_value"] = p["qty"] * last_price.get(s, p["entry_price"])
+        return snap
+
     def _apply_fill(symbol, signal, bar):
         nonlocal cash
         price = bar.open if execution_timing == "next_bar_open" else bar.close
@@ -241,7 +256,7 @@ def run_portfolio_backtest(bars_by_symbol, strategy, *, starting_cash,
             portfolio_state = {
                 "cash": cash,
                 "total_equity": _mark_equity(),
-                "positions": {s: dict(p) for s, p in positions.items()},
+                "positions": _positions_snapshot(),
             }
             qty = qty_fn(symbol, price, portfolio_state, _bars_upto(symbol, bar.ts), "buy")
             qty = max(0.0, float(qty))
@@ -320,7 +335,7 @@ def run_portfolio_backtest(bars_by_symbol, strategy, *, starting_cash,
         #    only stale/no history.
         portfolio_state = {
             "cash": cash, "total_equity": _mark_equity(),
-            "positions": {s: dict(p) for s, p in positions.items()},
+            "positions": _positions_snapshot(),
         }
         candidates = strategy(date, bars_by_symbol_asof, portfolio_state) or []
 

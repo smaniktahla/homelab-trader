@@ -292,6 +292,42 @@ def test_max_drawdown_pct_computed_correctly():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# portfolio_state's market_value (VR-3b needs this to reuse
+# risk_engine.evaluate_proposal()'s position-allocation/sector-exposure math)
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_portfolio_state_positions_include_market_value():
+    bars = {"AAA": _bars("AAA", [100, 100, 150, 150])}
+    strategy = _buy_once_strategy("AAA", buy_date=START)
+    qty_fn = lambda symbol, price, portfolio_state, bars_seen, side: 10.0  # noqa: E731
+    seen_states = []
+
+    def capturing_strategy(today, bars_by_symbol_asof, portfolio_state):
+        seen_states.append(portfolio_state)
+        return strategy(today, bars_by_symbol_asof, portfolio_state)
+
+    pbe.run_portfolio_backtest(bars, capturing_strategy, starting_cash=10_000.0, qty_fn=qty_fn)
+    # By the last date (offset 3), AAA was bought at bar1's open (100) and
+    # last_price has since moved to 150 (bar index 2 -> today's close) --
+    # market_value must reflect the CURRENT mark, not the stale entry price.
+    last_state = seen_states[-1]
+    assert last_state["positions"]["AAA"]["qty"] == 10.0
+    assert last_state["positions"]["AAA"]["market_value"] == 10.0 * 150.0
+
+
+def test_market_value_absent_before_any_position_is_opened():
+    bars = {"AAA": _bars("AAA", [100, 100])}
+    seen_states = []
+
+    def strategy(today, bars_by_symbol_asof, portfolio_state):
+        seen_states.append(portfolio_state)
+        return []
+
+    pbe.run_portfolio_backtest(bars, strategy, starting_cash=10_000.0)
+    assert seen_states[0]["positions"] == {}
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # fixed_fractional_qty_fn (the default policy)
 # ─────────────────────────────────────────────────────────────────────────
 
