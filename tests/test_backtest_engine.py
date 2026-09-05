@@ -37,6 +37,14 @@ def _sell_on_bar_zero(bars_seen):
     return "sell" if len(bars_seen) == 1 else None
 
 
+def _buy_then_sell(bars_seen):
+    if len(bars_seen) == 1:
+        return "buy"
+    if len(bars_seen) == 3:
+        return "sell"
+    return None
+
+
 # --- execution timing ---------------------------------------------------------
 
 def test_next_bar_open_fill_uses_next_bars_open_not_current_bars_close():
@@ -180,6 +188,84 @@ def test_win_rate_and_trade_count_and_total_pnl_across_multiple_trades():
     assert result.trade_count == 2
     assert result.win_rate == 0.5
     assert result.total_pnl == 30.0 + (-20.0)
+
+
+# --- per-signal qty (VR-3a, see docs/volatility-sizing-vr0-reconciliation.md §4.1) --
+
+def test_qty_callable_sizes_the_buy_fill():
+    calls = []
+
+    def qty_fn(bars_seen, signal):
+        calls.append(len(bars_seen))
+        return 42.0
+
+    bars = _bars(closes=[100, 110])
+    result = run_backtest(bars, _buy_on_bar_zero, execution_timing="next_bar_open", qty=qty_fn)
+    assert len(result.fills) == 1
+    assert result.fills[0].qty == 42.0
+    assert calls == [1]  # called once, with bars[:1] -- the same slice the strategy saw
+
+
+def test_qty_callable_result_is_reused_for_the_matching_exit_not_recomputed():
+    """A sell fill must use the SAME qty the position was opened with, even
+    if qty_fn would return something different if called again at exit
+    time -- exit quantity is 'whatever was bought', not re-sized. qty_fn is
+    asserted to be called exactly once (at entry), never at exit."""
+    call_count = [0]
+
+    def qty_fn(bars_seen, signal):
+        call_count[0] += 1
+        return 7.0 * call_count[0]  # would differ across calls if called again
+
+    bars = _bars(closes=[100, 110, 120, 130])
+    result = run_backtest(bars, _buy_then_sell, execution_timing="next_bar_open", qty=qty_fn)
+    assert call_count[0] == 1
+    assert len(result.fills) == 2
+    assert result.fills[0].qty == 7.0  # entry
+    assert result.fills[1].qty == 7.0  # exit -- same qty, not a second qty_fn call's output
+    assert result.trades[0].qty == 7.0
+    assert result.trades[0].gross_pnl == (result.fills[1].price - result.fills[0].price) * 7.0
+
+
+def test_qty_callable_never_sees_bars_beyond_the_signal_bar():
+    """Same structural no-lookahead guarantee the strategy itself gets:
+    qty_fn(bars_seen, signal) is called with the identical bars[:i+1]
+    slice, never anything past it."""
+    seen_lengths = []
+
+    def qty_fn(bars_seen, signal):
+        seen_lengths.append(len(bars_seen))
+        assert bars_seen[-1].ts == signal.bar_ts  # last bar visible IS the signal's own bar
+        return 1.0
+
+    bars = _bars(closes=[100, 110, 120])
+    run_backtest(bars, _buy_on_bar_zero, execution_timing="next_bar_open", qty=qty_fn)
+    assert seen_lengths == [1]
+
+
+def test_qty_callable_not_invoked_for_sell_while_flat_or_duplicate_buy():
+    """qty_fn must only be invoked for an actual actionable BUY -- a
+    duplicate buy-while-long or a sell-while-flat is recorded as a
+    non-actionable Signal and never reaches qty_fn at all."""
+    calls = []
+
+    def qty_fn(bars_seen, signal):
+        calls.append(signal.side)
+        return 1.0
+
+    bars = _bars(closes=[100, 110, 120])
+    run_backtest(bars, _buy_every_bar, execution_timing="next_bar_open", qty=qty_fn)
+    assert calls == ["buy"]  # only the first buy is actionable; the rest are duplicates, flat sell never occurs here
+
+
+def test_fixed_scalar_qty_still_works_exactly_as_before():
+    """Backward compatibility: a plain float qty (not callable) must behave
+    identically to pre-VR-3a -- every fill uses the same fixed quantity."""
+    bars = _bars(closes=[100, 110, 120, 130])
+    result = run_backtest(bars, _buy_then_sell, execution_timing="next_bar_open", qty=3.0)
+    assert result.fills[0].qty == 3.0
+    assert result.fills[1].qty == 3.0
+    assert result.trades[0].qty == 3.0
 
 
 # --- serialization ---------------------------------------------------------------

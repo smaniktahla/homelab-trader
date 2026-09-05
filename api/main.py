@@ -15,6 +15,7 @@ import rule_adherence
 from sector_regime import load_latest_sector_regime
 from security_regime import load_latest_security_regime
 import risk_engine
+import volatility_forecast
 import trading_permission
 import circuit_breaker
 import proposal_ranking
@@ -1427,10 +1428,17 @@ def _clamp_to_risk_engine(conn, cur, context, proposal_id, symbol, requested_qty
             hwm = circuit_breaker.current_high_water_mark(conn)
             drawdown_pct = circuit_breaker.drawdown_pct_of(portfolio_value, hwm) if portfolio_value else 0.0
             drawdown_mult = circuit_breaker.drawdown_size_multiplier(drawdown_pct, p["circuit_breaker_drawdown_pct"])
+            # VR-2: same "only load a forecast when the overlay is
+            # actually enabled" gating as shared/signals.py's call site.
+            forecast = None
+            if p.get("volatility_sizing_enabled"):
+                forecast = volatility_forecast.load_latest_volatility_forecast(
+                    conn, symbol, volatility_forecast.SIZING_ESTIMATOR, volatility_forecast.SIZING_HORIZON
+                )
             decision = risk_engine.evaluate_proposal(
                 symbol, price, requested_qty, planned_initial_stop_price,
                 cash, portfolio_value, positions, sector_map, open_risk_dollars, p,
-                drawdown_multiplier=drawdown_mult,
+                drawdown_multiplier=drawdown_mult, volatility_forecast=forecast,
             )
     except Exception as e:
         raise HTTPException(400, f"Risk engine evaluation failed, refusing to size this trade: {e}")
