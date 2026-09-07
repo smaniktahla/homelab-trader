@@ -39,35 +39,81 @@ node ~/.agents/skills/archify/bin/archify.mjs deliver architecture \
    don't hand-edit a delivered file afterward -- change it, then
    re-validate and re-deliver.
 
+## Two kinds of map
+
+- **`system-overview.json`** -- the one overarching map. Answers "what are
+  the major subsystems and how do they depend on each other?" at the
+  granularity of whole components (Signal Generation, Risk Engine, API,
+  Postgres, Alpaca, ...), not individual functions. Update it only when a
+  PR/epic adds, removes, or rewires a subsystem-level dependency -- this
+  should be rare.
+- **Question-specific maps** (e.g. `order-risk-path.json`) -- one bounded
+  execution/data-flow path each, at function-and-line granularity. Create
+  a new one only after the "First empirical test" bar has been cleared for
+  it once (see the original evaluation write-up): validate clean, render,
+  and manually check the graph against the cited source before trusting it
+  for review. Don't create all plausible questions speculatively -- add
+  one when an epic actually needs it.
+
 ## When to update a map
 
 Only when a PR changes: subsystem boundaries, execution flow, major data
 flow, persistence semantics, risk-control ordering, lifecycle semantics, or
-an externally visible integration. Most PRs don't need this. Suggested PR
-template fragment:
+an externally visible integration. Most PRs don't need this. PR description
+fragment to include when it does apply:
 
 ```text
 Architecture impact: yes/no
-Affected architecture questions: <e.g. order-risk-path>
+Affected architecture questions: <e.g. order-risk-path, system-overview>
 Architecture graph updated: yes/no/not applicable
+Architecture diff: <paste the topology-change summary from diff-map.sh, or "none">
 ```
 
-## Diffing an architecture change
+## PR-level workflow
+
+For a PR with architecture impact:
+
+1. Edit the affected `architecture/<name>.json`, then
+   `validate`/`deliver` it clean (see command above).
+2. Run the diff helper against the PR's merge-base:
+   ```bash
+   architecture/scripts/diff-map.sh <name>
+   ```
+   This diffs your working copy against `origin/main`'s version (or prints
+   "nothing to diff" if the map is new) and writes
+   `architecture/generated/<name>.diff.html`.
+3. Paste the `summary` block's `topology` counts (added/removed
+   components/connections) into the PR description. `geometry`-only
+   changes (moved boxes, rerouted labels) aren't worth mentioning --
+   they're re-layout noise, not architecture.
+4. If the diff shows a `topology` change you didn't intend (e.g. an edge
+   into the risk engine silently disappeared), that's a signal to look
+   again before merging -- this is exactly the "did sizing accidentally
+   bypass risk clamps" check this workflow exists for.
+
+## Epic-level workflow
+
+An epic's PRs each produce their own small, honest per-PR diff -- but the
+cumulative epic-level change is usually the one worth seeing in one place
+(e.g. "across the whole VR epic, did volatility sizing end up bypassing
+the existing risk clamps, yes or no"). At epic kickoff, note the commit the
+epic branches from; at epic completion, diff against that commit instead
+of `origin/main`:
 
 ```bash
-git show origin/main:architecture/<name>.json > /tmp/base.json
-node ~/.agents/skills/archify/bin/archify.mjs compare architecture \
-  /tmp/base.json architecture/<name>.json /tmp/diff.html \
-  --repo-root . --json
+architecture/scripts/diff-map.sh <name> <epic-start-commit-or-tag>
 ```
 
-Read the `topology` vs `geometry` classification in the JSON summary --
-`topology` changes (edges/nodes added or removed) are the ones worth
-calling out in a PR description; `geometry` changes are usually just
-re-layout noise.
+Do this once per affected map when the epic lands, not after every PR --
+per-PR diffs already cover incremental review; the epic-level diff is for
+seeing the epic's net effect on architecture in one pass.
 
 ## Current maps
 
+- `system-overview.json` -- What are homelab-trader's major subsystems and
+  how do they depend on each other? (ingest -> signal generation -> risk
+  engine -> API -> Alpaca, plus market regime/structure, trade thesis
+  lifecycle, backtest engine, Postgres, and the digest/ATQ handoff)
 - `order-risk-path.json` -- How does a strategy-generated BUY proposal
   become an accepted/rejected order and reach the broker? (calc_buy_qty ->
   trade_proposals -> evaluate_proposal() binding clamp -> order submission

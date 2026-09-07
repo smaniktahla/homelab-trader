@@ -1,0 +1,359 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "System Overview",
+    "subtitle": "What are homelab-trader's major subsystems and how do they depend on each other?",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/smaniktahla/homelab-trader",
+      "revision": "a18097d954d7c8477f812d67d6bfe17df64bc044"
+    }
+  },
+  "components": [
+    {
+      "id": "market_regime",
+      "type": "backend",
+      "label": "Market Regime & Structure",
+      "sublabel": "SPY/QQQ/VIX classification, swings/zones",
+      "pos": [
+        210,
+        140
+      ],
+      "size": [
+        210,
+        64
+      ],
+      "sources": [
+        {
+          "path": "ingest/market_regime.py",
+          "line": 139,
+          "end_line": 211,
+          "label": "compute_market_regime"
+        },
+        {
+          "path": "shared/market_structure.py",
+          "line": 181,
+          "label": "detect_swings"
+        }
+      ]
+    },
+    {
+      "id": "ingest_svc",
+      "type": "backend",
+      "label": "invest-ingest",
+      "sublabel": "hourly cron loop",
+      "pos": [
+        20,
+        260
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "ingest/ingest.py",
+          "line": 1391,
+          "end_line": 1483,
+          "label": "main loop"
+        }
+      ]
+    },
+    {
+      "id": "signal_gen",
+      "type": "backend",
+      "label": "Strategy & Signal Generation",
+      "sublabel": "compute_signals(), calc_buy_qty()",
+      "pos": [
+        210,
+        260
+      ],
+      "size": [
+        210,
+        64
+      ],
+      "sources": [
+        {
+          "path": "shared/signals.py",
+          "line": 917,
+          "label": "compute_signals"
+        },
+        {
+          "path": "shared/signals.py",
+          "line": 425,
+          "end_line": 453,
+          "label": "calc_buy_qty"
+        }
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "invest DB (external, DATABASE_URL)",
+      "pos": [
+        470,
+        260
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "api_svc",
+      "type": "backend",
+      "label": "invest-api",
+      "sublabel": "FastAPI :8100",
+      "pos": [
+        730,
+        260
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "sources": [
+        {
+          "path": "api/main.py",
+          "line": 68,
+          "label": "app = FastAPI(...)"
+        }
+      ]
+    },
+    {
+      "id": "alpaca",
+      "type": "external",
+      "label": "Alpaca",
+      "sublabel": "broker API",
+      "pos": [
+        940,
+        260
+      ],
+      "size": [
+        130,
+        64
+      ]
+    },
+    {
+      "id": "thesis_lifecycle",
+      "type": "backend",
+      "label": "Trade Thesis Lifecycle",
+      "sublabel": "instantiate/reevaluate/invalidate",
+      "pos": [
+        210,
+        420
+      ],
+      "size": [
+        210,
+        64
+      ],
+      "sources": [
+        {
+          "path": "shared/trade_thesis_engine.py",
+          "line": 146,
+          "label": "instantiate_buy_trade_thesis"
+        },
+        {
+          "path": "ingest/build_position_lifecycles.py",
+          "line": 136,
+          "label": "build_position_lifecycles"
+        }
+      ]
+    },
+    {
+      "id": "risk_engine",
+      "type": "security",
+      "label": "Risk & Permission Engine",
+      "sublabel": "evaluate_proposal(), trading permission",
+      "pos": [
+        470,
+        420
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "sources": [
+        {
+          "path": "shared/risk_engine.py",
+          "line": 102,
+          "end_line": 289,
+          "label": "evaluate_proposal"
+        },
+        {
+          "path": "shared/trading_permission.py",
+          "line": 66,
+          "end_line": 89,
+          "label": "evaluate_trading_permission"
+        }
+      ]
+    },
+    {
+      "id": "digest_atq",
+      "type": "messagebus",
+      "label": "Digest -> ATQ handoff",
+      "sublabel": "digest_runner.py -> Agent Task Queue",
+      "pos": [
+        730,
+        420
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "sources": [
+        {
+          "path": "digest_runner.py",
+          "line": 111,
+          "end_line": 132,
+          "label": "main() -> POST ATQ_URL"
+        },
+        {
+          "path": "atq/main.py",
+          "line": 29,
+          "label": "ATQ FastAPI app"
+        }
+      ]
+    },
+    {
+      "id": "backtest_engine",
+      "type": "backend",
+      "label": "Backtest / Research Engine",
+      "sublabel": "offline, reuses live risk engine",
+      "pos": [
+        470,
+        580
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "sources": [
+        {
+          "path": "ingest/research/backtests/backtest_portfolio_montecarlo.py",
+          "line": 475,
+          "label": "evaluate_proposal() call"
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "regime-to-signal",
+      "from": "market_regime",
+      "to": "signal_gen",
+      "label": "regime snapshot",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 20
+    },
+    {
+      "id": "ingest-to-signal",
+      "from": "ingest_svc",
+      "to": "signal_gen",
+      "label": "invoke per symbol",
+      "labelAt": [
+        190,
+        226
+      ]
+    },
+    {
+      "id": "signal-to-db",
+      "from": "signal_gen",
+      "to": "postgres",
+      "label": "trade_proposals",
+      "labelDy": -20
+    },
+    {
+      "id": "signal-to-thesis",
+      "from": "signal_gen",
+      "to": "thesis_lifecycle",
+      "label": "instantiate on entry",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 20
+    },
+    {
+      "id": "signal-to-risk",
+      "from": "signal_gen",
+      "to": "risk_engine",
+      "label": "proposal-time audit (non-binding)",
+      "variant": "dashed"
+    },
+    {
+      "id": "db-to-api",
+      "from": "postgres",
+      "to": "api_svc",
+      "label": "reads proposals/positions",
+      "labelDy": -20
+    },
+    {
+      "id": "api-to-risk",
+      "from": "api_svc",
+      "to": "risk_engine",
+      "label": "binding clamp (approval time)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "api-to-alpaca",
+      "from": "api_svc",
+      "to": "alpaca",
+      "label": "order submission",
+      "variant": "emphasis",
+      "labelAt": [
+        915,
+        226
+      ]
+    },
+    {
+      "id": "api-to-digest",
+      "from": "api_svc",
+      "to": "digest_atq",
+      "label": "fetched by digest_runner",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 20
+    },
+    {
+      "id": "backtest-to-risk",
+      "from": "backtest_engine",
+      "to": "risk_engine",
+      "label": "same evaluate_proposal()",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDy": -20
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Live path",
+      "items": [
+        "invest-ingest generates and persists proposals hourly",
+        "invest-api clamps and submits orders on approval"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Single source of risk truth",
+      "items": [
+        "risk_engine.evaluate_proposal() is called from the live signal generator (audit-only), the live approval endpoint (binding), and the Monte Carlo backtest -- same function, so live and backtest sizing cannot drift apart",
+        "Trade Thesis Lifecycle and the backtest engine both read/write PostgreSQL directly (omitted as edges here to keep this map readable -- see order-risk-path.json for the exact write)"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "External",
+      "items": [
+        "PostgreSQL is externally managed, not containerized here",
+        "Alpaca is the only broker integration",
+        "Digest/ATQ handoff is this repo's one outbound integration to the homelab's agent task queue"
+      ]
+    }
+  ]
+}
