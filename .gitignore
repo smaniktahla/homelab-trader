@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .DS_Store
 TODO.md
+
+# Archify rendered output (generated from architecture/*.json -- see architecture/README.md)
+architecture/generated/
