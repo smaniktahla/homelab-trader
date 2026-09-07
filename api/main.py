@@ -2080,6 +2080,18 @@ def get_universe_stats():
         return {"total": total, "scanned_recently": scanned, "last_scan": last_scan}
 
 
+@app.get("/api/agent/universe")
+def get_agent_universe(scannable_only: bool = False):
+    """Bulk dump of the tracked equity universe for agent consumers (e.g.
+    company-intel's public-company seed). Same `universe` table backing
+    /api/search and the leaderboard/scanner. GET-only, so it's already
+    covered by the existing X-API-Key agent bypass in _check_auth."""
+    with db() as conn, conn.cursor() as cur:
+        where = "WHERE scannable" if scannable_only else ""
+        cur.execute(f"SELECT symbol, name, exchange, sector, scannable FROM universe {where} ORDER BY symbol")
+        return cur.fetchall()
+
+
 # ── Signal parameters ────────────────────────────────────────────────────────
 
 @app.get("/api/signal-params")
