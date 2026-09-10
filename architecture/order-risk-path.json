@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Order / Risk Path",
+    "subtitle": "How does a strategy-generated BUY proposal become an accepted/rejected order and reach the broker?",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/smaniktahla/homelab-trader",
+      "revision": "713634ccdd0447e588128979fdb788d63a53f9ec"
+    }
+  },
+  "components": [
+    { "id": "signal_gen", "type": "backend", "label": "compute_signals()", "sublabel": "strategy BUY signal", "pos": [20, 260], "size": [140, 64], "sources": [{ "path": "shared/signals.py", "line": 917, "label": "compute_signals" }] },
+    { "id": "calc_buy_qty", "type": "backend", "label": "calc_buy_qty()", "sublabel": "initial sizing", "pos": [190, 260], "size": [140, 64], "sources": [{ "path": "shared/signals.py", "line": 425, "end_line": 453, "label": "calc_buy_qty" }] },
+    { "id": "proposal", "type": "database", "label": "trade_proposals", "sublabel": "proposal persisted", "pos": [360, 260], "size": [140, 64], "sources": [{ "path": "shared/signals.py", "line": 1228, "end_line": 1251, "label": "INSERT trade_proposals" }] },
+    { "id": "proposal_audit", "type": "backend", "label": "Proposal-time audit", "sublabel": "evaluate_proposal(), non-binding", "pos": [355, 420], "size": [190, 64], "sources": [{ "path": "shared/signals.py", "line": 1257, "end_line": 1283, "label": "audit-only evaluate_proposal() call" }] },
+    { "id": "decision_endpoint", "type": "backend", "label": "Trade decision endpoint", "sublabel": "execute_trade / decide_proposal", "pos": [530, 260], "size": [200, 64], "sources": [{ "path": "api/main.py", "line": 1579, "label": "execute_trade" }, { "path": "api/main.py", "line": 1739, "label": "decide_proposal" }] },
+    { "id": "trading_permission", "type": "security", "label": "Trading permission gate", "sublabel": "account-level drawdown/loss-streak pause", "pos": [553, 420], "size": [220, 64], "sources": [{ "path": "shared/trading_permission.py", "line": 66, "end_line": 89, "label": "evaluate_trading_permission" }] },
+    { "id": "risk_clamp", "type": "backend", "label": "evaluate_proposal()", "sublabel": "binding clamp (6 constraints)", "pos": [760, 260], "size": [200, 80], "sources": [{ "path": "shared/risk_engine.py", "line": 102, "end_line": 289, "label": "evaluate_proposal" }, { "path": "api/main.py", "line": 1401, "end_line": 1471, "label": "_clamp_to_risk_engine" }] },
+    { "id": "order_submit", "type": "backend", "label": "Order submission", "sublabel": "market order + OTO stop", "pos": [990, 260], "size": [170, 64], "sources": [{ "path": "api/main.py", "line": 1624, "end_line": 1634, "label": "order_payload -> alpaca()" }] },
+    { "id": "alpaca", "type": "external", "label": "Alpaca", "sublabel": "broker API", "pos": [1190, 260], "size": [110, 64] }
+  ],
+  "connections": [
+    { "id": "signal-to-sizing", "from": "signal_gen", "to": "calc_buy_qty", "label": "BUY side + price", "variant": "emphasis", "labelDy": -26 },
+    { "id": "sizing-to-proposal", "from": "calc_buy_qty", "to": "proposal", "label": "requested qty", "labelDy": -26 },
+    { "id": "proposal-to-audit", "from": "proposal", "to": "proposal_audit", "label": "record-only decision", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "id": "proposal-to-decision", "from": "proposal", "to": "decision_endpoint", "label": "approve / manual trade", "labelDy": -26 },
+    { "id": "decision-to-permission", "from": "decision_endpoint", "to": "trading_permission", "label": "check new_entries_allowed", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "id": "permission-to-clamp", "from": "trading_permission", "to": "risk_clamp", "label": "allowed -> re-evaluate", "variant": "security", "fromSide": "right", "toSide": "bottom", "via": [[860, 452], [860, 340]] },
+    { "id": "decision-to-clamp", "from": "decision_endpoint", "to": "risk_clamp", "label": "requested_qty, planned stop", "labelDy": -26 },
+    { "id": "clamp-to-order", "from": "risk_clamp", "to": "order_submit", "label": "approved_quantity", "variant": "emphasis", "labelAt": [1015, 234] },
+    { "id": "order-to-alpaca", "from": "order_submit", "to": "alpaca", "label": "POST /v2/orders (oto stop_loss)", "variant": "emphasis", "labelDy": -26 }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Sizing", "items": ["calc_buy_qty() sets the strategy's own upper-bound requested qty (allocation-cap formula)", "trade_proposals row is the durable record of that request"] },
+    { "dot": "amber", "title": "Risk clamp (authoritative)", "items": ["evaluate_proposal() is the ONE place approved_quantity is decided: min() of buying-power, position-allocation, risk-budget (stop distance), portfolio open-risk, sector exposure, and optional volatility-budget (VR-2, dark by default)", "Called twice: once at proposal time (audit-only, never changes qty) and again at approval time inside _clamp_to_risk_engine (binding)"] },
+    { "dot": "rose", "title": "Gates", "items": ["Account-level trading_permission check runs before any per-trade constraint math", "Rejection (qty < 1) raises HTTPException(400) -- order never reaches Alpaca"] }
+  ]
+}
