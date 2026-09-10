@@ -31,6 +31,28 @@ Gated behind structure_aware_stop_enabled (signal_params, default 0/off)
 trade_thesis_instantiation_enabled. With the flag off,
 compute_signals()'s planned_initial_stop_price is byte-for-byte the same
 percentage calculation as before this PR.
+
+ATR-stop mode (Volatility Sizing epic, follow-on branch after the
+quantity-overlay branch was closed -- see
+docs/volatility-sizing-vr0-reconciliation.md and the epic's DocMost
+closeout note): reads the daily-timeframe Wilder ATR shared/market_structure.py
+already computes and persists into market_structure_history.component_values
+["daily"]["volatility"]["atr"] -- same "compute once elsewhere, read back
+here" split as the structure-aware mode above, no new ATR calculation
+introduced. stop_price = price - (atr_stop_multiple * atr), clamped so the
+implied risk_per_share/price ratio never falls outside
+[atr_stop_min_pct, atr_stop_max_pct] -- a numerical safeguard against a
+near-zero stop (unusually calm ATR reading) or an absurdly wide one
+(an ATR spike, e.g. an earnings gap), never a way to rescue a genuinely
+invalid reading. Gated behind atr_stop_enabled (signal_params, default
+0/off), checked BEFORE the structure-aware check below -- with the flag
+off, behavior is unchanged from before this mode existed. This module
+does not decide how much size a wider or narrower stop implies;
+shared/risk_engine.py's existing risk_budget_dollars / risk_per_share
+math (unchanged by this PR) is what turns a stop distance into a
+quantity -- this module only ever changes what value
+planned_initial_stop_price is computed from, per the module's own
+opening paragraph.
 """
 
 import logging
@@ -42,6 +64,10 @@ log = logging.getLogger(__name__)
 STOP_RESOLVER_DEFAULTS = {
     "structure_aware_stop_enabled": 0,
     "max_structure_stop_multiple": 2.5,
+    "atr_stop_enabled": 0,
+    "atr_stop_multiple": 2.0,
+    "atr_stop_min_pct": 0.02,
+    "atr_stop_max_pct": 0.25,
 }
 
 
@@ -78,19 +104,73 @@ def _nearest_support_price(conn, symbol):
     return float(nearest_support["price"])
 
 
+def _daily_atr(conn, symbol):
+    """Latest persisted daily-timeframe Wilder ATR (period =
+    market_structure.ATR_PERIOD) from market_structure_history, or None if
+    no snapshot exists yet or this cycle's ATR couldn't be computed
+    (insufficient history) -- never recomputed here, same "read whatever
+    update_market_structure() already stored" convention as
+    _nearest_support_price above."""
+    row = load_latest_market_structure(conn, symbol)
+    if not row:
+        return None
+    component_values = row.get("component_values") or {}
+    daily = component_values.get("daily") or {}
+    volatility = daily.get("volatility") or {}
+    atr = volatility.get("atr")
+    return float(atr) if atr is not None else None
+
+
+def _atr_stop_price(conn, symbol, price, params):
+    """Returns (stop_price, atr_value). stop_price is None if no ATR
+    reading is available yet (never a reason to block a proposal --
+    caller falls through to the next resolver tier). atr_value is
+    returned regardless, for audit, same as structure_support_price below
+    being reported even on a fallback."""
+    atr = _daily_atr(conn, symbol)
+    if atr is None or atr <= 0 or not price or price <= 0:
+        return None, atr
+
+    multiple = params.get("atr_stop_multiple", STOP_RESOLVER_DEFAULTS["atr_stop_multiple"])
+    min_pct = params.get("atr_stop_min_pct", STOP_RESOLVER_DEFAULTS["atr_stop_min_pct"])
+    max_pct = params.get("atr_stop_max_pct", STOP_RESOLVER_DEFAULTS["atr_stop_max_pct"])
+
+    raw_distance = atr * multiple
+    clamped_distance = max(price * min_pct, min(raw_distance, price * max_pct))
+    stop_price = price - clamped_distance
+    if stop_price <= 0:
+        return None, atr
+    return stop_price, atr
+
+
 def resolve_initial_stop_price(conn, symbol, price, percentage_stop_price, params=None):
-    """Returns {"stop_price", "source", "structure_support_price"}.
-    source is "structure_support" when the structure-derived level was
-    used, "percentage_fallback" otherwise (no support zone found, support
-    zone at/above price, or support zone failed the sanity-distance cap)."""
+    """Returns {"stop_price", "source", "structure_support_price",
+    "atr_value"}. source is "atr_stop" when the ATR-derived level was used
+    (checked first, gated behind atr_stop_enabled), "structure_support"
+    when the structure-derived level was used instead (checked next, same
+    as before this mode existed), "percentage_fallback" otherwise. With
+    both atr_stop_enabled and structure_aware_stop_enabled off (the
+    default), this function's behavior -- and therefore
+    planned_initial_stop_price -- is byte-for-byte identical to before
+    either mode existed."""
     params = params if params is not None else STOP_RESOLVER_DEFAULTS
+
+    if params.get("atr_stop_enabled"):
+        atr_stop, atr_value = _atr_stop_price(conn, symbol, price, params)
+        if atr_stop is not None:
+            log.info(f"Stop resolver {symbol}: using ATR stop {atr_stop:.2f} "
+                      f"(ATR={atr_value:.4f}, percentage stop would have been {percentage_stop_price:.2f})")
+            return {"stop_price": atr_stop, "source": "atr_stop",
+                    "structure_support_price": None, "atr_value": atr_value}
+        # else: no ATR reading yet -- fall through to the tiers below,
+        # same "never block a proposal" discipline as the structure tier.
 
     support_price = _nearest_support_price(conn, symbol)
     percentage_distance = price - percentage_stop_price
 
     if support_price is None or support_price <= 0 or support_price >= price:
         return {"stop_price": percentage_stop_price, "source": "percentage_fallback",
-                "structure_support_price": support_price}
+                "structure_support_price": support_price, "atr_value": None}
 
     support_distance = price - support_price
     max_distance = percentage_distance * params.get(
@@ -102,9 +182,9 @@ def resolve_initial_stop_price(conn, symbol, price, percentage_stop_price, param
             f"{max_distance:.2f} sanity cap -- falling back to percentage stop"
         )
         return {"stop_price": percentage_stop_price, "source": "percentage_fallback",
-                "structure_support_price": support_price}
+                "structure_support_price": support_price, "atr_value": None}
 
     log.info(f"Stop resolver {symbol}: using structure support {support_price:.2f} "
               f"(percentage stop would have been {percentage_stop_price:.2f})")
     return {"stop_price": support_price, "source": "structure_support",
-            "structure_support_price": support_price}
+            "structure_support_price": support_price, "atr_value": None}
