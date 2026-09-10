@@ -165,6 +165,35 @@ def test_planned_stop_uses_structure_support_when_flag_enabled(conn, alpaca_base
     assert float(stop_price) == pytest.approx(support_price, rel=1e-6)
 
 
+def test_planned_stop_uses_atr_when_flag_enabled(conn, alpaca_base):
+    """End-to-end proof that atr_stop_enabled controls
+    trade_proposals.planned_initial_stop_price through the real
+    compute_signals() path -- same shape as the structure-aware test
+    above, for the ATR-stop mode (Volatility Sizing epic follow-on
+    branch)."""
+    closes = _bullish_buy_closes()
+    _set_low_threshold_gate_params(conn)
+    _set_signal_param(conn, "atr_stop_enabled", 1)
+    _set_signal_param(conn, "atr_stop_multiple", 2.0)
+    _set_signal_param(conn, "atr_stop_min_pct", 0.02)
+    _set_signal_param(conn, "atr_stop_max_pct", 0.25)
+    _set_signal_param(conn, "stop_loss_pct", 0.08)
+    _seed_signal_fixture(conn, "AAPL", closes)
+
+    price = closes[-1]
+    atr_value = 3.0
+    ctx = dict(_STRUCTURE_CTX, daily={"volatility": {"atr": atr_value}})
+    ms.store_market_structure_day(conn, date.today(), "AAPL", ctx)
+
+    _run_compute_signals(conn, alpaca_base, closes)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT planned_initial_stop_price FROM trade_proposals WHERE symbol='AAPL' AND side='buy'")
+        stop_price = cur.fetchone()[0]
+    expected = price - (atr_value * 2.0)  # within [2%, 25%] of price, clamp inactive
+    assert float(stop_price) == pytest.approx(expected, rel=1e-6)
+
+
 def test_falls_back_to_percentage_when_support_exceeds_sanity_cap(conn, alpaca_base):
     closes = _bullish_buy_closes()
     _set_low_threshold_gate_params(conn)

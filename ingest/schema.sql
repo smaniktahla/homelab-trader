@@ -1023,6 +1023,26 @@ INSERT INTO signal_params (key, value, description) VALUES
     ('max_structure_stop_multiple', 2.5, 'Sanity cap: a structure support zone more than this many times farther from price than the plain percentage stop falls back to the percentage stop instead')
 ON CONFLICT (key) DO NOTHING;
 
+-- ATR-Stop mode (Volatility Sizing epic follow-on branch, see
+-- docs/volatility-sizing-vr0-reconciliation.md and the epic's DocMost
+-- closeout note -- the quantity-overlay branch was closed; this is a
+-- genuinely different hypothesis: volatility affects STOP DISTANCE, not
+-- a second quantity multiplier). Derives planned_initial_stop_price from
+-- shared/market_structure.py's already-persisted daily Wilder ATR
+-- instead of a flat percentage, when a valid ATR reading exists,
+-- clamped to [atr_stop_min_pct, atr_stop_max_pct] of price. Checked
+-- BEFORE structure_aware_stop_enabled in
+-- trade_thesis_stop_resolver.py::resolve_initial_stop_price(). Disabled
+-- by default: existing planned_initial_stop_price is byte-for-byte
+-- unchanged until a human flips atr_stop_enabled to 1, same precedent
+-- as every other experimental sizing/stop flag above.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('atr_stop_enabled', 0, 'Master switch for deriving planned_initial_stop_price from daily ATR instead of a flat percentage (0=off, matches behavior before this mode existed)'),
+    ('atr_stop_multiple', 2.0, 'Stop distance = atr_stop_multiple * daily ATR, before the min/max_pct clamp below'),
+    ('atr_stop_min_pct', 0.02, 'Floor: the ATR-derived stop distance is never less than this fraction of price, regardless of how small ATR reads'),
+    ('atr_stop_max_pct', 0.25, 'Cap: the ATR-derived stop distance is never more than this fraction of price, regardless of how large ATR reads')
+ON CONFLICT (key) DO NOTHING;
+
 -- Exit Taxonomy (PR 8, shared/signals.py::check_thesis_invalidation_sell)
 -- -- master switch for proposing sells on trade-thesis invalidation
 -- (exit_reason='thesis_invalidated'), distinct from trade_thesis_instantiation_enabled
