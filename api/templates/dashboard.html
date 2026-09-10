@@ -280,6 +280,20 @@
   .action-badge.action-sell       { background:#2e1a10; color:#f0a060; }
   .competes-with { font-size:.72rem; color:#888; margin-top:4px; font-style:italic; }
 
+  /* Risk-engine outcome badge (risk_outcome/risk_binding_constraint/
+     risk_approved_quantity from GET /api/proposals -- computed at
+     proposal-generation time by shared/risk_engine.py::evaluate_proposal()
+     and stored in risk_decisions, but until now never surfaced on the card
+     itself, so a proposal could read "buy 62 shares" with the risk engine
+     having already computed it would reject or reduce that. Shown so the
+     card matches what Approve will actually do instead of the user finding
+     out only after clicking it. */
+  .risk-badge { display:inline-block; font-size:.7rem; font-weight:700;
+    padding:2px 9px; border-radius:12px; margin-left:6px; }
+  .risk-badge.rejected { background:#3a1010; color:#f75f5f; }
+  .risk-badge.reduced  { background:#2a2410; color:#e0c060; }
+  .risk-badge.approved { background:#1a3a2a; color:#3ecf6e; }
+
   .proposal-cluster { margin-bottom:14px; }
   .proposal-cluster:last-child { margin-bottom:0; }
   .cluster-header { font-size:.68rem; text-transform:uppercase; letter-spacing:.04em;
@@ -987,6 +1001,21 @@ function _proposalCard(p, expanded) {
     ? `<span style="color:#e8a33d;font-size:.75rem;font-weight:600;margin-left:6px" title="A protective stop on ${p.symbol} is stuck in Alpaca's pending_cancel state, so the shares still read as unavailable there. Approving this may 400 until it clears.">⏳ Pending cancel (Alpaca)</span>`
     : '';
 
+  // risk_outcome only rides along on buy-side rows where proposal ranking
+  // ran (see _load_latest_risk_decisions in api/main.py) -- p.qty is the
+  // strategy's raw requested quantity, risk_approved_quantity is what
+  // evaluate_proposal() actually cleared at generation time. Re-checked
+  // (and clamped) again for real at Approve time, so this is a preview,
+  // not a guarantee -- but it beats finding out only after clicking.
+  const riskRejected = p.risk_outcome === 'rejected';
+  const riskReduced = p.risk_outcome === 'reduced';
+  const riskConstraintText = (p.risk_binding_constraint || '').replace(/_/g, ' ');
+  const riskBadge = riskRejected
+    ? `<span class="risk-badge rejected" title="Risk engine would reject this trade${riskConstraintText ? ': ' + riskConstraintText : ''}">⛔ risk: rejected${riskConstraintText ? ' (' + riskConstraintText + ')' : ''}</span>`
+    : riskReduced
+    ? `<span class="risk-badge reduced" title="Risk engine would reduce this trade${riskConstraintText ? ': ' + riskConstraintText : ''}">risk: reduced to ${p.risk_approved_quantity ?? '?'}</span>`
+    : '';
+
   if (!expanded) {
     // Collapsed cluster alternative: one compact line, no decision-factors/
     // market-context detail -- expand the top pick instead to see those.
@@ -994,11 +1023,11 @@ function _proposalCard(p, expanded) {
     <div class="proposal-row compact">
       <div class="prop-info">
         <strong>${p.qty ?? '?'} <a href="/symbol/${p.symbol}">${p.symbol}</a></strong>
-        ${priorityStars} ${actionBadge} ${stopCancelPendingBadge}
+        ${priorityStars} ${actionBadge} ${riskBadge} ${stopCancelPendingBadge}
         ${estCost ? `<span style="color:#888;font-size:.78rem;margin-left:8px">${estCost}</span>` : ''}
       </div>
       <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
-        <button class="btn-sm btn-buy" onclick="approveProposal(this, ${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
+        <button class="btn-sm btn-buy" ${riskRejected ? 'disabled title="Risk engine would reject this trade' + (riskConstraintText ? ': ' + riskConstraintText : '') + '"' : ''} onclick="approveProposal(this, ${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
         <button class="btn-sm btn-sell" onclick="rejectProposal(this, ${p.id})">Reject</button>
       </div>
     </div>`;
@@ -1085,7 +1114,7 @@ function _proposalCard(p, expanded) {
       <strong>${p.side.toUpperCase()} ${p.qty ?? '?'} <a href="/symbol/${p.symbol}">${p.symbol}</a></strong>
       ${exitTag}
       &nbsp;<span style="color:#888;font-size:.8rem">score ${p.signal_score ?? '—'}</span>
-      ${priorityStars} ${actionBadge} ${stopCancelPendingBadge}
+      ${priorityStars} ${actionBadge} ${riskBadge} ${stopCancelPendingBadge}
       ${estCost ? `<span style="color:#f7c94f;font-size:.82rem;margin-left:8px">${estCost}</span>` : ''}
       ${opportunityCostHtml}
       ${decisionFactorsHtml}
@@ -1093,7 +1122,7 @@ function _proposalCard(p, expanded) {
     </div>
     <div class="prop-actions" style="display:flex;align-items:center;gap:8px">
       ${p.qty == null ? `<input id="prop-qty-${p.id}" type="number" min="0.001" step="0.001" placeholder="qty" style="width:70px;padding:4px 6px;background:#12151f;border:1px solid #4f8ef7;border-radius:4px;color:#e8eaf6;font-size:.85rem">` : ''}
-      <button class="btn-sm btn-buy" onclick="approveProposal(this, ${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
+      <button class="btn-sm btn-buy" ${riskRejected ? 'disabled title="Risk engine would reject this trade' + (riskConstraintText ? ': ' + riskConstraintText : '') + '"' : ''} onclick="approveProposal(this, ${p.id}, '${p.symbol}', '${p.side}', ${p.qty === null ? null : p.qty}, ${p.current_price ?? 0})">Approve</button>
       <button class="btn-sm btn-sell" onclick="rejectProposal(this, ${p.id})">Reject</button>
     </div>
   </div>`;
