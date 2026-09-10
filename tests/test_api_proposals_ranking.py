@@ -7,6 +7,7 @@ tests/test_fixture_equivalence*.py is unaffected.
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 import psycopg2.extras
 import pytest
@@ -120,6 +121,39 @@ def test_get_proposals_degrades_gracefully_when_alpaca_calls_fail(api_client, co
     # Ranking still runs (positions/orders fail open to empty lists) --
     # a single unmapped-cost-free proposal is still just the top tier.
     assert body["proposals"][0]["priority_tier"] == 1
+
+
+def _insert_losing_lifecycle(conn, symbol, closed_at):
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO position_lifecycles (symbol, status, opened_at, closed_at, qty, net_pnl)
+            VALUES (%s, 'closed', %s, %s, 10, -50.0)
+        """, (symbol, closed_at - timedelta(days=1), closed_at))
+    conn.commit()
+
+
+def test_get_proposals_buy_flagged_when_trading_permission_denied(api_client, conn):
+    # Regression: compute_signals() only checks trading_permission at
+    # proposal-generation time (shared/signals.py), so a BUY proposal
+    # created while new entries were still allowed sits in trade_proposals
+    # looking identical to any other actionable one even after a
+    # subsequent loss streak breaches the limit -- the first sign of the
+    # mismatch used to be a 400 from _clamp_to_risk_engine() on Approve.
+    _seed_universe(conn, "NI", "Utilities")
+    _seed_price(conn, "NI", 50.0)
+    _seed_proposal(conn, "NI", signal_score=85)
+
+    now = datetime.now(timezone.utc)
+    for i in range(4):
+        _insert_losing_lifecycle(conn, "NI", now - timedelta(days=i))
+
+    with requests_mock.Mocker() as m:
+        _mock_common_alpaca(m)
+        r = api_client.get("/api/proposals", auth=AUTH)
+    assert r.status_code == 200
+    row = r.json()["proposals"][0]
+    assert row["trading_permission_blocked"] is True
+    assert "loss_streak_limit" in row["trading_permission_reasons"]
 
 
 def test_get_proposals_empty_returns_empty_list_no_500(api_client, conn):
