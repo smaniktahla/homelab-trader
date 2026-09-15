@@ -1,9 +1,10 @@
 """
-PR 17, Hypothesis-Driven Trading Architecture epic. Confirms
+PR 17-18, Hypothesis-Driven Trading Architecture epic. Confirms
 strategy_registry.py's overlay functions match direct calls to the
-underlying indicator primitives per bar -- the same as-of-bar-t-safe
+underlying indicator primitives -- the same as-of-bar-t-safe
 per-bar-loop pattern api/main.py's existing GET /api/prices endpoint
-already uses in production for Bollinger bands.
+already uses in production for Bollinger bands, or (for SuperTrend, PR 18)
+a direct call to its own single-pass band recursion.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -11,7 +12,8 @@ from datetime import datetime, timedelta, timezone
 from backtest_engine import Bar
 from market_structure import ema
 from signals import compute_bollinger
-from strategy_registry import STRATEGIES, _bollinger_overlays, _ema_crossover_overlays
+from strategy_registry import STRATEGIES, _bollinger_overlays, _ema_crossover_overlays, _supertrend_overlays
+from supertrend_strategy import _supertrend_bands
 
 SYMBOL = "TEST"
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -24,8 +26,12 @@ def _bars(closes):
     ]
 
 
-def test_registry_has_both_pr16_strategies():
-    assert set(STRATEGIES.keys()) == {"bollinger_breakout_continuation", "ema_crossover_trend"}
+def test_registry_has_all_pr16_18_strategies():
+    assert set(STRATEGIES.keys()) == {
+        "bollinger_breakout_continuation",
+        "ema_crossover_trend",
+        "supertrend",
+    }
     for spec in STRATEGIES.values():
         assert callable(spec["make_strategy"])
         assert callable(spec["compute_overlays"])
@@ -75,3 +81,25 @@ def test_ema_overlays_handle_too_short_series_without_raising():
     overlays = _ema_crossover_overlays(bars, fast_period=3, slow_period=5)
     for o in overlays:
         assert all(v["value"] is None for v in o["values"])
+
+
+def test_supertrend_overlays_match_direct_supertrend_bands_call():
+    closes = [100.0] * 5 + [120, 140, 160, 180, 200, 190, 170, 150, 130, 110, 90]
+    bars = _bars(closes)
+    overlays = _supertrend_overlays(bars, period=2, multiplier=1.0)
+    assert {o["name"] for o in overlays} == {"supertrend"}
+
+    trend, final_upper, final_lower = _supertrend_bands(closes, closes, closes, 2, 1.0)
+    expected = [
+        final_lower[i] if trend[i] == 1 else final_upper[i] if trend[i] == -1 else None
+        for i in range(len(closes))
+    ]
+    values = overlays[0]["values"]
+    assert [v["value"] for v in values] == expected
+    assert values[0]["ts"] == bars[0].ts.isoformat()
+
+
+def test_supertrend_overlays_handle_too_short_series_without_raising():
+    bars = _bars([100.0, 101.0, 102.0])  # far short of period=10 default
+    overlays = _supertrend_overlays(bars)
+    assert all(v["value"] is None for v in overlays[0]["values"])

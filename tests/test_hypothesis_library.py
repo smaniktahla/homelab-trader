@@ -25,6 +25,9 @@ SEEDED_TYPE_KEYS = {"mean_reversion_oversold", "mean_reversion_overbought"}
 # default_entry_conditions=None can be asserted specifically without
 # complicating the PR13-era generic-loop test above.
 PR16_TYPE_KEYS = {"bollinger_breakout_continuation", "ema_crossover_trend"}
+# PR 18 seed row -- same deliberate NULL condition-tree precedent as
+# ema_crossover_trend above (also a two-series-state crossover).
+PR18_TYPE_KEYS = {"supertrend"}
 # Price Structure epic PR G seed rows, built on PR A/B/B2's structural_
 # zones/structural_events infrastructure via PR C's feature_registry
 # providers.
@@ -90,6 +93,25 @@ def test_ema_crossover_trend_has_no_condition_tree_template(conn):
     # single-feature condition would be actively misleading. See
     # shared/ema_crossover_strategy.py for the real (Python) semantics.
     spec = get_hypothesis_type(conn, "ema_crossover_trend")
+    assert spec.default_entry_conditions is None
+    assert spec.default_invalidation_spec is None
+
+
+def test_pr18_seeded_types_are_active_and_instantiable(conn):
+    for type_key in PR18_TYPE_KEYS:
+        assert is_legal_hypothesis_type(conn, type_key)
+        assert is_instantiable_hypothesis_type(conn, type_key)
+        spec = get_hypothesis_type(conn, type_key)
+        assert spec.status == "active"
+        assert spec.schema_version == TRADE_THESIS_SCHEMA_VERSION
+
+
+def test_supertrend_has_no_condition_tree_template(conn):
+    # Deliberately NULL, same rationale as ema_crossover_trend above --
+    # SuperTrend's entry/exit is a trend-state flip against the prior
+    # bar's own band, not a single feature vs. a scalar. See
+    # shared/supertrend_strategy.py for the real (Python) semantics.
+    spec = get_hypothesis_type(conn, "supertrend")
     assert spec.default_entry_conditions is None
     assert spec.default_invalidation_spec is None
 
