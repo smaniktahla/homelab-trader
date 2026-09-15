@@ -1234,6 +1234,29 @@ def get_proposals():
         """)
         proposals = cur.fetchall()
 
+        # Flag pending BUY proposals against the account's CURRENT trading
+        # permission (shared/trading_permission.py) -- compute_signals()
+        # only checks this at proposal-generation time, so a proposal
+        # created while new entries were allowed stays sitting here, looking
+        # identical to any other actionable proposal, even after a
+        # subsequent loss-streak/drawdown breach flips new_entries_allowed
+        # to False. Without this, the first the user hears of it is a 400
+        # from _clamp_to_risk_engine() when they click Approve. Read-only
+        # annotation -- never mutates/rejects the stored proposal, same
+        # advisory precedent as stop_cancel_pending below.
+        if any(p["side"] == "buy" for p in proposals):
+            try:
+                p_params = load_params(conn)
+                permission = trading_permission.evaluate_trading_permission(conn, portfolio_value, p_params)
+            except Exception as e:
+                log.warning(f"Trading permission check failed for proposals list: {e}")
+                permission = {"new_entries_allowed": True, "reasons": []}
+            if not permission["new_entries_allowed"]:
+                for p in proposals:
+                    if p["side"] == "buy":
+                        p["trading_permission_blocked"] = True
+                        p["trading_permission_reasons"] = permission["reasons"]
+
         # Flag sell proposals whose symbol has a resting stop order stuck
         # in Alpaca's pending_cancel state (a DELETE was sent but Alpaca
         # never resolved it to canceled -- observed live on WEC, stuck 5
