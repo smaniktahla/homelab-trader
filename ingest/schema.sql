@@ -1286,6 +1286,11 @@ VALUES
      'A faster moving average (default EMA 20) crossing above a slower moving average (default EMA 21) indicates positive trend persistence. Exits on the mirrored crossunder. Entry/exit expressed as a two-EMA crossover, which the current condition-tree grammar cannot represent as a single-feature-vs-scalar template -- see shared/ema_crossover_strategy.py for the actual executable logic.',
      'trend_following', 'v1', '["technical"]'::jsonb,
      NULL, NULL,
+     'active'),
+    ('supertrend', 'SuperTrend',
+     'An ATR-banded trend overlay (default period 10, multiplier 3.0) that flips direction only when price closes decisively through the opposite band indicates positive trend persistence, in the same family as ema_crossover_trend. Entry/exit expressed as a trend-state flip against the prior bar''s own recursively-computed band, which the current condition-tree grammar cannot represent as a single-feature-vs-scalar template -- see shared/supertrend_strategy.py for the actual executable logic.',
+     'trend_following', 'v1', '["technical"]'::jsonb,
+     NULL, NULL,
      'active')
 ON CONFLICT (type_key) DO NOTHING;
 

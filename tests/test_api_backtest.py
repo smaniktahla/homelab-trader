@@ -58,7 +58,7 @@ def test_list_backtest_strategies(api_client, conn):
     r = api_client.get("/api/backtest-strategies", auth=AUTH)
     assert r.status_code == 200
     keys = {s["key"] for s in r.json()}
-    assert keys == {"bollinger_breakout_continuation", "ema_crossover_trend"}
+    assert keys == {"bollinger_breakout_continuation", "ema_crossover_trend", "supertrend"}
 
 
 def test_run_backtest_returns_bars_overlays_signals_fills(api_client, conn):
@@ -85,6 +85,14 @@ def test_run_backtest_with_ema_crossover_strategy(api_client, conn):
     assert r.status_code == 200, r.text
     body = r.json()
     assert {o["name"] for o in body["overlays"]} == {"ema_20", "ema_21"}
+
+
+def test_run_backtest_with_supertrend_strategy(api_client, conn):
+    _seed_price_history(conn, SYMBOL, n=50)
+    r = api_client.get(f"/api/backtest/supertrend/{SYMBOL}?days=60", auth=AUTH)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert {o["name"] for o in body["overlays"]} == {"supertrend"}
 
 
 def test_run_backtest_404_for_unknown_strategy(api_client, conn):

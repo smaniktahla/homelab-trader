@@ -20,6 +20,12 @@ from bollinger_breakout_strategy import DEFAULT_NUM_STD, DEFAULT_PERIOD, make_bo
 from ema_crossover_strategy import DEFAULT_FAST_PERIOD, DEFAULT_SLOW_PERIOD, make_ema_crossover_strategy
 from market_structure import ema
 from signals import compute_bollinger
+from supertrend_strategy import (
+    DEFAULT_MULTIPLIER as SUPERTREND_DEFAULT_MULTIPLIER,
+    DEFAULT_PERIOD as SUPERTREND_DEFAULT_PERIOD,
+    _supertrend_bands,
+    make_supertrend_strategy,
+)
 
 
 def _line_series(name, bars, values):
@@ -57,6 +63,23 @@ def _ema_crossover_overlays(bars, fast_period=DEFAULT_FAST_PERIOD, slow_period=D
     ]
 
 
+def _supertrend_overlays(bars, period=SUPERTREND_DEFAULT_PERIOD, multiplier=SUPERTREND_DEFAULT_MULTIPLIER):
+    # Unlike _bollinger_overlays/_ema_crossover_overlays above, SuperTrend's
+    # band recursion (shared/supertrend_strategy.py) already computes every
+    # bar's value in one pass over the full series -- no need for their
+    # per-bar bars[:i+1] re-slicing, since the recursion IS the as-of-bar-t
+    # computation.
+    highs = [b.high for b in bars]
+    lows = [b.low for b in bars]
+    closes = [b.close for b in bars]
+    trend, final_upper, final_lower = _supertrend_bands(highs, lows, closes, period, multiplier)
+    line = [
+        final_lower[i] if trend[i] == 1 else final_upper[i] if trend[i] == -1 else None
+        for i in range(len(bars))
+    ]
+    return [_line_series("supertrend", bars, line)]
+
+
 STRATEGIES = {
     "bollinger_breakout_continuation": {
         "display_name": "Bollinger Breakout Continuation",
@@ -67,5 +90,10 @@ STRATEGIES = {
         "display_name": "EMA Crossover Trend",
         "make_strategy": make_ema_crossover_strategy,
         "compute_overlays": _ema_crossover_overlays,
+    },
+    "supertrend": {
+        "display_name": "SuperTrend",
+        "make_strategy": make_supertrend_strategy,
+        "compute_overlays": _supertrend_overlays,
     },
 }

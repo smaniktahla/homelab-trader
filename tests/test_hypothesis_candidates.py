@@ -201,6 +201,14 @@ def test_ema_crossover_trend_correctly_fails_generation(conn):
     assert generate_candidates(conn, "ema_crossover_trend", {"technical.rsi_14": [25]}) is None
 
 
+def test_supertrend_correctly_fails_generation(conn):
+    # Same real-world case as ema_crossover_trend above, for PR 18's
+    # equally-deliberate default_entry_conditions=NULL (a trend-state flip
+    # against the prior bar's own band, not a single-feature-vs-scalar
+    # condition).
+    assert generate_candidates(conn, "supertrend", {"technical.rsi_14": [25]}) is None
+
+
 def test_no_partial_batch_left_visible_on_rejection(conn):
     before = len(list_candidate_batches(conn, hypothesis_type=SEEDED_TYPE))
     assert generate_candidates(conn, SEEDED_TYPE, {"market_regime.overall": ["bullish"]}) is None
