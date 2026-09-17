@@ -7,12 +7,16 @@ immutable-once-frozen attempt at that family, tracked through an explicit
 lifecycle) one layer above shared/hypothesis_candidates.py's `Candidate`
 concept (Hypothesis-Driven Trading epic, PR14).
 
-Not wired to candidates/candidate_batches in this PR -- that's SI-3's job
-(register_candidate_as_strategy_version()), kept separate so this schema/
-object-model PR stays dark and inspectable on its own, same staging
-shared/trade_thesis.py (PR1) and shared/backtest_engine.py (PR15) both
-used before anything called them from a live or research path. No API
-either (SI-2).
+SI-3 (register_candidate_as_strategy_version(), below) is the integration
+point into shared/hypothesis_candidates.py's `Candidate` concept
+(Hypothesis-Driven Trading epic, PR14) -- the piece that epic's own
+planned "PR15 -- Strategy Incubator Integration" was supposed to be and
+never was (see docs/hypothesis-driven-phase5-6-llm-compiler-
+investigation.md §2). It only ever creates a strategy_versions row in
+RESEARCH status; nothing here executes, scores, or promotes a candidate.
+Still no live-trading wiring anywhere in this module -- a
+strategy_version's status has no effect outside these tables until a
+later phase reads it.
 
 Lifecycle, per the Strategy Incubator spec's §1:
     RESEARCH -> BACKTEST -> VALIDATION -> WALK_FORWARD -> FROZEN ->
@@ -42,6 +46,8 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+
+import hypothesis_candidates
 
 log = logging.getLogger(__name__)
 
@@ -299,3 +305,36 @@ def freeze(conn, strategy_version_id, code_hash, parameter_hash, *, actor=None, 
         return False
     return transition(conn, strategy_version_id, "FROZEN", actor=actor, reason=reason,
                        _code_hash=code_hash, _parameter_hash=parameter_hash)
+
+
+def register_candidate_as_strategy_version(conn, candidate_id, strategy_id, *, actor=None, description=None):
+    """SI-3: registers an existing Candidate (shared/hypothesis_candidates.py,
+    Hypothesis-Driven Trading epic PR14) as a new strategy_versions row in
+    RESEARCH status under `strategy_id`. hypothesis_type/
+    hypothesis_type_version are copied from the candidate's batch --
+    frozen at registration time, same immutable-provenance precedent
+    candidate_batches.hypothesis_type_version already established, so a
+    later edit to the hypothesis_types catalog entry can never retroactively
+    change what this strategy_version was actually generated against.
+
+    Purely a registration -- does not execute, score, or promote the
+    candidate. From RESEARCH, a human (or, once a later phase's automation
+    exists) advances it via transition()/freeze() exactly like a
+    hand-created strategy_version. Returns the new strategy_version id, or
+    None if candidate_id/strategy_id is unknown or registration fails."""
+    candidate = hypothesis_candidates.get_candidate(conn, candidate_id)
+    if candidate is None:
+        log.warning(f"strategy_lifecycle: unknown candidate_id={candidate_id}")
+        return None
+    batch = hypothesis_candidates.get_candidate_batch(conn, candidate.batch_id)
+    if batch is None:
+        log.warning(f"strategy_lifecycle: candidate {candidate_id}'s batch {candidate.batch_id} not found")
+        return None
+    return register_strategy_version(
+        conn, strategy_id,
+        description=description or f"Registered from candidate {candidate_id} (batch {batch.id})",
+        created_by=actor,
+        hypothesis_type=batch.hypothesis_type,
+        hypothesis_type_version=batch.hypothesis_type_version,
+        candidate_id=candidate_id,
+    )

@@ -154,3 +154,46 @@ def test_strategy_endpoints_require_auth(api_client, conn):
     assert api_client.get("/api/strategies/1").status_code == 401
     assert api_client.post("/api/strategies", json={"strategy_name": "x", "strategy_family": "y"}).status_code == 401
     assert api_client.get("/api/strategy-versions/1").status_code == 401
+
+
+SEEDED_HYPOTHESIS_TYPE = "mean_reversion_oversold"
+
+
+def _generate_candidate(api_client):
+    r = api_client.post(f"/api/hypothesis-types/{SEEDED_HYPOTHESIS_TYPE}/candidates", auth=AUTH, json={
+        "parameter_spec": {"technical.rsi_14": [25]},
+    })
+    assert r.status_code == 200, r.text
+    return r.json()["candidate_ids"][0]
+
+
+def test_register_candidate_as_strategy_version(api_client, conn):
+    strategy_id = _create_strategy(api_client)
+    candidate_id = _generate_candidate(api_client)
+
+    r = api_client.post(f"/api/candidates/{candidate_id}/register-as-strategy-version", auth=AUTH, json={
+        "strategy_id": strategy_id, "actor": "api_test",
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "RESEARCH"
+    version_id = body["id"]
+
+    get_r = api_client.get(f"/api/strategy-versions/{version_id}", auth=AUTH)
+    sv = get_r.json()
+    assert sv["candidate_id"] == candidate_id
+    assert sv["hypothesis_type"] == SEEDED_HYPOTHESIS_TYPE
+    assert sv["created_by"] == "api_test"
+
+
+def test_register_candidate_as_strategy_version_422_for_unknown_candidate(api_client, conn):
+    strategy_id = _create_strategy(api_client)
+    r = api_client.post("/api/candidates/999999/register-as-strategy-version", auth=AUTH, json={
+        "strategy_id": strategy_id,
+    })
+    assert r.status_code == 422
+
+
+def test_register_candidate_as_strategy_version_requires_auth(api_client, conn):
+    r = api_client.post("/api/candidates/1/register-as-strategy-version", json={"strategy_id": 1})
+    assert r.status_code == 401

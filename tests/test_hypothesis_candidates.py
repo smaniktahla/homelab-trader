@@ -9,6 +9,7 @@ per-test cleanup is needed here.
 from hypothesis_library import HypothesisTypeSpec, register_hypothesis_type, update_hypothesis_type
 from hypothesis_candidates import (
     generate_candidates,
+    get_candidate,
     get_candidate_batch,
     list_candidate_batches,
     list_candidates,
@@ -60,6 +61,20 @@ def test_single_feature_sweep_produces_one_candidate_per_value(conn):
 
     candidates = list_candidates(conn, batch_id)
     assert {c.parameter_values["technical.rsi_14"] for c in candidates} == {20, 25, 30}
+
+
+def test_get_candidate_returns_single_candidate_by_own_id(conn):
+    result = generate_candidates(conn, SEEDED_TYPE, {"technical.rsi_14": [25]})
+    assert result is not None
+    batch_id, candidate_ids = result
+    candidate = get_candidate(conn, candidate_ids[0])
+    assert candidate is not None
+    assert candidate.id == candidate_ids[0]
+    assert candidate.batch_id == batch_id
+
+
+def test_get_candidate_none_for_unknown_id(conn):
+    assert get_candidate(conn, 999999) is None
 
 
 def test_multi_feature_sweep_produces_cartesian_product(conn):

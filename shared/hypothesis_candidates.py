@@ -247,6 +247,30 @@ def get_candidate_batch(conn, batch_id):
         return None
 
 
+def get_candidate(conn, candidate_id):
+    """A single candidate by its own id (not a batch). None if it doesn't
+    exist, or on any failure -- fail-open, matching
+    get_candidate_batch()'s contract. Added for the Strategy Incubator
+    epic's SI-3 (shared/strategy_lifecycle.py::
+    register_candidate_as_strategy_version()), which needs to look up one
+    candidate independent of its batch -- list_candidates() below only
+    ever returns a batch's full set."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, batch_id, parameter_values, entry_conditions, invalidation_spec, success_spec
+                FROM candidates WHERE id=%s
+            """, (candidate_id,))
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return Candidate(id=row[0], batch_id=row[1], parameter_values=row[2], entry_conditions=row[3],
+                          invalidation_spec=row[4], success_spec=row[5])
+    except Exception as e:
+        log.warning(f"hypothesis_candidates: get_candidate failed for id={candidate_id}: {e}")
+        return None
+
+
 def list_candidates(conn, batch_id):
     """All candidates in a batch. Empty list (not None) if the batch has no
     candidates or the query fails -- same fail-open list contract as
