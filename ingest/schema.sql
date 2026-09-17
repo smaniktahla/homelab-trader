@@ -1449,3 +1449,103 @@ INSERT INTO signal_params (key, value, description) VALUES
     ('volatility_vol_floor', 0.05, 'Numerical safeguard: forecast_vol is floored at this annualized level before dividing, to prevent a near-zero forecast from producing an extreme multiplier'),
     ('volatility_max_multiplier', 1.0, 'Upper bound on the volatility multiplier -- 1.0 means reductions only, never scales a position above its base notional')
 ON CONFLICT (key) DO NOTHING;
+
+-- Strategy Incubator epic, SI-1 (Phase 1 "Foundations" -- see
+-- docs/strategy-incubator-phase1-foundations-reconciliation.md). New
+-- object one layer above candidates (PR14 of the Hypothesis-Driven
+-- Trading epic): a strategy_version is something that can move through an
+-- explicit lifecycle (shared/strategy_lifecycle.py), independent of
+-- whether it originated from a hand-authored idea, a parameter sweep, or
+-- (once SI-3 exists) a registered Candidate. Deliberately NOT wired to
+-- candidates/candidate_batches in this PR -- SI-3's job, kept separate so
+-- this schema/object-model PR stays dark and inspectable on its own, same
+-- staging as shared/trade_thesis.py (PR1) and shared/backtest_engine.py
+-- (PR15) before anything called them from a live or even a research path.
+--
+-- strategies: the strategy-family level, one row per named idea
+-- ("mean_reversion", "supertrend", ...) -- NOT the same concept as the
+-- legacy, untracked `theses` table referenced elsewhere in this file (see
+-- the trades.thesis_id comment above) or the Hypothesis-Driven epic's
+-- hypothesis_types catalog; a strategy_family groups strategy_versions
+-- the way hypothesis_type groups candidates, but the two hierarchies are
+-- independent until an actual Candidate is registered via SI-3.
+CREATE TABLE IF NOT EXISTS strategies (
+    id             BIGSERIAL PRIMARY KEY,
+    strategy_name  TEXT NOT NULL UNIQUE,
+    strategy_family TEXT NOT NULL,
+    description    TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- strategy_versions: the Incubator spec's own §2 field list, trimmed to
+-- what Phase 1 actually populates -- the validation_*/walk_forward_*/
+-- paper_forward_*/shadow_live_*/approved_at/live_start/retired_at columns
+-- are declared now (cheap, additive, avoids a second migration later,
+-- same reasoning price_history_hourly's `source` column used) but are
+-- only ever written by later, not-yet-built phases; every one of them is
+-- NULL for every row this PR (or SI-2/SI-3) ever creates.
+--
+-- code_hash/parameter_hash are plain TEXT, never computed by this schema
+-- or shared/strategy_lifecycle.py -- the caller freezing a version
+-- supplies them, computed from the exact code/params being frozen (see
+-- freeze()'s docstring). parent_strategy_version_id supports the spec's
+-- §8 mutation-tracking self-reference (e.g. a parameter-mutated variant of
+-- an existing version) -- nothing in this PR creates one, the column just
+-- exists so a later PR doesn't need another migration to add it.
+CREATE TABLE IF NOT EXISTS strategy_versions (
+    id                        BIGSERIAL PRIMARY KEY,
+    strategy_id               BIGINT NOT NULL REFERENCES strategies(id),
+    version_number            INTEGER NOT NULL,
+    status                    TEXT NOT NULL DEFAULT 'RESEARCH',
+    description               TEXT,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_by                TEXT,  -- NULL if unattributed, same convention as hypothesis_type_changes.changed_by
+    git_commit                TEXT,
+    code_hash                 TEXT,
+    parameter_hash            TEXT,
+    parameter_frozen_at       TIMESTAMPTZ,
+    parent_strategy_version_id BIGINT REFERENCES strategy_versions(id),
+    hypothesis_type           TEXT,   -- hypothesis_types.type_key, not FK'd -- point-in-time copy, same
+                                       -- reasoning candidate_batches.hypothesis_type already established
+    hypothesis_type_version   INTEGER,
+    candidate_id              BIGINT REFERENCES candidates(id),  -- set only via SI-3's registration path
+    training_start            TIMESTAMPTZ,
+    training_end              TIMESTAMPTZ,
+    validation_start          TIMESTAMPTZ,
+    validation_end            TIMESTAMPTZ,
+    walk_forward_start        TIMESTAMPTZ,
+    walk_forward_end          TIMESTAMPTZ,
+    paper_forward_start       TIMESTAMPTZ,
+    paper_forward_end         TIMESTAMPTZ,
+    shadow_live_start         TIMESTAMPTZ,
+    shadow_live_end           TIMESTAMPTZ,
+    approved_at               TIMESTAMPTZ,
+    live_start                TIMESTAMPTZ,
+    retired_at                TIMESTAMPTZ,
+    UNIQUE (strategy_id, version_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_versions_strategy_id ON strategy_versions (strategy_id);
+CREATE INDEX IF NOT EXISTS idx_strategy_versions_status ON strategy_versions (status);
+
+-- strategy_version_transitions: append-only audit log per the Incubator
+-- spec's §27 -- every strategy-state transition produces a record. One
+-- row per shared/strategy_lifecycle.py::transition() call, written in the
+-- SAME transaction as the status update it describes (never a status
+-- change without a corresponding audit row). Lighter-weight than
+-- hypothesis_type_changes's before/after full-spec snapshot -- a
+-- transition only needs its own from/to/reason, not the entire
+-- strategy_version row twice.
+CREATE TABLE IF NOT EXISTS strategy_version_transitions (
+    id                   BIGSERIAL PRIMARY KEY,
+    strategy_version_id  BIGINT NOT NULL REFERENCES strategy_versions(id),
+    from_status          TEXT NOT NULL,
+    to_status            TEXT NOT NULL,
+    transitioned_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    actor                TEXT,  -- NULL if unattributed, same convention as hypothesis_type_changes.changed_by
+    reason               TEXT,
+    metadata             JSONB NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_version_transitions_strategy_version_id
+    ON strategy_version_transitions (strategy_version_id, transitioned_at DESC);
