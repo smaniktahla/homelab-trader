@@ -28,6 +28,7 @@ RESET_TABLES = [
     "rule_adherence_checks", "risk_decisions", "trade_theses",
     "candidate_batches", "candidates",
     "structural_swings", "structural_zones", "structural_events", "fair_value_gaps",
+    "strategy_version_transitions", "strategy_versions", "strategies",
 ]
 
 
