@@ -23,6 +23,7 @@ import position_execution_state as pes
 import hypothesis_library
 import hypothesis_candidates
 import strategy_registry
+import strategy_lifecycle
 from backtest_engine import load_bars, run_backtest
 from volume_profile import load_volume_profile
 import dataclasses
@@ -2241,6 +2242,107 @@ def get_candidate_batch_endpoint(batch_id: int):
 def list_candidate_batches_endpoint(hypothesis_type: str | None = None):
     with psycopg2.connect(DB_DSN) as conn:
         return [dataclasses.asdict(b) for b in hypothesis_candidates.list_candidate_batches(conn, hypothesis_type=hypothesis_type)]
+
+
+# ── Strategy Incubator, SI-2 (Phase 1 "Foundations") ───────────────────────
+# Basic read/transition API over shared/strategy_lifecycle.py (SI-1) --
+# see docs/strategy-incubator-phase1-foundations-reconciliation.md. No
+# wiring to candidates/candidate_batches yet (SI-3's job) and no live-
+# trading impact -- a strategy_version's lifecycle status has no effect on
+# anything outside these tables until a future phase reads it. Plain
+# psycopg2.connect(DB_DSN), same reasoning as the hypothesis-types/
+# candidates endpoints above -- shared/strategy_lifecycle.py expects
+# tuple-row cursors.
+
+class StrategyCreate(BaseModel):
+    strategy_name: str
+    strategy_family: str
+    description: Optional[str] = None
+
+@app.post("/api/strategies")
+def create_strategy(body: StrategyCreate):
+    with psycopg2.connect(DB_DSN) as conn:
+        new_id = strategy_lifecycle.register_strategy(
+            conn, body.strategy_name, body.strategy_family, description=body.description)
+    if new_id is None:
+        raise HTTPException(409, f"strategy '{body.strategy_name}' already exists or failed to register")
+    return {"id": new_id, "strategy_name": body.strategy_name}
+
+@app.get("/api/strategies/{strategy_id}")
+def get_strategy_endpoint(strategy_id: int):
+    with psycopg2.connect(DB_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, strategy_name, strategy_family, description, created_at FROM strategies WHERE id=%s",
+                        (strategy_id,))
+            row = cur.fetchone()
+    if row is None:
+        raise HTTPException(404, f"strategy {strategy_id} not found")
+    return {"id": row[0], "strategy_name": row[1], "strategy_family": row[2], "description": row[3],
+            "created_at": row[4].isoformat()}
+
+@app.get("/api/strategies/{strategy_id}/versions")
+def list_strategy_versions_endpoint(strategy_id: int):
+    with psycopg2.connect(DB_DSN) as conn:
+        versions = strategy_lifecycle.list_strategy_versions(conn, strategy_id)
+    return [dataclasses.asdict(v) for v in versions]
+
+class StrategyVersionCreate(BaseModel):
+    strategy_id: int
+    description: Optional[str] = None
+    created_by: Optional[str] = None
+    git_commit: Optional[str] = None
+    parent_strategy_version_id: Optional[int] = None
+
+@app.post("/api/strategy-versions")
+def create_strategy_version(body: StrategyVersionCreate):
+    with psycopg2.connect(DB_DSN) as conn:
+        new_id = strategy_lifecycle.register_strategy_version(
+            conn, body.strategy_id, description=body.description, created_by=body.created_by,
+            git_commit=body.git_commit, parent_strategy_version_id=body.parent_strategy_version_id)
+    if new_id is None:
+        raise HTTPException(422, f"strategy_version creation failed for strategy_id={body.strategy_id} "
+                                  f"(unknown strategy_id or a DB error)")
+    return {"id": new_id, "strategy_id": body.strategy_id}
+
+@app.get("/api/strategy-versions/{strategy_version_id}")
+def get_strategy_version_endpoint(strategy_version_id: int):
+    with psycopg2.connect(DB_DSN) as conn:
+        sv = strategy_lifecycle.get_strategy_version(conn, strategy_version_id)
+    if sv is None:
+        raise HTTPException(404, f"strategy_version {strategy_version_id} not found")
+    return dataclasses.asdict(sv)
+
+class StrategyVersionTransitionRequest(BaseModel):
+    to_status: str
+    actor: Optional[str] = None
+    reason: Optional[str] = None
+    metadata: Optional[dict] = None
+
+@app.post("/api/strategy-versions/{strategy_version_id}/transition")
+def transition_strategy_version(strategy_version_id: int, body: StrategyVersionTransitionRequest):
+    with psycopg2.connect(DB_DSN) as conn:
+        ok = strategy_lifecycle.transition(
+            conn, strategy_version_id, body.to_status, actor=body.actor, reason=body.reason, metadata=body.metadata)
+    if not ok:
+        raise HTTPException(422, f"transition to '{body.to_status}' failed for strategy_version "
+                                  f"{strategy_version_id} (unknown id or illegal transition)")
+    return {"id": strategy_version_id, "status": body.to_status}
+
+class StrategyVersionFreezeRequest(BaseModel):
+    code_hash: str
+    parameter_hash: str
+    actor: Optional[str] = None
+    reason: Optional[str] = None
+
+@app.post("/api/strategy-versions/{strategy_version_id}/freeze")
+def freeze_strategy_version(strategy_version_id: int, body: StrategyVersionFreezeRequest):
+    with psycopg2.connect(DB_DSN) as conn:
+        ok = strategy_lifecycle.freeze(
+            conn, strategy_version_id, body.code_hash, body.parameter_hash, actor=body.actor, reason=body.reason)
+    if not ok:
+        raise HTTPException(422, f"freeze failed for strategy_version {strategy_version_id} "
+                                  f"(not in WALK_FORWARD status, unknown id, or missing hashes)")
+    return {"id": strategy_version_id, "status": "FROZEN"}
 
 
 # ── Backtest Visualization (PR 17, Hypothesis-Driven Trading Architecture ──
