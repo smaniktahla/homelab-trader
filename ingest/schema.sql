@@ -1291,6 +1291,11 @@ VALUES
      'An ATR-banded trend overlay (default period 10, multiplier 3.0) that flips direction only when price closes decisively through the opposite band indicates positive trend persistence, in the same family as ema_crossover_trend. Entry/exit expressed as a trend-state flip against the prior bar''s own recursively-computed band, which the current condition-tree grammar cannot represent as a single-feature-vs-scalar template -- see shared/supertrend_strategy.py for the actual executable logic.',
      'trend_following', 'v1', '["technical"]'::jsonb,
      NULL, NULL,
+     'active'),
+    ('daily_8ema_momentum_retest', 'Daily 8 EMA Pullback (H1, baseline)',
+     'Daily EMA Pullback epic, H1 baseline variant (no trend/slope/structure filter yet -- those are later, separate hypotheses per the epic''s own incremental progression). A daily close within one ATR of its own 8-period EMA that closes bullish (close > open) on that same bar tends to continue; invalidated by a close more than one ATR below the EMA. Entry/exit expressed as a volatility-relative distance-and-direction condition against the bar''s own EMA/ATR, which the current condition-tree grammar cannot represent as a single-feature-vs-scalar template -- see shared/daily_ema_pullback_strategy.py for the actual executable logic.',
+     'trend_following', 'v1', '["technical"]'::jsonb,
+     NULL, NULL,
      'active')
 ON CONFLICT (type_key) DO NOTHING;
 

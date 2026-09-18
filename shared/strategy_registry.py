@@ -17,6 +17,11 @@ on-demand visualization request runs at.
 """
 
 from bollinger_breakout_strategy import DEFAULT_NUM_STD, DEFAULT_PERIOD, make_bollinger_breakout_strategy
+from daily_ema_pullback_strategy import (
+    DEFAULT_ATR_PERIOD as PULLBACK_DEFAULT_ATR_PERIOD,
+    DEFAULT_EMA_PERIOD as PULLBACK_DEFAULT_EMA_PERIOD,
+    make_daily_8ema_pullback_strategy,
+)
 from ema_crossover_strategy import DEFAULT_FAST_PERIOD, DEFAULT_SLOW_PERIOD, make_ema_crossover_strategy
 from market_structure import ema
 from signals import compute_bollinger
@@ -80,6 +85,12 @@ def _supertrend_overlays(bars, period=SUPERTREND_DEFAULT_PERIOD, multiplier=SUPE
     return [_line_series("supertrend", bars, line)]
 
 
+def _daily_8ema_pullback_overlays(bars, ema_period=PULLBACK_DEFAULT_EMA_PERIOD, atr_period=PULLBACK_DEFAULT_ATR_PERIOD):
+    closes = [b.close for b in bars]
+    line = [ema(closes[: i + 1], ema_period) for i in range(len(closes))]
+    return [_line_series(f"ema_{ema_period}", bars, line)]
+
+
 STRATEGIES = {
     "bollinger_breakout_continuation": {
         "display_name": "Bollinger Breakout Continuation",
@@ -95,5 +106,10 @@ STRATEGIES = {
         "display_name": "SuperTrend",
         "make_strategy": make_supertrend_strategy,
         "compute_overlays": _supertrend_overlays,
+    },
+    "daily_8ema_momentum_retest": {
+        "display_name": "Daily 8 EMA Pullback (H1)",
+        "make_strategy": make_daily_8ema_pullback_strategy,
+        "compute_overlays": _daily_8ema_pullback_overlays,
     },
 }

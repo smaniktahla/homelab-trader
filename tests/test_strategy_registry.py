@@ -12,7 +12,13 @@ from datetime import datetime, timedelta, timezone
 from backtest_engine import Bar
 from market_structure import ema
 from signals import compute_bollinger
-from strategy_registry import STRATEGIES, _bollinger_overlays, _ema_crossover_overlays, _supertrend_overlays
+from strategy_registry import (
+    STRATEGIES,
+    _bollinger_overlays,
+    _daily_8ema_pullback_overlays,
+    _ema_crossover_overlays,
+    _supertrend_overlays,
+)
 from supertrend_strategy import _supertrend_bands
 
 SYMBOL = "TEST"
@@ -31,6 +37,7 @@ def test_registry_has_all_pr16_18_strategies():
         "bollinger_breakout_continuation",
         "ema_crossover_trend",
         "supertrend",
+        "daily_8ema_momentum_retest",
     }
     for spec in STRATEGIES.values():
         assert callable(spec["make_strategy"])
@@ -102,4 +109,22 @@ def test_supertrend_overlays_match_direct_supertrend_bands_call():
 def test_supertrend_overlays_handle_too_short_series_without_raising():
     bars = _bars([100.0, 101.0, 102.0])  # far short of period=10 default
     overlays = _supertrend_overlays(bars)
+    assert all(v["value"] is None for v in overlays[0]["values"])
+
+
+def test_daily_8ema_pullback_overlays_match_direct_ema_calls():
+    closes = [100.0 + i for i in range(30)]
+    bars = _bars(closes)
+    overlays = _daily_8ema_pullback_overlays(bars, ema_period=8)
+    assert {o["name"] for o in overlays} == {"ema_8"}
+
+    by_name = {o["name"]: o["values"] for o in overlays}
+    for i in range(len(closes)):
+        expected = ema(closes[: i + 1], 8)
+        assert by_name["ema_8"][i]["value"] == expected
+
+
+def test_daily_8ema_pullback_overlays_handle_too_short_series_without_raising():
+    bars = _bars([100.0, 101.0])  # far short of ema_period=8 default
+    overlays = _daily_8ema_pullback_overlays(bars)
     assert all(v["value"] is None for v in overlays[0]["values"])
