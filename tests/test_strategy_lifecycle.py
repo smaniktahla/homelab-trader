@@ -6,6 +6,7 @@ objects (comparable to candidate_batches/candidates), not reference data
 cleanup is needed here, same convention as tests/test_hypothesis_candidates.py.
 """
 
+from hypothesis_candidates import generate_candidates
 from strategy_lifecycle import (
     STATUSES,
     VALID_TRANSITIONS,
@@ -14,10 +15,13 @@ from strategy_lifecycle import (
     get_strategy_version,
     is_valid_transition,
     list_strategy_versions,
+    register_candidate_as_strategy_version,
     register_strategy,
     register_strategy_version,
     transition,
 )
+
+SEEDED_HYPOTHESIS_TYPE = "mean_reversion_oversold"
 
 
 def _new_strategy(conn, name="test_strategy", family="test_family"):
@@ -282,3 +286,48 @@ def test_full_chain_to_live_and_monitored(conn):
     # WALK_FORWARD reached via 3 transitions (RESEARCH->BACKTEST->VALIDATION->WALK_FORWARD)
     # + freeze (1) + the 6 transitions in the loop above = 10
     assert count == 10
+
+
+# --- register_candidate_as_strategy_version() (SI-3) --------------------------
+
+def test_register_candidate_as_strategy_version_copies_provenance(conn):
+    strategy_id = _new_strategy(conn)
+    result = generate_candidates(conn, SEEDED_HYPOTHESIS_TYPE, {"technical.rsi_14": [25]})
+    assert result is not None
+    batch_id, candidate_ids = result
+
+    version_id = register_candidate_as_strategy_version(conn, candidate_ids[0], strategy_id, actor="tester")
+    assert version_id is not None
+
+    sv = get_strategy_version(conn, version_id)
+    assert sv.status == "RESEARCH"
+    assert sv.strategy_id == strategy_id
+    assert sv.candidate_id == candidate_ids[0]
+    assert sv.hypothesis_type == SEEDED_HYPOTHESIS_TYPE
+    assert sv.hypothesis_type_version == 1
+    assert sv.created_by == "tester"
+
+
+def test_register_candidate_as_strategy_version_unknown_candidate_fails(conn):
+    strategy_id = _new_strategy(conn)
+    assert register_candidate_as_strategy_version(conn, 999999, strategy_id) is None
+
+
+def test_register_candidate_as_strategy_version_unknown_strategy_fails(conn):
+    result = generate_candidates(conn, SEEDED_HYPOTHESIS_TYPE, {"technical.rsi_14": [25]})
+    assert result is not None
+    _, candidate_ids = result
+    assert register_candidate_as_strategy_version(conn, candidate_ids[0], 999999) is None
+
+
+def test_registered_candidate_version_can_advance_through_lifecycle(conn):
+    # Confirms the registered strategy_version behaves exactly like a
+    # hand-created one from here on -- no special-casing in transition().
+    strategy_id = _new_strategy(conn)
+    result = generate_candidates(conn, SEEDED_HYPOTHESIS_TYPE, {"technical.rsi_14": [25]})
+    assert result is not None
+    _, candidate_ids = result
+    version_id = register_candidate_as_strategy_version(conn, candidate_ids[0], strategy_id)
+
+    assert transition(conn, version_id, "BACKTEST")
+    assert get_strategy_version(conn, version_id).status == "BACKTEST"

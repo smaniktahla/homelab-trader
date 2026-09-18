@@ -2345,6 +2345,27 @@ def freeze_strategy_version(strategy_version_id: int, body: StrategyVersionFreez
     return {"id": strategy_version_id, "status": "FROZEN"}
 
 
+# SI-3: the integration point Hypothesis-Driven's own never-built "PR15 --
+# Strategy Incubator Integration" was supposed to be. Registers an existing
+# Candidate (PR14) as a new strategy_version in RESEARCH status -- purely
+# a registration, no execution/scoring/promotion.
+
+class RegisterCandidateRequest(BaseModel):
+    strategy_id: int
+    actor: Optional[str] = None
+    description: Optional[str] = None
+
+@app.post("/api/candidates/{candidate_id}/register-as-strategy-version")
+def register_candidate_as_strategy_version_endpoint(candidate_id: int, body: RegisterCandidateRequest):
+    with psycopg2.connect(DB_DSN) as conn:
+        new_id = strategy_lifecycle.register_candidate_as_strategy_version(
+            conn, candidate_id, body.strategy_id, actor=body.actor, description=body.description)
+    if new_id is None:
+        raise HTTPException(422, f"registration failed (unknown candidate_id={candidate_id} or "
+                                  f"strategy_id={body.strategy_id})")
+    return {"id": new_id, "candidate_id": candidate_id, "strategy_id": body.strategy_id, "status": "RESEARCH"}
+
+
 # ── Backtest Visualization (PR 17, Hypothesis-Driven Trading Architecture ──
 # epic). Runs a registered strategy (shared/strategy_registry.py) through
 # PR 15's shared/backtest_engine.py and returns bars/overlays/signals/fills
