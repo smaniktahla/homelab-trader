@@ -152,7 +152,7 @@ def test_manual_sell_is_not_clamped_by_risk_engine(api_client, conn):
         m.post("https://fake-alpaca.test/v2/orders", json={
             "id": "order-2", "status": "filled", "filled_avg_price": "150.0", "filled_qty": "500",
         })
-        r = api_client.post("/api/trade", json={"symbol": "AAPL", "side": "sell", "qty": 500}, auth=AUTH)
+        r = api_client.post("/api/trade", json={"symbol": "AAPL", "side": "sell", "qty": 500, "counts_toward_loss_streak": True}, auth=AUTH)
         assert r.status_code == 200
         orders = _order_post_requests(m)
         assert orders[0].json()["qty"] == "500.0"  # TradeRequest.qty is a float field

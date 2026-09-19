@@ -45,15 +45,34 @@ def current_loss_streak(conn):
     trade breaks a winning streak's momentum claim just as much as a real
     loss does, and this codebase's own win_rate convention elsewhere
     (shared/expectancy.py's `wins = [p for p in pnls if p > 0]`) already
-    treats 0 as not-a-win). Explicit tuple cursor regardless of the
-    caller's connection default, same reasoning as every other shared
-    module's DB functions in this codebase."""
+    treats 0 as not-a-win).
+
+    Excludes a lifecycle entirely (neither breaks nor extends the streak --
+    it is simply skipped, as if it never closed) if ANY of its exit trades
+    was explicitly marked counts_toward_loss_streak=FALSE -- the actual
+    fix for the 2026-09-19 incident where a manual portfolio-cleanup sell
+    tripped the same circuit breaker meant to catch an automated losing
+    streak (see trades.counts_toward_loss_streak's schema comment).
+    counts_toward_loss_streak IS NULL (pre-migration history, or a trade
+    where the question doesn't apply) is treated as counting, same as
+    this function's behavior before that column existed.
+
+    Explicit tuple cursor regardless of the caller's connection default,
+    same reasoning as every other shared module's DB functions in this
+    codebase."""
     streak = 0
     with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
         cur.execute("""
-            SELECT net_pnl FROM position_lifecycles
-            WHERE status='closed' AND net_pnl IS NOT NULL
-            ORDER BY closed_at DESC
+            SELECT pl.net_pnl FROM position_lifecycles pl
+            WHERE pl.status='closed' AND pl.net_pnl IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM position_trades pt
+                  JOIN trades t ON t.id = pt.trade_id
+                  WHERE pt.position_lifecycle_id = pl.id
+                    AND pt.role = 'exit'
+                    AND t.counts_toward_loss_streak = FALSE
+              )
+            ORDER BY pl.closed_at DESC
         """)
         for (net_pnl,) in cur.fetchall():
             if float(net_pnl) <= 0:

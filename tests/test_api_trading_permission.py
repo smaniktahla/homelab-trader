@@ -137,3 +137,69 @@ def test_trading_permission_endpoints_require_auth(api_client, conn):
     assert api_client.post("/api/trading-permission/override",
                             json={"reason": "x", "actor": "y", "confirm": True}).status_code == 401
     assert api_client.post("/api/trading-permission/override/1/revoke", json={"actor": "y"}).status_code == 401
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Loss-streak attribution enforcement, POST /api/trade (2026-09-19)
+# ─────────────────────────────────────────────────────────────────────────
+
+def _mean_reversion_thesis_id(conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM theses WHERE slug='mean_reversion'")
+        return cur.fetchone()[0]
+
+
+def _seed_position(conn, symbol, qty=10):
+    """A minimal open position (via a prior buy trade) so a manual sell
+    against it has real cost basis and something to actually close."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO trades (symbol, side, qty, price, traded_at, source, thesis_id, counts_toward_loss_streak)
+            VALUES (%s, 'buy', %s, 100.0, NOW() - interval '5 days', 'model_approved', %s, TRUE)
+        """, (symbol, qty, _mean_reversion_thesis_id(conn)))
+    conn.commit()
+
+
+def test_manual_sell_without_counts_toward_loss_streak_422(api_client, conn):
+    _seed_position(conn, "ATTR1")
+    with requests_mock.Mocker() as m:
+        _mock_common_alpaca(m)
+        r = api_client.post("/api/trade", auth=AUTH, json={
+            "symbol": "ATTR1", "side": "sell", "qty": 10, "source": "manual",
+        })
+    assert r.status_code == 422
+
+
+def test_manual_sell_with_counts_toward_loss_streak_succeeds(api_client, conn):
+    _seed_position(conn, "ATTR2")
+    with requests_mock.Mocker() as m:
+        _mock_common_alpaca(m)
+        m.post("https://fake-alpaca.test/v2/orders", json={
+            "id": "order-attr2", "status": "filled", "filled_avg_price": "95.0", "filled_qty": "10",
+        })
+        r = api_client.post("/api/trade", auth=AUTH, json={
+            "symbol": "ATTR2", "side": "sell", "qty": 10, "source": "manual",
+            "counts_toward_loss_streak": False,
+        })
+    assert r.status_code == 200, r.text
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT counts_toward_loss_streak FROM trades WHERE symbol='ATTR2' AND side='sell'")
+        assert cur.fetchone()[0] is False
+
+
+def test_non_manual_sell_does_not_require_counts_toward_loss_streak(api_client, conn):
+    _seed_position(conn, "ATTR3")
+    with requests_mock.Mocker() as m:
+        _mock_common_alpaca(m)
+        m.post("https://fake-alpaca.test/v2/orders", json={
+            "id": "order-attr3", "status": "filled", "filled_avg_price": "95.0", "filled_qty": "10",
+        })
+        r = api_client.post("/api/trade", auth=AUTH, json={
+            "symbol": "ATTR3", "side": "sell", "qty": 10, "source": "advisor_stop_loss",
+        })
+    assert r.status_code == 200, r.text
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT counts_toward_loss_streak FROM trades WHERE symbol='ATTR3' AND side='sell'")
+        assert cur.fetchone()[0] is True  # always forced True for a non-manual source
