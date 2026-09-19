@@ -278,6 +278,8 @@
   .action-badge.action-watch      { background:#2a2410; color:#e0c060; }
   .action-badge.action-skip       { background:#1a1d27; color:#888; }
   .action-badge.action-sell       { background:#2e1a10; color:#f0a060; }
+  .action-badge.action-paused     { background:#2e1414; color:#f05a5a; }
+  .proposal-row.paused { opacity:.6; }
   .competes-with { font-size:.72rem; color:#888; margin-top:4px; font-style:italic; }
 
   /* Risk-engine outcome badge (risk_outcome/risk_binding_constraint/
@@ -992,10 +994,16 @@ function _proposalCard(p, expanded) {
   const estCost = (p.qty != null && p.current_price != null)
     ? `~$${(p.qty * p.current_price).toLocaleString('en-US', {maximumFractionDigits:0})} @ $${parseFloat(p.current_price).toFixed(2)}`
     : '';
-  const priorityStars = p.priority_stars
+  // While the account-wide permission gate is closed a BUY can't be acted
+  // on, so the "Buy" headline + stars are replaced by a "Paused" badge
+  // rather than left prominent next to a small blocked note.
+  const paused = p.side === 'buy' && !!p.trading_permission_blocked;
+  const priorityStars = (p.priority_stars && !paused)
     ? `<span class="priority-stars" title="${p.priority_label || ''}">${p.priority_stars}</span>` : '';
   const actionSlug = (p.recommended_action || '').toLowerCase().replace(/\s+/g, '-');
-  const actionBadge = p.recommended_action
+  const actionBadge = paused
+    ? `<span class="action-badge action-paused" title="New entries are paused account-wide; this would be rejected if approved.">Paused</span>`
+    : p.recommended_action
     ? `<span class="action-badge action-${actionSlug}">${p.recommended_action}</span>` : '';
   const stopCancelPendingBadge = p.stop_cancel_pending
     ? `<span style="color:#e8a33d;font-size:.75rem;font-weight:600;margin-left:6px" title="A protective stop on ${p.symbol} is stuck in Alpaca's pending_cancel state, so the shares still read as unavailable there. Approving this may 400 until it clears.">⏳ Pending cancel (Alpaca)</span>`
@@ -1038,7 +1046,7 @@ function _proposalCard(p, expanded) {
     // Collapsed cluster alternative: one compact line, no decision-factors/
     // market-context detail -- expand the top pick instead to see those.
     return `
-    <div class="proposal-row compact">
+    <div class="proposal-row compact${paused ? ' paused' : ''}">
       <div class="prop-info">
         <strong>${p.qty ?? '?'} <a href="/symbol/${p.symbol}">${p.symbol}</a></strong>
         ${priorityStars} ${actionBadge} ${riskBadge} ${stopCancelPendingBadge} ${permissionBlockedBadge}
@@ -1127,7 +1135,7 @@ function _proposalCard(p, expanded) {
     ? `<div class="competes-with">${p.opportunity_cost_note}</div>` : '';
 
   return `
-  <div class="proposal-row">
+  <div class="proposal-row${paused ? ' paused' : ''}">
     <div class="prop-info">
       <strong>${p.side.toUpperCase()} ${p.qty ?? '?'} <a href="/symbol/${p.symbol}">${p.symbol}</a></strong>
       ${exitTag}
