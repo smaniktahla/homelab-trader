@@ -1410,6 +1410,12 @@ class TradeRequest(BaseModel):
     notes: Optional[str] = None
     source: str = "manual"
     proposal_id: Optional[int] = None
+    # Required (422 without it) for a manual sell -- see
+    # shared/trading_permission.py::current_loss_streak()'s docstring for
+    # why this must be an explicit human answer, not a default, after the
+    # 2026-09-19 incident where a manual cleanup sell was silently counted
+    # the same as an automated losing trade.
+    counts_toward_loss_streak: Optional[bool] = None
 
 def _record_rule_adherence(cur, context, trade_id, proposal_id, symbol, side, results):
     """Platform Improvements PR C. Persists check_gates()'s full result list
@@ -1606,6 +1612,21 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
     if req.qty <= 0:
         raise HTTPException(400, "qty must be positive")
 
+    # A manual sell must explicitly say whether it reflects the
+    # algorithm's own trading judgment (counts toward its loss-streak
+    # performance tracking) or is unrelated portfolio management --
+    # see shared/trading_permission.py::current_loss_streak()'s
+    # docstring. Any non-manual source (model_approved, advisor_stop_loss,
+    # ...) is never ambiguous about this, so the question doesn't apply.
+    if req.side == "sell" and req.source == "manual":
+        if req.counts_toward_loss_streak is None:
+            raise HTTPException(422, "counts_toward_loss_streak must be true or false for a manual sell -- "
+                                      "does this reflect the algorithm's own trading judgment, or is it "
+                                      "unrelated portfolio management?")
+        counts_toward_loss_streak = req.counts_toward_loss_streak
+    else:
+        counts_toward_loss_streak = True
+
     order_qty = req.qty
     risk_decision = None
     stop_price_for_order = None
@@ -1707,14 +1728,15 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
         # Still None for sells, same as before.
         initial_stop_price = stop_price_for_order
         cur.execute("""
-            INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, notes, source, status, proposal_id, cost, thesis_id, initial_stop_price, trade_thesis_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, notes, source, status, proposal_id, cost, thesis_id, initial_stop_price, trade_thesis_id, counts_toward_loss_streak)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             req.symbol.upper(), req.side, filled_qty, filled_price,
             filled_qty * filled_price, order["id"],
             datetime.now(timezone.utc), req.notes, req.source,
-            order["status"], req.proposal_id, cost, thesis_id, initial_stop_price, trade_thesis_id
+            order["status"], req.proposal_id, cost, thesis_id, initial_stop_price, trade_thesis_id,
+            counts_toward_loss_streak
         ))
         trade_id = cur.fetchone()["id"]
         conn.commit()
@@ -1893,13 +1915,13 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
 
             cost = _current_trade_cost_flat(cur)
             cur.execute("""
-                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id, cost, thesis_id, initial_stop_price, trade_thesis_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at, source, status, proposal_id, cost, thesis_id, initial_stop_price, trade_thesis_id, counts_toward_loss_streak)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (p["symbol"], p["side"], filled_qty, filled_price,
                   filled_qty * filled_price, order["id"],
                   datetime.now(timezone.utc), "model_approved", order["status"], proposal_id, cost, p["thesis_id"],
-                  stop_price_for_order, p["trade_thesis_id"]))
+                  stop_price_for_order, p["trade_thesis_id"], True))
             new_trade_id = cur.fetchone()["id"]
             # update proposal qty if it was null
             cur.execute("UPDATE trade_proposals SET qty=%s WHERE id=%s AND qty IS NULL", (trade_qty, proposal_id))

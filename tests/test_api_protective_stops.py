@@ -152,7 +152,7 @@ def test_manual_sell_cancels_resting_stop_order_before_selling(api_client, conn)
         m.post("https://fake-alpaca.test/v2/orders", json={
             "id": "order-3", "status": "filled", "filled_avg_price": "150.0", "filled_qty": "10",
         })
-        r = api_client.post("/api/trade", json={"symbol": "AAPL", "side": "sell", "qty": 10}, auth=AUTH)
+        r = api_client.post("/api/trade", json={"symbol": "AAPL", "side": "sell", "qty": 10, "counts_toward_loss_streak": True}, auth=AUTH)
         assert r.status_code == 200
 
         deletes = _delete_requests(m)
@@ -182,7 +182,7 @@ def test_manual_sell_with_no_resting_stop_orders_skips_delete(api_client, conn):
         m.post("https://fake-alpaca.test/v2/orders", json={
             "id": "order-4", "status": "filled", "filled_avg_price": "150.0", "filled_qty": "10",
         })
-        r = api_client.post("/api/trade", json={"symbol": "AAPL", "side": "sell", "qty": 10}, auth=AUTH)
+        r = api_client.post("/api/trade", json={"symbol": "AAPL", "side": "sell", "qty": 10, "counts_toward_loss_streak": True}, auth=AUTH)
         assert r.status_code == 200
         assert _delete_requests(m) == []
 

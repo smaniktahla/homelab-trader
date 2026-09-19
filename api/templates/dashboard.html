@@ -1772,12 +1772,29 @@ async function submitTrade() {
   const notes = document.getElementById('modal-notes').value.trim();
   if (!symbol || !qty || isNaN(qty)) { showToast('Symbol and qty required', 'error'); return; }
 
+  // A manual sell must explicitly say whether it reflects the algorithm's
+  // own trading judgment (counts toward its loss-streak circuit breaker)
+  // or is unrelated portfolio management -- the server enforces this
+  // (422 without it), so this prompt is what actually satisfies that
+  // requirement rather than the user hitting an error. See
+  // shared/trading_permission.py::current_loss_streak()'s docstring for
+  // why (2026-09-19 incident: a manual cleanup sell was silently counted
+  // the same as an automated losing trade).
+  let countsTowardLossStreak = true;
+  if (side === 'sell') {
+    countsTowardLossStreak = confirm(
+      `Does selling ${symbol} reflect the algorithm's own trading judgment?\n\n` +
+      `OK = Yes -- count this toward the loss-streak circuit breaker if it's a loss.\n` +
+      `Cancel = No -- this is portfolio cleanup/management, unrelated to the algorithm's own decisions.`
+    );
+  }
+
   let r, data;
   try {
     r = await fetch('/api/trade', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({symbol, side, qty, notes, source:'manual'})
+      body: JSON.stringify({symbol, side, qty, notes, source:'manual', counts_toward_loss_streak: countsTowardLossStreak})
     });
     data = await r.json();
   } catch (e) {

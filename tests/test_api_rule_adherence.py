@@ -155,7 +155,7 @@ def test_manual_sell_trade_records_position_held_context(api_client, conn):
         m.post("https://fake-alpaca.test/v2/orders", json={
             "id": "order-3", "status": "filled", "filled_avg_price": "150.0", "filled_qty": "10",
         })
-        r = api_client.post("/api/trade", json={"symbol": "AAPL", "side": "sell", "qty": 10}, auth=AUTH)
+        r = api_client.post("/api/trade", json={"symbol": "AAPL", "side": "sell", "qty": 10, "counts_toward_loss_streak": True}, auth=AUTH)
     assert r.status_code == 200
     trade_id = r.json()["trade_id"]
 

@@ -25,13 +25,38 @@ import trading_permission as tp
 P = {"circuit_breaker_drawdown_pct": 0.15, "loss_streak_limit": 4}
 
 
-def _insert_lifecycle(conn, symbol, net_pnl, closed_at):
+def _mean_reversion_thesis_id(conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM theses WHERE slug='mean_reversion'")
+        return cur.fetchone()[0]
+
+
+def _insert_lifecycle(conn, symbol, net_pnl, closed_at, exit_counts_toward_loss_streak=None):
+    """exit_counts_toward_loss_streak=None (default) creates no exit trade
+    at all -- current_loss_streak()'s NOT EXISTS check is trivially true
+    with no exit rows, same as historical data with no position_trades
+    linkage. Pass True/False to attach one exit trade with that
+    counts_toward_loss_streak value, for the attribution tests below."""
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO position_lifecycles (symbol, status, opened_at, closed_at, qty, net_pnl)
             VALUES (%s, 'closed', %s, %s, 10, %s)
+            RETURNING id
         """, (symbol, closed_at - timedelta(days=1), closed_at, net_pnl))
+        lifecycle_id = cur.fetchone()[0]
+        if exit_counts_toward_loss_streak is not None:
+            cur.execute("""
+                INSERT INTO trades (symbol, side, qty, price, traded_at, source, thesis_id, counts_toward_loss_streak)
+                VALUES (%s, 'sell', 10, 100.0, %s, 'manual', %s, %s)
+                RETURNING id
+            """, (symbol, closed_at, _mean_reversion_thesis_id(conn), exit_counts_toward_loss_streak))
+            trade_id = cur.fetchone()[0]
+            cur.execute("""
+                INSERT INTO position_trades (position_lifecycle_id, trade_id, role, qty_allocated)
+                VALUES (%s, %s, 'exit', 10)
+            """, (lifecycle_id, trade_id))
     conn.commit()
+    return lifecycle_id
 
 
 def _insert_snapshot(conn, portfolio_value, hwm):
@@ -71,6 +96,33 @@ def test_loss_streak_zero_net_pnl_counts_as_loss(conn):
 
 def test_loss_streak_zero_when_no_closed_lifecycles(conn):
     assert tp.current_loss_streak(conn) == 0
+
+
+def test_loss_streak_excludes_lifecycle_whose_exit_is_marked_not_counting(conn):
+    # The actual fix for the 2026-09-19 incident: a manual sell explicitly
+    # marked counts_toward_loss_streak=False is skipped entirely -- it
+    # neither breaks nor extends the streak, as if it never closed.
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    _insert_lifecycle(conn, "A", -100.0, base, exit_counts_toward_loss_streak=False)
+    _insert_lifecycle(conn, "B", -50.0, base + timedelta(days=1))  # no exit row -- counts as before
+    assert tp.current_loss_streak(conn) == 1  # only B
+
+
+def test_loss_streak_counts_lifecycle_whose_exit_is_explicitly_true(conn):
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    _insert_lifecycle(conn, "A", -100.0, base, exit_counts_toward_loss_streak=True)
+    _insert_lifecycle(conn, "B", -50.0, base + timedelta(days=1), exit_counts_toward_loss_streak=True)
+    assert tp.current_loss_streak(conn) == 2
+
+
+def test_loss_streak_excluded_lifecycle_does_not_break_an_otherwise_continuous_streak(conn):
+    # An excluded lifecycle is skipped, not treated as a win that would
+    # reset the count -- it's as if it never existed in the sequence.
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    _insert_lifecycle(conn, "A", -100.0, base)
+    _insert_lifecycle(conn, "B", 500.0, base + timedelta(days=1), exit_counts_toward_loss_streak=False)  # excluded, even though it's a big win
+    _insert_lifecycle(conn, "C", -50.0, base + timedelta(days=2))
+    assert tp.current_loss_streak(conn) == 2  # A and C, B skipped entirely
 
 
 def test_loss_streak_ignores_open_lifecycles(conn):

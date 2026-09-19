@@ -1581,3 +1581,21 @@ CREATE TABLE IF NOT EXISTS trading_permission_overrides (
 
 CREATE INDEX IF NOT EXISTS idx_trading_permission_overrides_active
     ON trading_permission_overrides (created_at DESC) WHERE revoked_at IS NULL;
+
+-- Loss-streak attribution -- the actual fix for the incident that
+-- motivated trading_permission_overrides above, per user decision
+-- 2026-09-19: rather than a blanket rule excluding all manual exits from
+-- current_loss_streak(), require an explicit human answer at the moment
+-- a manual sell is submitted (api/main.py::execute_trade(), enforced --
+-- 422 without it) to the actual question that matters: does THIS trade
+-- reflect the algorithm's own trading judgment (should count toward its
+-- loss-streak performance tracking), or is it unrelated portfolio
+-- management? NULL is reserved for rows that predate this column
+-- (existing history) and for buy-side trades, where the question doesn't
+-- apply -- both are treated as counting, same as today's behavior,
+-- via COALESCE(..., TRUE) at the query site
+-- (shared/trading_permission.py::current_loss_streak()). Trades from any
+-- non-'manual' source (model_approved, advisor_stop_loss, ...) are always
+-- forced TRUE at insert time -- an algorithm-initiated trade is never
+-- ambiguous about whether it reflects the algorithm's judgment.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS counts_toward_loss_streak BOOLEAN;

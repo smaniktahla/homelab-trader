@@ -846,6 +846,21 @@ async function submitTrade() {
   const side = document.getElementById('modal-side').value;
   const qty = parseFloat(document.getElementById('modal-qty').value);
   if (!qty || isNaN(qty) || qty <= 0) { showToast('Quantity must be at least 1', 'error'); return; }
+
+  // A manual sell must explicitly say whether it reflects the algorithm's
+  // own trading judgment (counts toward its loss-streak circuit breaker)
+  // or is unrelated portfolio management -- the server enforces this
+  // (422 without it). See dashboard.html's submitTrade() and
+  // shared/trading_permission.py::current_loss_streak()'s docstring.
+  let countsTowardLossStreak = true;
+  if (side === 'sell') {
+    countsTowardLossStreak = confirm(
+      `Does selling ${SYMBOL} reflect the algorithm's own trading judgment?\n\n` +
+      `OK = Yes -- count this toward the loss-streak circuit breaker if it's a loss.\n` +
+      `Cancel = No -- this is portfolio cleanup/management, unrelated to the algorithm's own decisions.`
+    );
+  }
+
   const btn = document.getElementById('modal-submit-btn');
   btn.disabled = true; btn.textContent = 'Submitting…';
 
@@ -854,7 +869,7 @@ async function submitTrade() {
     r = await fetch('/api/trade', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({symbol: SYMBOL, side, qty, source: 'manual'})
+      body: JSON.stringify({symbol: SYMBOL, side, qty, source: 'manual', counts_toward_loss_streak: countsTowardLossStreak})
     });
     data = await r.json();
   } catch (e) {
