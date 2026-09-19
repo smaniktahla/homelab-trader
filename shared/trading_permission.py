@@ -63,13 +63,104 @@ def current_loss_streak(conn):
     return streak
 
 
+def get_active_override(conn):
+    """The current active trading_permission_overrides row (not revoked,
+    not expired), or None. "Active" is evaluated at call time, not
+    cached -- an override with a past expires_at is treated exactly as if
+    it had been explicitly revoked."""
+    with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
+        cur.execute("""
+            SELECT id, created_at, created_by, reason, expires_at
+            FROM trading_permission_overrides
+            WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())
+            ORDER BY created_at DESC LIMIT 1
+        """)
+        row = cur.fetchone()
+    if row is None:
+        return None
+    # isoformat()'d up front, not left as datetime objects -- this dict
+    # flows straight into json.dumps(constraint_detail) in
+    # api/main.py::_record_risk_decision() with no default=str handler,
+    # so a raw datetime here would raise at record-time the first time an
+    # override is ever active.
+    return {
+        "id": row[0], "created_by": row[2], "reason": row[3],
+        "created_at": row[1].isoformat(),
+        "expires_at": row[4].isoformat() if row[4] is not None else None,
+    }
+
+
+def create_override(conn, created_by, reason, expires_at=None):
+    """Records a deliberate human decision to resume new entries early.
+    Requires non-empty created_by/reason -- this is an audited safety-
+    override action, not a config toggle, so it must always say who and
+    why. Returns the new row's id, or None if created_by/reason is empty
+    or the insert fails."""
+    if not created_by or not reason:
+        log.warning("trading_permission: create_override requires non-empty created_by and reason")
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO trading_permission_overrides (created_by, reason, expires_at)
+                VALUES (%s, %s, %s)
+                RETURNING id
+            """, (created_by, reason, expires_at))
+            row = cur.fetchone()
+        conn.commit()
+        return row[0] if row else None
+    except Exception as e:
+        log.warning(f"trading_permission: create_override failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def revoke_override(conn, override_id, revoked_by):
+    """Revokes an active override early (before its expires_at, or if it
+    has none). Returns True if a row was actually revoked, False if the
+    id doesn't exist, is already revoked, or revoked_by is empty."""
+    if not revoked_by:
+        log.warning("trading_permission: revoke_override requires a non-empty revoked_by")
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE trading_permission_overrides
+                SET revoked_at=NOW(), revoked_by=%s
+                WHERE id=%s AND revoked_at IS NULL
+            """, (revoked_by, override_id))
+            updated = cur.rowcount
+        conn.commit()
+        return updated > 0
+    except Exception as e:
+        log.warning(f"trading_permission: revoke_override failed for id={override_id}: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
 def evaluate_trading_permission(conn, portfolio_value, p):
     """The one aggregation point for account-level trading permission.
-    Returns {"new_entries_allowed": bool, "scope": "account", "reasons": [...]}.
-    Never touches sells or existing positions -- same "brake on NEW risk
-    only" principle circuit_breaker.py's own module docstring already
-    establishes; this aggregates that principle across multiple
-    conditions rather than introducing a new one.
+    Returns {"new_entries_allowed": bool, "scope": "account", "reasons":
+    [...], "override": {...} | None}. Never touches sells or existing
+    positions -- same "brake on NEW risk only" principle circuit_breaker.py's
+    own module docstring already establishes; this aggregates that
+    principle across multiple conditions rather than introducing a new
+    one.
+
+    `reasons` always reflects the raw halt conditions, regardless of any
+    active override -- an override changes whether new entries are
+    ALLOWED, it never hides why they were blocked. `new_entries_allowed`
+    is True if there are no halt reasons, OR if a human has recorded an
+    active override (get_active_override()) -- callers that only check
+    `new_entries_allowed` (the pre-existing contract) get transparently
+    correct behavior either way; callers that want to show "why" or
+    "overridden by whom" read `reasons`/`override` directly.
     """
     reasons = []
 
@@ -82,8 +173,11 @@ def evaluate_trading_permission(conn, portfolio_value, p):
     if streak >= p["loss_streak_limit"]:
         reasons.append("loss_streak_limit")
 
+    override = get_active_override(conn)
+
     return {
-        "new_entries_allowed": len(reasons) == 0,
+        "new_entries_allowed": len(reasons) == 0 or override is not None,
         "scope": "account",
         "reasons": reasons,
+        "override": override,
     }
