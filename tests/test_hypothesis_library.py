@@ -28,6 +28,10 @@ PR16_TYPE_KEYS = {"bollinger_breakout_continuation", "ema_crossover_trend"}
 # PR 18 seed row -- same deliberate NULL condition-tree precedent as
 # ema_crossover_trend above (also a two-series-state crossover).
 PR18_TYPE_KEYS = {"supertrend"}
+# Daily EMA Pullback epic, H1 (baseline) -- same deliberate NULL
+# condition-tree precedent (a volatility-relative distance-and-direction
+# condition, not single-feature-vs-scalar).
+DAILY_EMA_PULLBACK_TYPE_KEYS = {"daily_8ema_momentum_retest"}
 # Price Structure epic PR G seed rows, built on PR A/B/B2's structural_
 # zones/structural_events infrastructure via PR C's feature_registry
 # providers.
@@ -112,6 +116,25 @@ def test_supertrend_has_no_condition_tree_template(conn):
     # bar's own band, not a single feature vs. a scalar. See
     # shared/supertrend_strategy.py for the real (Python) semantics.
     spec = get_hypothesis_type(conn, "supertrend")
+    assert spec.default_entry_conditions is None
+    assert spec.default_invalidation_spec is None
+
+
+def test_pr_daily_ema_pullback_seeded_types_are_active_and_instantiable(conn):
+    for type_key in DAILY_EMA_PULLBACK_TYPE_KEYS:
+        assert is_legal_hypothesis_type(conn, type_key)
+        assert is_instantiable_hypothesis_type(conn, type_key)
+        spec = get_hypothesis_type(conn, type_key)
+        assert spec.status == "active"
+        assert spec.schema_version == TRADE_THESIS_SCHEMA_VERSION
+
+
+def test_daily_8ema_momentum_retest_has_no_condition_tree_template(conn):
+    # Deliberately NULL, same rationale as supertrend above -- a
+    # volatility-relative distance-and-direction condition against the
+    # bar's own EMA/ATR, not a single feature vs. a scalar. See
+    # shared/daily_ema_pullback_strategy.py for the real (Python) semantics.
+    spec = get_hypothesis_type(conn, "daily_8ema_momentum_retest")
     assert spec.default_entry_conditions is None
     assert spec.default_invalidation_spec is None
 

@@ -224,6 +224,12 @@ def test_supertrend_correctly_fails_generation(conn):
     assert generate_candidates(conn, "supertrend", {"technical.rsi_14": [25]}) is None
 
 
+def test_daily_8ema_momentum_retest_correctly_fails_generation(conn):
+    # Same real-world case as supertrend above, for Daily EMA Pullback H1's
+    # equally-deliberate default_entry_conditions=NULL.
+    assert generate_candidates(conn, "daily_8ema_momentum_retest", {"technical.rsi_14": [25]}) is None
+
+
 def test_no_partial_batch_left_visible_on_rejection(conn):
     before = len(list_candidate_batches(conn, hypothesis_type=SEEDED_TYPE))
     assert generate_candidates(conn, SEEDED_TYPE, {"market_regime.overall": ["bullish"]}) is None
