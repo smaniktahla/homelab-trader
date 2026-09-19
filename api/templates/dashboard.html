@@ -1469,7 +1469,20 @@ function _groupTradesBySymbol(trades) {
 
 async function loadTrades() {
   const tbody = document.getElementById('trades-body');
-  if (!tradeHistoryPeriodStart) tradeHistoryPeriodStart = _startOfWeek(new Date());
+  if (!tradeHistoryPeriodStart) {
+    // Default to the most recent period that actually has a trade in it,
+    // not the current calendar week/month -- an account that isn't
+    // trading every day would otherwise land on "No trades in this
+    // period" by default, every time, until the user manually pages back.
+    tradeHistoryPeriodStart = _startOfWeek(new Date());
+    try {
+      const latest = await fetch('/api/trades?limit=1').then(r => r.json());
+      if (latest.length) {
+        const latestDate = new Date(latest[0].traded_at);
+        tradeHistoryPeriodStart = tradeHistoryGranularity === 'week' ? _startOfWeek(latestDate) : _startOfMonth(latestDate);
+      }
+    } catch (e) { /* fall back to the current-week default already set above */ }
+  }
   const [start, end] = _periodBounds(tradeHistoryGranularity, tradeHistoryPeriodStart);
   document.getElementById('trade-history-period-label').textContent = _periodLabel(tradeHistoryGranularity, tradeHistoryPeriodStart);
   try {
