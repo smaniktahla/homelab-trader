@@ -1554,3 +1554,30 @@ CREATE TABLE IF NOT EXISTS strategy_version_transitions (
 
 CREATE INDEX IF NOT EXISTS idx_strategy_version_transitions_strategy_version_id
     ON strategy_version_transitions (strategy_version_id, transitioned_at DESC);
+
+-- Trading-permission manual override -- a deliberate, audited human
+-- action to resume new entries early while shared/trading_permission.py's
+-- own halt conditions (drawdown, loss streak) would otherwise still be
+-- active. Added 2026-09-19 after a real incident: the loss-streak counter
+-- (current_loss_streak()) has no way to distinguish a manual portfolio
+-- cleanup sell from an automated losing trade, so a human clearing out
+-- losers can trip the same circuit breaker meant to catch "the algorithm
+-- is on a bad run" -- with no path back to trading except waiting for an
+-- existing open position to eventually close with a win. This table is
+-- that path, but it is never automatic: a row here always has a
+-- non-empty `reason` and a `created_by`, and evaluate_trading_permission()
+-- still reports the underlying halt reasons even while an override is
+-- active (see that function's own docstring) -- an override changes
+-- whether new entries are ALLOWED, it never hides why they were blocked.
+CREATE TABLE IF NOT EXISTS trading_permission_overrides (
+    id          BIGSERIAL PRIMARY KEY,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_by  TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    expires_at  TIMESTAMPTZ,
+    revoked_at  TIMESTAMPTZ,
+    revoked_by  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_trading_permission_overrides_active
+    ON trading_permission_overrides (created_at DESC) WHERE revoked_at IS NULL;

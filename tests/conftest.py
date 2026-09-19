@@ -29,6 +29,7 @@ RESET_TABLES = [
     "candidate_batches", "candidates",
     "structural_swings", "structural_zones", "structural_events", "fair_value_gaps",
     "strategy_version_transitions", "strategy_versions", "strategies",
+    "trading_permission_overrides",
 ]
 
 

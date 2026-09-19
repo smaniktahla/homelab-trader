@@ -89,7 +89,7 @@ def test_loss_streak_ignores_open_lifecycles(conn):
 
 def test_permission_allowed_when_no_conditions_met(conn):
     result = tp.evaluate_trading_permission(conn, 100_000.0, P)
-    assert result == {"new_entries_allowed": True, "scope": "account", "reasons": []}
+    assert result == {"new_entries_allowed": True, "scope": "account", "reasons": [], "override": None}
 
 
 def test_permission_denied_by_drawdown(conn):
@@ -124,3 +124,99 @@ def test_permission_below_streak_limit_still_allowed(conn):
         _insert_lifecycle(conn, f"SYM{i}", -10.0, base + timedelta(days=i))
     result = tp.evaluate_trading_permission(conn, 100_000.0, P)
     assert result["new_entries_allowed"] is True
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# trading-permission override
+# ─────────────────────────────────────────────────────────────────────────
+
+def _blocked_by_loss_streak(conn):
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    for i in range(4):
+        _insert_lifecycle(conn, f"OVR{i}", -10.0, base + timedelta(days=i))
+
+
+def test_create_override_requires_created_by_and_reason(conn):
+    assert tp.create_override(conn, "", "some reason") is None
+    assert tp.create_override(conn, "salil", "") is None
+
+
+def test_get_active_override_none_when_none_created(conn):
+    assert tp.get_active_override(conn) is None
+
+
+def test_create_override_makes_it_active_and_isoformats_timestamps(conn):
+    override_id = tp.create_override(conn, "salil", "reviewed the losses, resuming manually")
+    assert override_id is not None
+    active = tp.get_active_override(conn)
+    assert active["id"] == override_id
+    assert active["created_by"] == "salil"
+    assert active["reason"] == "reviewed the losses, resuming manually"
+    assert isinstance(active["created_at"], str)  # isoformat()'d, not a raw datetime
+    assert active["expires_at"] is None
+
+
+def test_override_unblocks_entries_but_reasons_still_reported(conn):
+    _blocked_by_loss_streak(conn)
+    blocked = tp.evaluate_trading_permission(conn, 100_000.0, P)
+    assert blocked["new_entries_allowed"] is False
+    assert blocked["reasons"] == ["loss_streak_limit"]
+    assert blocked["override"] is None
+
+    tp.create_override(conn, "salil", "reviewed, resuming manually")
+    overridden = tp.evaluate_trading_permission(conn, 100_000.0, P)
+    assert overridden["new_entries_allowed"] is True
+    assert overridden["reasons"] == ["loss_streak_limit"]  # still reported, never hidden
+    assert overridden["override"]["created_by"] == "salil"
+
+
+def test_expired_override_does_not_unblock(conn):
+    _blocked_by_loss_streak(conn)
+    past = datetime.now(timezone.utc) - timedelta(minutes=1)
+    tp.create_override(conn, "salil", "already expired", expires_at=past)
+    result = tp.evaluate_trading_permission(conn, 100_000.0, P)
+    assert result["new_entries_allowed"] is False
+    assert result["override"] is None
+
+
+def test_future_expiry_still_active(conn):
+    _blocked_by_loss_streak(conn)
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    tp.create_override(conn, "salil", "resuming for an hour", expires_at=future)
+    result = tp.evaluate_trading_permission(conn, 100_000.0, P)
+    assert result["new_entries_allowed"] is True
+    assert result["override"]["expires_at"] is not None
+
+
+def test_revoke_override_deactivates_it(conn):
+    _blocked_by_loss_streak(conn)
+    override_id = tp.create_override(conn, "salil", "resuming manually")
+    assert tp.evaluate_trading_permission(conn, 100_000.0, P)["new_entries_allowed"] is True
+
+    assert tp.revoke_override(conn, override_id, "salil") is True
+    result = tp.evaluate_trading_permission(conn, 100_000.0, P)
+    assert result["new_entries_allowed"] is False
+    assert result["override"] is None
+
+
+def test_revoke_override_requires_revoked_by(conn):
+    override_id = tp.create_override(conn, "salil", "resuming manually")
+    assert tp.revoke_override(conn, override_id, "") is False
+    assert tp.get_active_override(conn) is not None  # still active
+
+
+def test_revoke_already_revoked_override_returns_false(conn):
+    override_id = tp.create_override(conn, "salil", "resuming manually")
+    assert tp.revoke_override(conn, override_id, "salil") is True
+    assert tp.revoke_override(conn, override_id, "salil") is False
+
+
+def test_revoke_unknown_override_id_returns_false(conn):
+    assert tp.revoke_override(conn, 999999, "salil") is False
+
+
+def test_get_active_override_returns_most_recent_when_multiple_exist(conn):
+    tp.create_override(conn, "salil", "first")
+    second_id = tp.create_override(conn, "salil", "second")
+    active = tp.get_active_override(conn)
+    assert active["id"] == second_id

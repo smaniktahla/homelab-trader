@@ -2366,6 +2366,58 @@ def register_candidate_as_strategy_version_endpoint(candidate_id: int, body: Reg
     return {"id": new_id, "candidate_id": candidate_id, "strategy_id": body.strategy_id, "status": "RESEARCH"}
 
 
+# ── Trading-permission manual override (2026-09-19) ────────────────────────
+# A deliberate, audited human action to resume new entries early while
+# shared/trading_permission.py's own halt conditions (drawdown, loss
+# streak) would otherwise still be active -- see that module's
+# trading_permission_overrides schema comment for the incident that
+# motivated this (a manual portfolio-cleanup sell tripping the same
+# circuit breaker meant to catch an automated losing streak, with no path
+# back to trading otherwise). Never automatic, never silent: creating an
+# override always requires a non-empty reason and actor, and
+# GET /api/trading-permission still reports the underlying halt reasons
+# even while an override is active. Plain psycopg2.connect(DB_DSN), same
+# reasoning as the hypothesis-types/candidates/strategy-lifecycle
+# endpoints above -- shared/trading_permission.py expects tuple-row
+# cursors.
+
+@app.get("/api/trading-permission")
+def get_trading_permission():
+    with psycopg2.connect(DB_DSN) as conn:
+        cash, portfolio_value, positions = fetch_alpaca_portfolio()
+        p = load_params(conn)
+        return trading_permission.evaluate_trading_permission(conn, portfolio_value, p)
+
+class TradingPermissionOverrideRequest(BaseModel):
+    reason: str
+    actor: str
+    expires_at: Optional[datetime] = None
+    confirm: bool
+
+@app.post("/api/trading-permission/override")
+def create_trading_permission_override(body: TradingPermissionOverrideRequest):
+    if not body.confirm:
+        raise HTTPException(422, "confirm must be true -- this deliberately resumes new entries "
+                                  "while an account-level safety halt would otherwise be active")
+    with psycopg2.connect(DB_DSN) as conn:
+        override_id = trading_permission.create_override(conn, body.actor, body.reason, body.expires_at)
+    if override_id is None:
+        raise HTTPException(422, "override creation failed (empty reason/actor, or a DB error)")
+    return {"id": override_id, "created_by": body.actor, "reason": body.reason}
+
+class TradingPermissionOverrideRevokeRequest(BaseModel):
+    actor: str
+
+@app.post("/api/trading-permission/override/{override_id}/revoke")
+def revoke_trading_permission_override(override_id: int, body: TradingPermissionOverrideRevokeRequest):
+    with psycopg2.connect(DB_DSN) as conn:
+        ok = trading_permission.revoke_override(conn, override_id, body.actor)
+    if not ok:
+        raise HTTPException(422, f"revoke failed for override {override_id} "
+                                  f"(unknown id, already revoked, or empty actor)")
+    return {"id": override_id, "revoked_by": body.actor}
+
+
 # ── Backtest Visualization (PR 17, Hypothesis-Driven Trading Architecture ──
 # epic). Runs a registered strategy (shared/strategy_registry.py) through
 # PR 15's shared/backtest_engine.py and returns bars/overlays/signals/fills
