@@ -47,7 +47,8 @@ def _mock_common_alpaca(m, cash=100000.0, portfolio_value=100000.0):
 
 
 def _seed_loss_streak(conn, n=4):
-    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    # Recent, not a fixed old date: loss_streak_window_days (default 7) ages out old losses.
+    base = datetime.now(timezone.utc) - timedelta(days=n + 1)
     with conn.cursor() as cur:
         for i in range(n):
             cur.execute("""
@@ -63,7 +64,9 @@ def test_get_trading_permission_allowed_when_no_conditions_met(api_client, conn)
         r = api_client.get("/api/trading-permission", auth=AUTH)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body == {"new_entries_allowed": True, "scope": "account", "reasons": [], "override": None}
+    # breadth trigger is on by default (loaded from signal_params), so its detail rides along
+    assert body == {"new_entries_allowed": True, "scope": "account", "reasons": [], "override": None,
+                    "breadth": {"in_streak": 0, "held": 0, "symbols": []}}
 
 
 def test_get_trading_permission_blocked_by_loss_streak(api_client, conn):

@@ -981,7 +981,7 @@ async function loadPermissionBanner() {
     el.style.display = 'block';
   } else if (!perm.new_entries_allowed) {
     el.innerHTML = `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;padding:8px 12px;background:#2e1414;border:1px solid #f05a5a;border-radius:6px;font-size:.85rem;color:#f05a5a">
-      <span>⛔ New entries paused: ${_permEsc(reasons)}</span>
+      <span>⛔ New entries paused: ${_permEsc(reasons)}${perm.breadth && (perm.reasons || []).includes('breadth_down_streak') ? ` — ${perm.breadth.in_streak} of ${perm.breadth.held} holdings down in a row (${_permEsc(perm.breadth.symbols.join(', '))})` : ''}</span>
       <button class="btn-sm btn-sell" onclick="createPermissionOverride()">Override…</button>
     </div>`;
     el.style.display = 'block';

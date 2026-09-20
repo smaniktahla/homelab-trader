@@ -759,6 +759,17 @@ INSERT INTO signal_params (key, value, description) VALUES
     ('loss_streak_limit', 4, 'Pause new BUY entries account-wide after this many consecutive losing closed positions in a row')
 ON CONFLICT (key) DO NOTHING;
 
+-- Trading-halt rework (2026-09-20): losing-streak halts must expire on their
+-- own rather than persist until a win (unreachable while entries are blocked).
+INSERT INTO signal_params (key, value, description) VALUES
+    ('loss_streak_window_days', 7, 'Cooldown window: only realized losses from the last N days count toward loss_streak_limit, so the pause lifts on its own. 0 = no window.'),
+    ('breadth_streak_enabled', 1, '1 = pause new BUY entries when a large enough share of held positions are in a down streak; 0 = off'),
+    ('breadth_streak_pct', 0.20, 'Breadth trigger: fraction of held positions that must be in the down streak (20%)'),
+    ('breadth_streak_days', 3, 'Breadth trigger: consecutive lower daily closes that put a position in the down streak'),
+    ('breadth_streak_min_positions', 2, 'Breadth trigger: minimum number of positions in the streak, so a tiny book is not paused by a single stock'),
+    ('breadth_streak_min_decline_pct', 0.02, 'Breadth trigger: minimum cumulative decline (2%) over the down-day run for a position to count, so tiny drifts are not a streak')
+ON CONFLICT (key) DO NOTHING;
+
 -- Market Structure Engine PR 2 (see shared/market_structure.py). One row
 -- per symbol per trading_date, same trading_date+key PRIMARY KEY /
 -- component_values-JSONB-plus-flat-columns / calculation_version split as
