@@ -520,6 +520,7 @@
       <span style="color:#2a2d3e">|</span>
       <span>Remaining after pending: <strong id="pcb-remaining" style="color:#4caf50">—</strong></span>
     </div>
+    <div id="permission-banner" style="display:none"></div>
     <div class="proposals-section" id="proposals-list"></div>
   </div>
 
@@ -1221,12 +1222,86 @@ function renderProposals() {
 }
 
 let _scrolledToProposalsHash = false;
+// Account-wide trading-permission banner (shared/trading_permission.py).
+// Shows WHY new buys are paused and offers the audited manual override
+// (POST /api/trading-permission/override, #141) instead of curl. The API
+// still requires reason + actor + confirm:true; this only supplies them.
+function _permEsc(v) {
+  const d = document.createElement('div');
+  d.textContent = v == null ? '' : String(v);
+  return d.innerHTML;
+}
+
+async function loadPermissionBanner() {
+  const el = document.getElementById('permission-banner');
+  let perm;
+  try {
+    perm = await fetch('/api/trading-permission').then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+  } catch (e) { el.style.display = 'none'; return; }
+
+  const reasons = (perm.reasons || []).map(r => r.replace(/_/g, ' ')).join(', ');
+  const ov = perm.override;
+  if (ov) {
+    const until = ov.expires_at ? `until ${new Date(ov.expires_at).toLocaleString()}` : 'until revoked';
+    el.innerHTML = `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;padding:8px 12px;background:#2a2410;border:1px solid #e0c060;border-radius:6px;font-size:.85rem;color:#e0c060">
+      <span>⚠ Trading-halt override active (${_permEsc(reasons)}) ${_permEsc(until)} — by ${_permEsc(ov.created_by)}: “${_permEsc(ov.reason)}”</span>
+      <button class="btn-sm btn-sell" onclick="revokePermissionOverride(${ov.id})">Revoke override</button>
+    </div>`;
+    el.style.display = 'block';
+  } else if (!perm.new_entries_allowed) {
+    el.innerHTML = `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;padding:8px 12px;background:#2e1414;border:1px solid #f05a5a;border-radius:6px;font-size:.85rem;color:#f05a5a">
+      <span>⛔ New entries paused: ${_permEsc(reasons)}</span>
+      <button class="btn-sm btn-sell" onclick="createPermissionOverride()">Override…</button>
+    </div>`;
+    el.style.display = 'block';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+async function createPermissionOverride() {
+  const reason = (prompt('Why are you resuming new entries despite the safety halt? (required, recorded in the audit log)') || '').trim();
+  if (!reason) return;
+  const hoursStr = prompt('Override duration in hours (blank = until you revoke it):', '24');
+  if (hoursStr === null) return;
+  const hours = parseFloat(hoursStr);
+  const expires_at = (hoursStr.trim() && hours > 0) ? new Date(Date.now() + hours * 3600 * 1000).toISOString() : null;
+  if (!confirm('This deliberately resumes NEW BUY entries while an account-level safety halt is active. Continue?')) return;
+  try {
+    const r = await fetch('/api/trading-permission/override', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({actor: 'salil', reason, expires_at, confirm: true})
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { showToast(data.detail || 'Override failed', 'error'); return; }
+    showToast('Override active', 'success');
+  } catch (e) { showToast('Override failed: ' + e.message, 'error'); return; }
+  loadProposals();
+}
+
+async function revokePermissionOverride(id) {
+  if (!confirm('Revoke the override and re-pause new entries?')) return;
+  try {
+    const r = await fetch(`/api/trading-permission/override/${id}/revoke`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({actor: 'salil'})
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { showToast(data.detail || 'Revoke failed', 'error'); return; }
+    showToast('Override revoked', 'success');
+  } catch (e) { showToast('Revoke failed: ' + e.message, 'error'); return; }
+  loadProposals();
+}
+
 async function loadProposals() {
   const wrap = document.getElementById('proposals-wrap');
   try {
     const resp = await fetch('/api/proposals').then(r => r.json());
     propRows = resp.proposals ?? resp;  // backwards compat
     propBuyingPower = resp.buying_power ?? null;
+    await loadPermissionBanner();
     renderProposals();
     // Deep-linked from a proposal-notification email/WhatsApp message
     // (#proposals-wrap): the target only becomes visible/laid-out after

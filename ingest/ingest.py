@@ -8,7 +8,7 @@ from datetime import datetime, timezone, date, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from signals import compute_signals, load_sector_map, mean_reversion_thesis_id
+from signals import compute_signals, load_params, load_sector_map, mean_reversion_thesis_id
 from scanner import seed_universe, scan_universe, promote_demote
 from market_regime import compute_market_regime, save_market_context
 from market_regime_history import record_today as record_regime_history_today
@@ -495,6 +495,46 @@ def reconcile_stale_sell_proposals(conn):
             """, (proposal_id,))
             log.warning(f"Stale sell proposal #{proposal_id} for {symbol} (qty {qty}) auto-rejected -- no matching position at broker")
     conn.commit()
+
+
+def reconcile_stale_buy_proposals(conn):
+    """Auto-rejects open (decision IS NULL) BUY proposals older than
+    signal_params.buy_proposal_max_age_days (default 3; 0 disables).
+
+    Found live 2026-09-19: nothing ever expired an open buy proposal, and
+    compute_signals()'s duplicate_open_proposal check skips generating a
+    new one for any symbol+side that already has one open -- so 17-day-old
+    proposals sat on the dashboard at their original prices/scores and
+    also blocked fresh, re-scored signals for the same symbols.
+
+    Age only, deliberately NOT "currently permission-blocked": a proposal
+    held up by a temporary circuit breaker stays until it ages out, so
+    lifting the block doesn't find them already gone. Runs BEFORE
+    compute_signals() in the cycle so a freed dedup slot can regenerate
+    in the same pass. Sells are handled by reconcile_stale_sell_proposals()."""
+    try:
+        max_age_days = float(load_params(conn).get("buy_proposal_max_age_days", 3))
+    except Exception as e:
+        log.warning(f"Stale-buy-proposal reconciliation: could not load params: {e}")
+        return
+    if max_age_days <= 0:
+        return
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE trade_proposals
+            SET decision='rejected', decided_at=NOW(), decided_by='system',
+                rejection_reason=%s
+            WHERE side='buy' AND decision IS NULL
+              AND proposed_at < NOW() - make_interval(secs => %s)
+            RETURNING id, symbol
+        """, (f"Auto-expired: open longer than buy_proposal_max_age_days ({max_age_days:g}d); "
+              "the signal is re-scored every cycle, so a still-valid setup will be re-proposed",
+              max_age_days * 86400))
+        expired = cur.fetchall()
+    conn.commit()
+    for proposal_id, symbol in expired:
+        log.warning(f"Stale buy proposal #{proposal_id} for {symbol} auto-expired (> {max_age_days:g}d old)")
 
 
 def get_positions():
@@ -1305,6 +1345,7 @@ def run_once(conn, last_universe_scan):
 
     sync_earnings_calendar(conn)
     refresh_fundamentals_if_due(conn, symbols)
+    reconcile_stale_buy_proposals(conn)
     compute_signals(conn, symbols)
     reconcile_orders(conn)
     reconcile_broker_stop_fills(conn)

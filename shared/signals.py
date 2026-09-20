@@ -60,6 +60,10 @@ DEFAULTS = {
     "bb_std": 2.0,
     "score_log_min": 30,
     "score_proposal_min": 65,
+    # Open BUY proposals older than this are auto-rejected each ingest cycle
+    # (ingest.py::reconcile_stale_buy_proposals) so they stop blocking fresh
+    # regeneration via the duplicate_open_proposal check. 0 disables.
+    "buy_proposal_max_age_days": 3,
     "regime_sma_fast": 50,
     "regime_sma_slow": 200,
     "regime_band": 0.02,
