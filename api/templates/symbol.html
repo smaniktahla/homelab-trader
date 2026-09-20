@@ -90,6 +90,7 @@
   .rt-status-open { background:#3a2f14; color:#f7c94f; border:1px solid #5a4a1e; }
   .rt-status-closed { background:#1a1d27; color:#888; border:1px solid #2a2d3a; }
 </style>
+{% include "_proposal_card.html" %}
 </head>
 <body>
 <div class="wrap">
@@ -128,6 +129,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Open recommendation for this symbol (same card as the dashboard) -->
+  <div id="proposal-card" style="display:none" class="card"></div>
 
   <div class="grid2">
     <!-- Price chart -->
@@ -1095,6 +1099,28 @@ async function loadRoundTrips() {
   }
 }
 
+// Echoes the dashboard's recommendation card(s) for this symbol so research
+// here doesn't require bouncing back to the dashboard to act. Same renderer
+// (_proposal_card.html) and same /api/proposals payload -- filtered client-side.
+async function loadProposalCard() {
+  const el = document.getElementById('proposal-card');
+  try {
+    const resp = await fetch('/api/proposals').then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+    const rows = (resp.proposals ?? resp).filter(p => p.symbol === SYMBOL);
+    if (!rows.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+    el.innerHTML = '<div style="font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:#666;margin-bottom:6px">Open recommendation</div>'
+      + rows.map(p => _proposalCard(p, true)).join('');
+    el.style.display = 'block';
+  } catch (e) {
+    el.style.display = 'none';
+  }
+}
+
+function onProposalDecided(kind) {
+  loadProposalCard();
+  if (kind === 'approved') { loadPosition(); loadTrades(); }
+}
+
 loadHeader();
 loadPosition();
 loadChart(14, document.getElementById('range-btn-default'));
@@ -1104,6 +1130,7 @@ loadTrades();
 loadBreakdown('buy', document.getElementById('breakdown-btn-buy'));
 loadPerfSummary();
 loadRoundTrips();
+loadProposalCard();
 </script>
 </body>
 </html>
