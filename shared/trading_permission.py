@@ -38,7 +38,7 @@ TRADING_PERMISSION_DEFAULTS = {
 }
 
 
-def current_loss_streak(conn):
+def current_loss_streak(conn, window_days=0):
     """Count of consecutive losing (net_pnl <= 0) CLOSED position_lifecycles,
     most-recently-closed first, stopping at the first winner (or the first
     lifecycle with net_pnl exactly 0.0, treated as a loss -- a scratch
@@ -57,14 +57,23 @@ def current_loss_streak(conn):
     where the question doesn't apply) is treated as counting, same as
     this function's behavior before that column existed.
 
+    window_days > 0 (signal_params.loss_streak_window_days, the "cooldown
+    window") only counts lifecycles that CLOSED within the last that-many
+    days, so an old losing run ages out and the pause lifts on its own
+    instead of persisting until a win -- which new entries being blocked
+    made unreachable except via a manual override. 0 disables the window
+    (the original, unbounded behavior).
+
     Explicit tuple cursor regardless of the caller's connection default,
     same reasoning as every other shared module's DB functions in this
     codebase."""
+    window_days = int(window_days or 0)   # signal_params values arrive as floats; make_interval needs an int
     streak = 0
     with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
         cur.execute("""
             SELECT pl.net_pnl FROM position_lifecycles pl
             WHERE pl.status='closed' AND pl.net_pnl IS NOT NULL
+              AND (%s <= 0 OR pl.closed_at > NOW() - make_interval(days => %s))
               AND NOT EXISTS (
                   SELECT 1 FROM position_trades pt
                   JOIN trades t ON t.id = pt.trade_id
@@ -73,13 +82,53 @@ def current_loss_streak(conn):
                     AND t.counts_toward_loss_streak = FALSE
               )
             ORDER BY pl.closed_at DESC
-        """)
+        """, (window_days, window_days))
         for (net_pnl,) in cur.fetchall():
             if float(net_pnl) <= 0:
                 streak += 1
             else:
                 break
     return streak
+
+
+def current_breadth_down_streak(conn, days, min_decline_pct=0.0):
+    """Breadth of a down streak across what is currently HELD: how many open
+    positions (position_lifecycles status='open', one per symbol) have
+    closed lower than the prior daily close on each of the last `days`
+    daily bars in a row AND fallen at least `min_decline_pct` (a fraction,
+    e.g. 0.02) cumulatively over that run -- without a size floor, three
+    consecutive lower closes of a few basis points counts as a "streak" and
+    the rule trips on noise. Mark-to-market and forward-looking, unlike
+    current_loss_streak()'s realized closed trades -- it clears by itself
+    as soon as holdings stop making consecutive lower closes, with no
+    win required. A symbol without days+1 daily bars can't be in a streak.
+
+    Returns {"in_streak": int, "held": int, "symbols": [...]}.
+    Same explicit tuple cursor convention as the rest of this module."""
+    days = int(days)
+    with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
+        cur.execute("SELECT DISTINCT symbol FROM position_lifecycles WHERE status='open'")
+        held = [r[0] for r in cur.fetchall()]
+        in_streak = []
+        for sym in held:
+            cur.execute("SELECT close FROM price_history WHERE symbol=%s AND close IS NOT NULL "
+                        "ORDER BY ts DESC LIMIT %s", (sym, days + 1))
+            closes = [float(r[0]) for r in cur.fetchall()]  # newest first
+            if (days >= 1 and len(closes) == days + 1 and all(closes[i] < closes[i + 1] for i in range(days))
+                    and (closes[days] - closes[0]) / closes[days] >= min_decline_pct):
+                in_streak.append(sym)
+    return {"in_streak": len(in_streak), "held": len(held), "symbols": sorted(in_streak)}
+
+
+def breadth_breached(breadth, pct, min_positions):
+    """True when at least `pct` of held positions AND at least
+    `min_positions` of them are in the down streak. The count floor exists
+    because with a handful of holdings a pure percentage degenerates to
+    "one stock tripped the whole account" (1 of 5 = 20%)."""
+    if not breadth["held"]:
+        return False
+    return (breadth["in_streak"] >= max(1, int(min_positions))
+            and breadth["in_streak"] / breadth["held"] >= pct)
 
 
 def get_active_override(conn):
@@ -188,15 +237,25 @@ def evaluate_trading_permission(conn, portfolio_value, p):
     if is_breached(drawdown_pct, p["circuit_breaker_drawdown_pct"]):
         reasons.append("portfolio_drawdown_limit")
 
-    streak = current_loss_streak(conn)
+    streak = current_loss_streak(conn, p.get("loss_streak_window_days", 0))
     if streak >= p["loss_streak_limit"]:
         reasons.append("loss_streak_limit")
 
+    breadth = None
+    if p.get("breadth_streak_enabled", 0):
+        breadth = current_breadth_down_streak(conn, p.get("breadth_streak_days", 3),
+                                              p.get("breadth_streak_min_decline_pct", 0.0))
+        if breadth_breached(breadth, p.get("breadth_streak_pct", 0.20), p.get("breadth_streak_min_positions", 2)):
+            reasons.append("breadth_down_streak")
+
     override = get_active_override(conn)
 
-    return {
+    result = {
         "new_entries_allowed": len(reasons) == 0 or override is not None,
         "scope": "account",
         "reasons": reasons,
         "override": override,
     }
+    if breadth is not None:   # only when the breadth trigger ran, so the result shape is unchanged when it is off
+        result["breadth"] = breadth
+    return result

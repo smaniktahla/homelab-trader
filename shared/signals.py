@@ -82,6 +82,17 @@ DEFAULTS = {
     "risk_per_trade_pct": 0.01,
     "max_portfolio_open_risk_pct": 0.06,
     "loss_streak_limit": 4,
+    # Cooldown window: realized losses older than this many days no longer
+    # count toward loss_streak_limit, so the pause expires on its own (0 = unbounded).
+    "loss_streak_window_days": 7,
+    # Breadth trigger: pause new entries when >= breadth_streak_pct of held
+    # positions (and at least breadth_streak_min_positions of them) have
+    # closed down breadth_streak_days daily bars in a row. Self-clearing.
+    "breadth_streak_enabled": 1,
+    "breadth_streak_pct": 0.20,
+    "breadth_streak_days": 3,
+    "breadth_streak_min_positions": 2,
+    "breadth_streak_min_decline_pct": 0.02,   # cumulative fall over the run that qualifies a position as "in the streak"
     # Volatility-sizing overlay (shared/risk_engine.py's volatility_budget
     # candidate) -- VR-2, see docs/volatility-sizing-vr0-reconciliation.md.
     # Off by default; see risk_engine.py::VOLATILITY_SIZING_DEFAULTS for
