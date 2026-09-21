@@ -394,12 +394,17 @@ def reconcile_broker_stop_fills(conn):
     account the same way the 2026-07-21 thesis_id incident did, just via a
     different root cause.
 
-    Runs every cycle over a generous 2-hour lookback window (cheap,
-    idempotent via the order_id pre-check below) rather than tracking a
-    resume-point -- same simplicity-over-precision tradeoff
-    reconcile_orders() above already accepts for its own polling."""
+    Runs every cycle over a 30-day lookback window (cheap, idempotent via
+    the order_id pre-check below) rather than tracking a resume-point --
+    same simplicity-over-precision tradeoff reconcile_orders() above
+    already accepts for its own polling. It was 2 hours until 2026-09-20,
+    which never worked: Alpaca's `after` filters on when an order was
+    created/submitted, not filled, and an OTO stop leg carries its
+    parent's timestamps, so a stop firing days after entry was never
+    inside the window (prod had zero broker_stop rows ever; EIX's
+    2026-08-31 stop fill was missed this way)."""
     try:
-        after = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        after = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         r = requests.get(f"{ALPACA_BASE}/v2/orders", headers=ALPACA_HEADERS, timeout=10,
                           params={"status": "closed", "after": after, "direction": "desc", "limit": 200})
         r.raise_for_status()
@@ -495,6 +500,165 @@ def reconcile_stale_sell_proposals(conn):
             """, (proposal_id,))
             log.warning(f"Stale sell proposal #{proposal_id} for {symbol} (qty {qty}) auto-rejected -- no matching position at broker")
     conn.commit()
+
+
+def _fetch_broker_qty():
+    """{symbol: qty} from GET /v2/positions, or None on ANY failure or a
+    non-list body -- callers must treat None as "unknown", never as "flat"
+    (same fail-closed posture as reconcile_stale_sell_proposals()). A
+    successful empty list is a real answer: the account is flat."""
+    try:
+        r = requests.get(f"{ALPACA_BASE}/v2/positions", headers=ALPACA_HEADERS, timeout=10)
+        r.raise_for_status()
+        body = r.json()
+        if not isinstance(body, list):
+            raise ValueError(f"unexpected positions payload: {type(body).__name__}")
+        return {p["symbol"]: float(p["qty"]) for p in body}
+    except Exception as e:
+        log.warning(f"Lifecycle/broker reconciliation: could not fetch positions: {e}")
+        return None
+
+
+def _backfill_missing_fills(conn, symbol, side, since):
+    """Records filled `side` orders for `symbol` that Alpaca has and the
+    trades ledger lacks (no trades row with that order_id), and repairs
+    rows that exist but were never advanced to status='filled' (which
+    build_position_lifecycles ignores). Returns the number of rows
+    inserted/updated; 0 on any Alpaca error (fail closed -- nothing is
+    touched on a failed fetch).
+
+    Inserts are append-only, keyed by order_id (idempotent). Only stop
+    orders keep the default loss-streak accounting; any other order's
+    provenance is unknown (the 2026-09-19 incident: a manual cleanup sell
+    tripped the loss-streak breaker), so it is excluded from the streak."""
+    try:
+        r = requests.get(f"{ALPACA_BASE}/v2/orders", headers=ALPACA_HEADERS, timeout=15,
+                          params={"status": "closed", "symbols": symbol, "after": since.isoformat(),
+                                  "direction": "desc", "limit": 500})
+        r.raise_for_status()
+        orders = r.json()
+    except Exception as e:
+        log.warning(f"Lifecycle/broker reconciliation: could not fetch {symbol} orders: {e}")
+        return 0
+
+    fills = [o for o in orders
+             if o.get("status") == "filled" and o.get("side") == side
+             and float(o.get("filled_qty") or 0) > 0 and o.get("filled_avg_price")]
+    if not fills:
+        return 0
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT order_id, status FROM trades WHERE order_id = ANY(%s)", ([o["id"] for o in fills],))
+        known = {row[0]: row[1] for row in cur.fetchall()}
+        cur.execute("SELECT value FROM signal_params WHERE key='trade_cost_flat'")
+        row = cur.fetchone()
+        cost = float(row[0]) if row else 0.0
+    thesis_id = mean_reversion_thesis_id(conn)
+
+    changed = 0
+    with conn.cursor() as cur:
+        for o in fills:
+            qty, price = float(o["filled_qty"]), float(o["filled_avg_price"])
+            if o["id"] in known:
+                if known[o["id"]] != "filled":
+                    cur.execute("UPDATE trades SET status='filled', qty=%s, price=%s, notional=%s WHERE order_id=%s",
+                                (qty, price, qty * price, o["id"]))
+                    log.warning(f"Lifecycle/broker reconciliation: {side} {symbol} order {o['id']} was "
+                                f"'{known[o['id']]}' in the ledger but filled at the broker -- marked filled")
+                    changed += 1
+                continue
+            is_stop = o.get("type") in ("stop", "stop_limit")
+            cur.execute("""
+                INSERT INTO trades (symbol, side, qty, price, notional, order_id, traded_at,
+                                     notes, source, status, cost, thesis_id, counts_toward_loss_streak)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'broker_reconcile','filled',%s,%s,%s)
+            """, (
+                symbol, side, qty, price, qty * price, o["id"],
+                o.get("filled_at") or o.get("updated_at") or datetime.now(timezone.utc).isoformat(),
+                f"Fill found at the broker but missing from the ledger ({o.get('type')} {side}), auto-reconciled",
+                cost, thesis_id, None if is_stop else False,
+            ))
+            log.warning(f"Lifecycle/broker reconciliation: recorded missing {side.upper()} {qty} {symbol} @ {price} (order {o['id']})")
+            changed += 1
+    conn.commit()
+    return changed
+
+
+def reconcile_lifecycles_with_broker(conn):
+    """Compares open position_lifecycles (built from the trades ledger) to
+    Alpaca's real positions every cycle. Found live 2026-09-20: open
+    lifecycles for ORCL/EIX that the broker no longer held, and no lifecycle
+    at all for a held CNP -- ledger/broker drift that
+    trading_permission.current_breadth_down_streak() reads as the held set.
+
+    Detection always runs and logs each divergence. Repair -- backfilling
+    the missing fills from Alpaca's order history and rebuilding lifecycles
+    -- only runs when signal_params.lifecycle_broker_repair is nonzero
+    (default 0/off): it appends rows to the trades ledger, so it is an
+    explicit opt-in rather than something a deploy does on its own.
+
+    Fails closed: a failed or malformed positions fetch returns without
+    touching anything (an empty answer must never be misread as "the
+    account is flat", which would flag every lifecycle). Returns the final
+    diff dict, or None if the broker state could not be fetched."""
+    from broker_reconciliation import diff_open_lifecycles_vs_broker, is_clean
+
+    broker_qty = _fetch_broker_qty()
+    if broker_qty is None:
+        return None
+
+    def _diff():
+        with conn.cursor() as cur:
+            cur.execute("SELECT symbol, SUM(qty) FROM position_lifecycles WHERE status='open' GROUP BY symbol")
+            ledger_qty = {sym: float(q or 0) for sym, q in cur.fetchall()}
+        return diff_open_lifecycles_vs_broker(ledger_qty, broker_qty)
+
+    diff = _diff()
+    diff["broker_short"] = {sym: q for sym, q in broker_qty.items() if q < 0}
+    if is_clean(diff):
+        return diff
+
+    # The app is long-only, so a short is never something to backfill
+    # around: found live 2026-09-20 (CNP -118), a second manual sell 9s
+    # after the one that closed the long flipped it short. Needs a human.
+    for sym, q in diff["broker_short"].items():
+        log.error(f"Lifecycle drift: {sym} is SHORT at the broker (qty {q:g}) -- long-only ledger cannot represent it; manual review required")
+
+    for sym, q in diff["ledger_only"].items():
+        log.warning(f"Lifecycle drift: {sym} has an open lifecycle (qty {q:g}) but no position at the broker")
+    for sym, q in diff["broker_only"].items():
+        log.warning(f"Lifecycle drift: {sym} is held at the broker (qty {q:g}) but has no open lifecycle")
+    for sym, (lq, bq) in diff["qty_mismatch"].items():
+        log.warning(f"Lifecycle drift: {sym} ledger qty {lq:g} != broker qty {bq:g}")
+
+    if not float(load_params(conn).get("lifecycle_broker_repair", 0)):
+        return diff
+
+    now = datetime.now(timezone.utc)
+    lookback = now - timedelta(days=30)
+    # Alpaca's `after` is exclusive and compares against order creation
+    # time (OTO stop legs inherit the parent's), which is slightly BEFORE
+    # the ledger row's opened_at -- back off a day so the entry-time legs
+    # aren't excluded by their own lifecycle's timestamp.
+    margin = timedelta(days=1)
+    changed = 0
+    for sym in diff["ledger_only"]:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MIN(opened_at) FROM position_lifecycles WHERE symbol=%s AND status='open'", (sym,))
+            opened = cur.fetchone()[0]
+        changed += _backfill_missing_fills(conn, sym, "sell", (opened - margin) if opened else lookback)
+    for sym in diff["broker_only"]:
+        changed += _backfill_missing_fills(conn, sym, "buy", lookback)
+    for sym, (lq, bq) in diff["qty_mismatch"].items():
+        changed += _backfill_missing_fills(conn, sym, "buy" if bq > lq else "sell", lookback)
+
+    if changed:
+        build_position_lifecycles(conn)
+        diff = _diff()
+        diff["broker_short"] = {sym: q for sym, q in broker_qty.items() if q < 0}
+        for sym in {*diff["ledger_only"], *diff["broker_only"], *diff["qty_mismatch"]}:
+            log.warning(f"Lifecycle drift: {sym} still diverges from the broker after repair -- needs manual review")
+    return diff
 
 
 def reconcile_stale_buy_proposals(conn):
@@ -1359,6 +1523,13 @@ def run_once(conn, last_universe_scan):
         build_position_lifecycles(conn)
     except Exception as e:
         log.warning(f'Position lifecycles rebuild failed: {e}')
+
+    # Compare the freshly-built lifecycles to the broker's real positions;
+    # fail-open like the rebuild above (see reconcile_lifecycles_with_broker).
+    try:
+        reconcile_lifecycles_with_broker(conn)
+    except Exception as e:
+        log.warning(f'Lifecycle/broker reconciliation failed: {e}')
 
     # PR 10 (Hypothesis-Driven Trading Architecture epic, Live Thesis
     # Re-Evaluation): every cycle, same fail-open placement as the other
