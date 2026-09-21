@@ -394,12 +394,17 @@ def reconcile_broker_stop_fills(conn):
     account the same way the 2026-07-21 thesis_id incident did, just via a
     different root cause.
 
-    Runs every cycle over a generous 2-hour lookback window (cheap,
-    idempotent via the order_id pre-check below) rather than tracking a
-    resume-point -- same simplicity-over-precision tradeoff
-    reconcile_orders() above already accepts for its own polling."""
+    Runs every cycle over a 30-day lookback window (cheap, idempotent via
+    the order_id pre-check below) rather than tracking a resume-point --
+    same simplicity-over-precision tradeoff reconcile_orders() above
+    already accepts for its own polling. It was 2 hours until 2026-09-20,
+    which never worked: Alpaca's `after` filters on when an order was
+    created/submitted, not filled, and an OTO stop leg carries its
+    parent's timestamps, so a stop firing days after entry was never
+    inside the window (prod had zero broker_stop rows ever; EIX's
+    2026-08-31 stop fill was missed this way)."""
     try:
-        after = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        after = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         r = requests.get(f"{ALPACA_BASE}/v2/orders", headers=ALPACA_HEADERS, timeout=10,
                           params={"status": "closed", "after": after, "direction": "desc", "limit": 200})
         r.raise_for_status()
@@ -609,8 +614,15 @@ def reconcile_lifecycles_with_broker(conn):
         return diff_open_lifecycles_vs_broker(ledger_qty, broker_qty)
 
     diff = _diff()
+    diff["broker_short"] = {sym: q for sym, q in broker_qty.items() if q < 0}
     if is_clean(diff):
         return diff
+
+    # The app is long-only, so a short is never something to backfill
+    # around: found live 2026-09-20 (CNP -118), a second manual sell 9s
+    # after the one that closed the long flipped it short. Needs a human.
+    for sym, q in diff["broker_short"].items():
+        log.error(f"Lifecycle drift: {sym} is SHORT at the broker (qty {q:g}) -- long-only ledger cannot represent it; manual review required")
 
     for sym, q in diff["ledger_only"].items():
         log.warning(f"Lifecycle drift: {sym} has an open lifecycle (qty {q:g}) but no position at the broker")
@@ -624,12 +636,17 @@ def reconcile_lifecycles_with_broker(conn):
 
     now = datetime.now(timezone.utc)
     lookback = now - timedelta(days=30)
+    # Alpaca's `after` is exclusive and compares against order creation
+    # time (OTO stop legs inherit the parent's), which is slightly BEFORE
+    # the ledger row's opened_at -- back off a day so the entry-time legs
+    # aren't excluded by their own lifecycle's timestamp.
+    margin = timedelta(days=1)
     changed = 0
     for sym in diff["ledger_only"]:
         with conn.cursor() as cur:
             cur.execute("SELECT MIN(opened_at) FROM position_lifecycles WHERE symbol=%s AND status='open'", (sym,))
             opened = cur.fetchone()[0]
-        changed += _backfill_missing_fills(conn, sym, "sell", opened or lookback)
+        changed += _backfill_missing_fills(conn, sym, "sell", (opened - margin) if opened else lookback)
     for sym in diff["broker_only"]:
         changed += _backfill_missing_fills(conn, sym, "buy", lookback)
     for sym, (lq, bq) in diff["qty_mismatch"].items():
@@ -638,6 +655,7 @@ def reconcile_lifecycles_with_broker(conn):
     if changed:
         build_position_lifecycles(conn)
         diff = _diff()
+        diff["broker_short"] = {sym: q for sym, q in broker_qty.items() if q < 0}
         for sym in {*diff["ledger_only"], *diff["broker_only"], *diff["qty_mismatch"]}:
             log.warning(f"Lifecycle drift: {sym} still diverges from the broker after repair -- needs manual review")
     return diff

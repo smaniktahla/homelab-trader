@@ -108,7 +108,7 @@ def test_clean_state_makes_no_order_calls(conn, monkeypatch):
     with requests_mock.Mocker() as m:
         m.get(f"{BASE}/v2/positions", json=[{"symbol": "SO", "qty": "10"}])
         assert ingest.reconcile_lifecycles_with_broker(conn) == {
-            "ledger_only": {}, "broker_only": {}, "qty_mismatch": {}}
+            "ledger_only": {}, "broker_only": {}, "qty_mismatch": {}, "broker_short": {}}
     assert [r.path for r in m.request_history] == ["/v2/positions"]
 
 
@@ -141,7 +141,7 @@ def test_repair_closes_orphan_lifecycle_and_opens_missing_one(conn, monkeypatch)
             {"json": [_order("o-cnp-buy", "CNP", "buy", 7, 50)]},                   # broker_only CNP -> buy
         ])
         diff = ingest.reconcile_lifecycles_with_broker(conn)
-    assert diff == {"ledger_only": {}, "broker_only": {}, "qty_mismatch": {}}
+    assert diff == {"ledger_only": {}, "broker_only": {}, "qty_mismatch": {}, "broker_short": {}}
     assert _open_symbols(conn) == ["CNP", "SO"]
     with conn.cursor() as cur:
         cur.execute("SELECT order_id, source, counts_toward_loss_streak FROM trades WHERE source='broker_reconcile' ORDER BY order_id")
@@ -210,3 +210,42 @@ def test_orders_fetch_failure_during_repair_changes_nothing(conn, monkeypatch):
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM trades")
         assert cur.fetchone()[0] == 1
+
+
+def test_broker_short_is_flagged_and_never_backfilled(conn, monkeypatch):
+    """Live 2026-09-20: CNP -118 -- a second sell right after the one that
+    closed the long flipped the account short. Long-only ledger can't hold
+    it; must be surfaced, and repair must not try to 'fix' it."""
+    ingest = _import_ingest(monkeypatch)
+    _set_repair(conn, True)
+    with requests_mock.Mocker() as m:
+        m.get(f"{BASE}/v2/positions", json=[{"symbol": "CNP", "qty": "-118"}])
+        diff = ingest.reconcile_lifecycles_with_broker(conn)
+    assert diff["broker_short"] == {"CNP": -118.0}
+    assert not is_clean(diff)
+    assert [r.path for r in m.request_history] == ["/v2/positions"]   # no order backfill attempted
+
+
+def test_stop_fill_lookback_covers_stops_that_fire_long_after_entry(conn, monkeypatch):
+    """Alpaca's `after` filters on order creation/submission, and an OTO
+    stop leg carries its parent's timestamps -- a 2h window could never see
+    a stop firing days later (EIX 2026-08-31)."""
+    ingest = _import_ingest(monkeypatch)
+    with requests_mock.Mocker() as m:
+        m.get(f"{BASE}/v2/orders", json=[_order("stop-leg", "EIX", "sell", 70, 56.13, typ="stop")])
+        ingest.reconcile_broker_stop_fills(conn)
+    after = datetime.fromisoformat(m.request_history[0].qs["after"][0].upper().replace("Z", "+00:00"))
+    assert (datetime.now(timezone.utc) - after).days >= 29
+
+
+def test_repair_backs_off_from_opened_at_so_entry_time_stop_legs_are_found(conn, monkeypatch):
+    ingest = _import_ingest(monkeypatch)
+    _add_trade(conn, "EIX", "buy", 70, 68, "o-eix-buy", T0)
+    ingest.build_position_lifecycles(conn)
+    _set_repair(conn, True)
+    with requests_mock.Mocker() as m:
+        m.get(f"{BASE}/v2/positions", json=[])
+        m.get(f"{BASE}/v2/orders", json=[])
+        ingest.reconcile_lifecycles_with_broker(conn)
+    after = datetime.fromisoformat(m.request_history[1].qs["after"][0].upper().replace("Z", "+00:00"))
+    assert after < T0   # strictly before the ledger row's opened_at

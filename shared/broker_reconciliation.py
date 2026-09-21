@@ -43,4 +43,4 @@ def diff_open_lifecycles_vs_broker(ledger_qty, broker_qty, tolerance=_QTY_TOLERA
 
 
 def is_clean(diff):
-    return not (diff["ledger_only"] or diff["broker_only"] or diff["qty_mismatch"])
+    return not (diff["ledger_only"] or diff["broker_only"] or diff["qty_mismatch"] or diff.get("broker_short"))
