@@ -10,6 +10,7 @@ would silently diverge from the real Alpaca account.
 import os
 import sys
 import pathlib
+from datetime import datetime, timedelta, timezone
 
 import psycopg2.extras
 import pytest
@@ -124,3 +125,91 @@ def test_multiple_new_fills_all_recorded(conn, monkeypatch):
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM trades")
         assert cur.fetchone()[0] == 2
+
+
+# ---- _stop_fill_lookback_start ----
+
+def _open_lifecycle(conn, symbol, opened_at):
+    """Minimal open position_lifecycles row -- only opened_at/status matter
+    to _stop_fill_lookback_start(), so nothing else here needs to be
+    realistic."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO position_lifecycles (symbol, status, opened_at, qty, entry_notional,
+                                              exit_notional, total_cost, gross_pnl, net_pnl)
+            VALUES (%s,'open',%s,1,0,0,0,0,0)
+        """, (symbol, opened_at))
+    conn.commit()
+
+
+def test_lookback_defaults_to_30d_floor_with_no_open_lifecycles(conn, monkeypatch):
+    ingest = _import_ingest(monkeypatch)
+    start = ingest._stop_fill_lookback_start(conn)
+    expected = datetime.now(timezone.utc) - timedelta(days=30)
+    assert abs((start - expected).total_seconds()) < 5
+
+
+def test_lookback_stays_at_floor_for_a_recently_opened_lifecycle(conn, monkeypatch):
+    ingest = _import_ingest(monkeypatch)
+    _open_lifecycle(conn, "AAPL", datetime.now(timezone.utc) - timedelta(days=5))
+    start = ingest._stop_fill_lookback_start(conn)
+    expected = datetime.now(timezone.utc) - timedelta(days=30)
+    assert abs((start - expected).total_seconds()) < 5
+
+
+def test_lookback_extends_past_floor_for_an_old_open_lifecycle(conn, monkeypatch):
+    """The 2026-09-20 bug: a lifecycle open longer than the fixed 30-day
+    floor (EIX, opened 2026-08-08) needs the window to reach back to its
+    own entry, one day of margin included, not just the floor."""
+    ingest = _import_ingest(monkeypatch)
+    opened_at = datetime.now(timezone.utc) - timedelta(days=45)
+    _open_lifecycle(conn, "EIX", opened_at)
+    start = ingest._stop_fill_lookback_start(conn)
+    assert abs((start - (opened_at - timedelta(days=1))).total_seconds()) < 5
+
+
+def test_lookback_uses_the_oldest_of_several_open_lifecycles(conn, monkeypatch):
+    ingest = _import_ingest(monkeypatch)
+    oldest = datetime.now(timezone.utc) - timedelta(days=60)
+    _open_lifecycle(conn, "OLD", oldest)
+    _open_lifecycle(conn, "NEW", datetime.now(timezone.utc) - timedelta(days=2))
+    start = ingest._stop_fill_lookback_start(conn)
+    assert abs((start - (oldest - timedelta(days=1))).total_seconds()) < 5
+
+
+def test_lookback_ignores_closed_lifecycles(conn, monkeypatch):
+    ingest = _import_ingest(monkeypatch)
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO position_lifecycles (symbol, status, opened_at, closed_at, qty,
+                                              entry_notional, exit_notional, total_cost, gross_pnl, net_pnl)
+            VALUES ('OLD','closed',%s,%s,1,0,0,0,0,0)
+        """, (datetime.now(timezone.utc) - timedelta(days=90), datetime.now(timezone.utc) - timedelta(days=80)))
+    conn.commit()
+    start = ingest._stop_fill_lookback_start(conn)
+    expected = datetime.now(timezone.utc) - timedelta(days=30)
+    assert abs((start - expected).total_seconds()) < 5
+
+
+def test_reconciliation_finds_a_stop_fill_for_a_lifecycle_older_than_30_days(conn, monkeypatch):
+    """End-to-end reproduction of the 2026-09-20 gap: a stop fill dated
+    within a lifecycle-derived window but outside a fixed 30-day one is
+    now found and recorded."""
+    ingest = _import_ingest(monkeypatch)
+    _open_lifecycle(conn, "EIX", datetime.now(timezone.utc) - timedelta(days=45))
+    with requests_mock.Mocker() as m:
+        m.get("https://fake-alpaca.test/v2/orders", json=[_stop_fill_order("stop-eix", "EIX", "70", "56.13")])
+        ingest.reconcile_broker_stop_fills(conn)
+    after = datetime.fromisoformat(m.request_history[0].qs["after"][0].upper().replace("Z", "+00:00"))
+    assert (datetime.now(timezone.utc) - after).days >= 44   # well past the old fixed 30d cutoff
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM trades WHERE order_id='stop-eix'")
+        assert cur.fetchone()[0] == 1
+
+
+def test_lookback_query_failure_falls_back_to_floor(conn, monkeypatch):
+    ingest = _import_ingest(monkeypatch)
+    conn.close()   # forces the SELECT inside _stop_fill_lookback_start to raise
+    start = ingest._stop_fill_lookback_start(conn)
+    expected = datetime.now(timezone.utc) - timedelta(days=30)
+    assert abs((start - expected).total_seconds()) < 5
