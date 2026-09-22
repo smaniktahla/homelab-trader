@@ -383,6 +383,43 @@ def reconcile_orders(conn):
     conn.commit()
 
 
+def _stop_fill_lookback_start(conn, floor_days=30):
+    """How far back reconcile_broker_stop_fills() below needs to look:
+    one day before the OLDEST currently-open lifecycle's opened_at, or
+    floor_days ago, whichever is earlier -- never later than the floor,
+    only ever extended further back.
+
+    The one-day margin exists because Alpaca's `after` filters orders by
+    creation/submission time, and an OTO stop leg is created alongside its
+    parent entry order, which can predate the lifecycle's own opened_at
+    (which is the entry FILL's timestamp) by however long that entry order
+    took to fill -- same margin _backfill_missing_fills() already applies
+    for the same reason.
+
+    Fixes the 2026-09-20 gap where a fixed 30-day window still missed a
+    stop fill for a lifecycle that had been open longer than 30 days
+    (EIX, opened 2026-08-08, stop fired 2026-08-31 -- inside a
+    lifecycle-derived window, but the naive floor_days=30 window run on
+    2026-09-20 had already rolled past 2026-08-08's own -1-day margin by
+    a wide margin, let alone the entry order's actual creation time).
+    Falls back to the floor alone when there are no open lifecycles at
+    all (nothing to protect yet, or everything is already closed) --
+    30 days is an arbitrary-but-generous floor either way, same reasoning
+    the fixed window originally used."""
+    floor = datetime.now(timezone.utc) - timedelta(days=floor_days)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MIN(opened_at) FROM position_lifecycles WHERE status='open'")
+            row = cur.fetchone()
+        earliest_open = row[0] if row else None
+    except Exception as e:
+        log.warning(f"Stop-fill lookback: could not read oldest open lifecycle, using {floor_days}d floor: {e}")
+        return floor
+    if earliest_open is None:
+        return floor
+    return min(earliest_open - timedelta(days=1), floor)
+
+
 def reconcile_broker_stop_fills(conn):
     """Execution: protective stop orders. Buy orders now attach a resting
     OTO stop-loss child leg (see api/main.py's execute_trade/
@@ -394,19 +431,29 @@ def reconcile_broker_stop_fills(conn):
     account the same way the 2026-07-21 thesis_id incident did, just via a
     different root cause.
 
-    Runs every cycle over a 30-day lookback window (cheap, idempotent via
-    the order_id pre-check below) rather than tracking a resume-point --
-    same simplicity-over-precision tradeoff reconcile_orders() above
-    already accepts for its own polling. It was 2 hours until 2026-09-20,
-    which never worked: Alpaca's `after` filters on when an order was
+    Runs every cycle over a lookback window from
+    _stop_fill_lookback_start() (cheap, idempotent via the order_id
+    pre-check below) rather than tracking a resume-point -- same
+    simplicity-over-precision tradeoff reconcile_orders() above already
+    accepts for its own polling. It was a fixed 2 hours until
+    2026-09-20 (never worked at all: prod had zero broker_stop rows
+    ever), then a fixed 30 days (better, but still missed a stop fill for
+    a lifecycle open longer than that -- see _stop_fill_lookback_start's
+    own docstring) -- Alpaca's `after` filters on when an order was
     created/submitted, not filled, and an OTO stop leg carries its
-    parent's timestamps, so a stop firing days after entry was never
-    inside the window (prod had zero broker_stop rows ever; EIX's
-    2026-08-31 stop fill was missed this way)."""
+    parent's timestamps, so a stop firing long after entry needs a window
+    that reaches back to entry, not a fixed recency cutoff.
+
+    limit=500 (not the default 50, and up from the fixed-window version's
+    200) -- a wide, lifecycle-derived window can span months for a
+    long-held position, and direction=desc with a low limit would
+    silently truncate to only the most recent orders in that span,
+    potentially dropping an old stop fill the same way the too-narrow
+    fixed windows did."""
     try:
-        after = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        after = _stop_fill_lookback_start(conn).isoformat()
         r = requests.get(f"{ALPACA_BASE}/v2/orders", headers=ALPACA_HEADERS, timeout=10,
-                          params={"status": "closed", "after": after, "direction": "desc", "limit": 200})
+                          params={"status": "closed", "after": after, "direction": "desc", "limit": 500})
         r.raise_for_status()
         orders = r.json()
     except Exception as e:
