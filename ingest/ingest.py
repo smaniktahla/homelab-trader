@@ -20,6 +20,7 @@ from fair_value_gaps import update_fair_value_gaps
 from sector_mapping import get_sector_etf
 from outcomes import update_signal_outcomes
 from build_position_lifecycles import build_position_lifecycles
+import proposal_slots
 from trade_thesis_reevaluation import reevaluate_active_trade_theses
 from earnings import sync_earnings_calendar
 from postmortem import run_postmortem_review
@@ -748,6 +749,35 @@ def reconcile_stale_buy_proposals(conn):
         log.warning(f"Stale buy proposal #{proposal_id} for {symbol} auto-expired (> {max_age_days:g}d old)")
 
 
+def reconcile_surplus_buy_proposals(conn):
+    """Keeps open BUY proposals within free position slots + buffer (see
+    shared/proposal_slots.py), rejecting the lowest-scored surplus. Runs
+    before compute_signals() so generation sees the trimmed set. Position
+    count comes straight from Alpaca (short positions included, same as
+    compute_signals' own max_open_positions gate); on ANY fetch failure it
+    returns without touching anything -- an unknown count must never be
+    read as "no positions", which would only ever trim less, but a wrong
+    count either way is not worth acting on."""
+    positions = _fetch_broker_qty()
+    if positions is None:
+        return
+    try:
+        params = load_params(conn)
+        rejected = proposal_slots.trim_surplus_buy_proposals(
+            conn, params["max_open_positions"], len(positions),
+            int(params.get("open_buy_proposal_buffer", proposal_slots.DEFAULT_BUFFER)))
+    except Exception as e:
+        log.warning(f"Surplus-buy-proposal trim failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return
+    if rejected:
+        log.warning(f"Surplus buy proposals auto-rejected: {len(rejected)} "
+                    f"(kept the highest-scored; {len(positions)}/{int(params['max_open_positions'])} positions held)")
+
+
 def get_positions():
     try:
         r = requests.get(f"{ALPACA_BASE}/v2/positions", headers=ALPACA_HEADERS, timeout=10)
@@ -1443,8 +1473,10 @@ def get_extra_price_symbols(conn):
 
 
 def check_new_proposal_alerts(conn, cfg):
-    """Immediate WhatsApp+email alert for every newly-created trade_proposals
-    row, buy or sell. Distinct from check_alerts()'s high-score signal alert
+    """WhatsApp+email alert for every newly-created trade_proposals row.
+    Sells/exits alert immediately, one message each; new BUY proposals are
+    batched into ONE digest message per cycle (a burst of buys must not
+    become a burst of alerts -- see shared/proposal_slots.py). Distinct from check_alerts()'s high-score signal alert
     below, which only queries the `signals` table — exit-driven proposals
     (thesis_complete/stop_loss/time_stop/regime_deterioration) are inserted
     straight into trade_proposals by signals.py and never touch `signals` at
@@ -1464,6 +1496,7 @@ def check_new_proposal_alerts(conn, cfg):
         """)
         proposals = cur.fetchall()
 
+    new_buys = []
     for p in proposals:
         pid, sym, side, rationale, score, exit_reason = (
             p if isinstance(p, (list, tuple)) else
@@ -1473,20 +1506,48 @@ def check_new_proposal_alerts(conn, cfg):
         if alert_throttled(conn, alert_key, hours=24 * 365):
             continue
 
-        label = "SELL" if side == "sell" else "BUY"
+        if side == "buy":
+            # Batched into ONE message per cycle below -- a burst of buy
+            # proposals (50 on 2026-09-19) must not become 50 emails and 50
+            # WhatsApps. Sells/exits stay immediate: time-sensitive, and
+            # gated by actually holding the position, so never a burst.
+            new_buys.append((pid, sym, rationale, score))
+            continue
+
         reason_tag = f" [{exit_reason}]" if exit_reason else ""
-        subject = f"📋 New Proposal: {label} {sym}{reason_tag}"
+        subject = f"📋 New Proposal: SELL {sym}{reason_tag}"
         html = f"""
         <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:500px">
           <h2 style="margin:0 0 12px">📋 New Trade Proposal</h2>
-          <p><strong>{label} {sym}</strong>{reason_tag} — score {score}</p>
+          <p><strong>SELL {sym}</strong>{reason_tag} — score {score}</p>
           <p style="color:#888;margin-top:12px">{rationale}</p>
           <p style="margin-top:20px"><a href="http://10.10.10.13:8100/#proposals-wrap" style="color:#4f8ef7">Review &amp; Approve →</a></p>
         </div>"""
-        whatsapp = f"📋 *New Proposal: {label} {sym}*{reason_tag}\nScore: {score}\n{rationale}\nhttp://10.10.10.13:8100"
+        whatsapp = f"📋 *New Proposal: SELL {sym}*{reason_tag}\nScore: {score}\n{rationale}\nhttp://10.10.10.13:8100"
         send_notification(cfg, subject, html, whatsapp, f"new proposal {sym}")
         mark_alert_sent(conn, alert_key)
-        log.info(f"New-proposal alert sent: {label} {sym}{reason_tag} (proposal id {pid})")
+        log.info(f"New-proposal alert sent: SELL {sym}{reason_tag} (proposal id {pid})")
+
+    if new_buys:
+        n = len(new_buys)
+        top = sorted(new_buys, key=lambda b: (b[3] is None, -(b[3] or 0)))
+        subject = f"📋 {n} new buy proposal{'s' if n != 1 else ''}: " + ", ".join(b[1] for b in top[:5]) + (" …" if n > 5 else "")
+        rows_html = "".join(
+            f"<li><strong>{sym}</strong> — score {score}</li>" for _, sym, _, score in top[:15])
+        more_html = f"<p style='color:#888'>…and {n - 15} more</p>" if n > 15 else ""
+        html = f"""
+        <div style="font-family:sans-serif;background:#0d0f1a;color:#e8eaf6;padding:24px;max-width:500px">
+          <h2 style="margin:0 0 12px">📋 {n} New Buy Proposal{'s' if n != 1 else ''}</h2>
+          <ul style="padding-left:18px">{rows_html}</ul>{more_html}
+          <p style="margin-top:20px"><a href="http://10.10.10.13:8100/#proposals-wrap" style="color:#4f8ef7">Review &amp; Approve →</a></p>
+        </div>"""
+        whatsapp = (f"📋 *{n} new buy proposal{'s' if n != 1 else ''}*\n"
+                    + "\n".join(f"{sym} (score {score})" for _, sym, _, score in top[:10])
+                    + (f"\n…and {n - 10} more" if n > 10 else "") + "\nhttp://10.10.10.13:8100")
+        send_notification(cfg, subject, html, whatsapp, f"{n} new buy proposals")
+        for pid, sym, _, _ in new_buys:
+            mark_alert_sent(conn, f"proposal_{pid}")
+        log.info(f"New buy-proposal digest sent: {n} proposal(s) ({', '.join(b[1] for b in top[:10])})")
 
 
 def run_once(conn, last_universe_scan):
@@ -1557,6 +1618,7 @@ def run_once(conn, last_universe_scan):
     sync_earnings_calendar(conn)
     refresh_fundamentals_if_due(conn, symbols)
     reconcile_stale_buy_proposals(conn)
+    reconcile_surplus_buy_proposals(conn)
     compute_signals(conn, symbols)
     reconcile_orders(conn)
     reconcile_broker_stop_fills(conn)

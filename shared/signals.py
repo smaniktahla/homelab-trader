@@ -14,6 +14,7 @@ from psycopg2.extras import Json
 import requests
 
 from earnings import earnings_blackout_reason
+import proposal_slots
 from circuit_breaker import record_snapshot_and_check, drawdown_size_multiplier
 from risk_engine import evaluate_proposal, load_open_risk_dollars
 from trading_permission import evaluate_trading_permission
@@ -64,6 +65,9 @@ DEFAULTS = {
     # (ingest.py::reconcile_stale_buy_proposals) so they stop blocking fresh
     # regeneration via the duplicate_open_proposal check. 0 disables.
     "buy_proposal_max_age_days": 3,
+    # Open BUY proposals are capped at (free position slots + this buffer),
+    # keeping the highest-scored -- see shared/proposal_slots.py.
+    "open_buy_proposal_buffer": 2,
     "regime_sma_fast": 50,
     "regime_sma_slow": 200,
     "regime_band": 0.02,
@@ -1000,6 +1004,11 @@ def compute_signals(conn, symbols):
     # Count open positions for the max_open_positions gate
     open_position_count = len(positions)
 
+    # Open buy proposals as [(id, score)] -- they reserve slots too (see
+    # shared/proposal_slots.py). Kept current as this cycle creates/displaces.
+    open_buys = proposal_slots.load_open_buys(conn)
+    proposal_buffer = int(p.get("open_buy_proposal_buffer", proposal_slots.DEFAULT_BUFFER))
+
     # Sector map for the sector-concentration cap, covers watchlist + any
     # held position not currently in the watchlist slice being scanned
     sector_map = load_sector_map(conn, set(symbols) | set(positions.keys()))
@@ -1142,6 +1151,7 @@ def compute_signals(conn, symbols):
                 # Position sizing for buy signals
                 qty = None
                 sizing_note = ""
+                displaced_buy = None   # weakest open buy this new one will replace, set in the buy gate below
                 trade_thesis_id = None  # PR 4: only ever set on the buy branch below, and only when
                                          # trade_thesis_instantiation_enabled is on -- see shared/trade_thesis_engine.py
                 if side == "buy":
@@ -1157,6 +1167,18 @@ def compute_signals(conn, symbols):
                         )
                         _block_outcome(conn, outcome_id, "max_open_positions")
                         continue
+                    allowed_buys = proposal_slots.allowed_open_buys(
+                        p["max_open_positions"], open_position_count, proposal_buffer)
+                    if len(open_buys) >= allowed_buys:
+                        weakest_buy = proposal_slots.weakest(open_buys)
+                        if weakest_buy is None or final_score <= weakest_buy[1]:
+                            log.info(
+                                f"Skipping buy proposal for {sym}: {len(open_buys)} open buys already fill the "
+                                f"{allowed_buys} allowed and score {final_score} does not beat the weakest ({weakest_buy[1] if weakest_buy else 'n/a'})"
+                            )
+                            _block_outcome(conn, outcome_id, "no_free_proposal_slot")
+                            continue
+                        displaced_buy = weakest_buy
                     eb_block = earnings_blackout_reason(conn, sym, p["earnings_blackout_days"])
                     if eb_block:
                         log.info(f"Skipping buy proposal for {sym}: {eb_block}")
@@ -1268,6 +1290,15 @@ def compute_signals(conn, symbols):
                 conn.commit()
                 log.info(f"PROPOSAL created: {sym} {side} qty={qty} score={score}")
                 _propose_outcome(conn, outcome_id, proposal_id)
+                if side == "buy":
+                    if displaced_buy is not None:
+                        if proposal_slots.reject_proposal(
+                                conn, displaced_buy[0],
+                                f"Auto-displaced by a higher-scored buy ({sym}, {final_score} > {displaced_buy[1]:g}): "
+                                "open buy proposals are capped at free position slots + buffer"):
+                            log.info(f"Displaced open buy proposal #{displaced_buy[0]} (score {displaced_buy[1]:g}) for {sym}")
+                        open_buys = [b for b in open_buys if b[0] != displaced_buy[0]]
+                    open_buys.append((proposal_id, float(final_score)))
 
                 # Risk engine: record what it would approve for this
                 # proposal's requested qty, right now. Side-effecting only
