@@ -68,6 +68,11 @@ DEFAULTS = {
     # Open BUY proposals are capped at (free position slots + this buffer),
     # keeping the highest-scored -- see shared/proposal_slots.py.
     "open_buy_proposal_buffer": 2,
+    # 1 = a buy the risk engine would reject outright (approved qty 0) is not
+    # created at all -- it could never be approved, only alerted on. 0
+    # restores the old audit-only behavior. See ingest.py::
+    # reconcile_unactionable_buy_proposals for the same rule on open rows.
+    "skip_risk_rejected_buy_proposals": 1,
     "regime_sma_fast": 50,
     "regime_sma_slow": 200,
     "regime_band": 0.02,
@@ -527,6 +532,26 @@ def _relative_strength_risk_detail(conn, sym, sector, vs_sector_classification):
     except Exception as e:
         log.warning(f"Relative-strength detail computation failed for {sym}: {e}")
     return f"sector={sector} etf={etf} classification={vs_sector_classification}"
+
+
+def _risk_decision_for_buy(conn, sym, price, qty, stop_price, cash, portfolio_value, positions,
+                            sector_map, open_risk_dollars, p, drawdown_multiplier=1.0):
+    """One shared/risk_engine.py::evaluate_proposal() call for a BUY, with
+    the volatility-forecast plumbing compute_signals() has always done."""
+    # VR-2: only bother loading a forecast when the overlay is actually
+    # enabled -- p.get(...) rather than p[...] since older signal_params
+    # rows/tests may not have this key at all, in which case the overlay is
+    # inert regardless (see risk_engine.py).
+    volatility_forecast = None
+    if p.get("volatility_sizing_enabled"):
+        volatility_forecast = load_latest_volatility_forecast(
+            conn, sym, SIZING_ESTIMATOR, SIZING_HORIZON
+        )
+    return evaluate_proposal(
+        sym, price, qty, stop_price, cash, portfolio_value, positions, sector_map,
+        open_risk_dollars, p, drawdown_multiplier=drawdown_multiplier,
+        volatility_forecast=volatility_forecast,
+    )
 
 
 def _record_risk_decision(conn, context, proposal_id, symbol, side, requested_qty, decision, market_overall):
@@ -1006,7 +1031,8 @@ def compute_signals(conn, symbols):
 
     # Open buy proposals as [(id, score)] -- they reserve slots too (see
     # shared/proposal_slots.py). Kept current as this cycle creates/displaces.
-    open_buys = proposal_slots.load_open_buys(conn)
+    held_long = {s for s, pos_ in positions.items() if pos_["qty"] > 0}
+    open_buys = proposal_slots.load_open_buys(conn, held_long)
     proposal_buffer = int(p.get("open_buy_proposal_buffer", proposal_slots.DEFAULT_BUFFER))
 
     # Sector map for the sector-concentration cap, covers watchlist + any
@@ -1152,6 +1178,8 @@ def compute_signals(conn, symbols):
                 qty = None
                 sizing_note = ""
                 displaced_buy = None   # weakest open buy this new one will replace, set in the buy gate below
+                risk_decision_pre = None   # risk-engine verdict computed before the INSERT (buy only)
+                is_add = sym in held_long  # a buy of a symbol already held long: adds to it, takes no slot
                 trade_thesis_id = None  # PR 4: only ever set on the buy branch below, and only when
                                          # trade_thesis_instantiation_enabled is on -- see shared/trade_thesis_engine.py
                 if side == "buy":
@@ -1159,6 +1187,12 @@ def compute_signals(conn, symbols):
                         reasons = ",".join(trading_permission["reasons"])
                         log.info(f"Skipping buy proposal for {sym}: trading permission denied ({reasons})")
                         _block_outcome(conn, outcome_id, f"trading_permission_denied:{reasons}")
+                        continue
+                    if _open_sell_exists(conn, sym):
+                        # An exit (time stop, stop loss, thesis complete...) is open or in flight for
+                        # this symbol: buying it at the same time contradicts the exit.
+                        log.info(f"Skipping buy proposal for {sym}: an exit proposal is open for it")
+                        _block_outcome(conn, outcome_id, "exit_proposal_open")
                         continue
                     if open_position_count >= int(p["max_open_positions"]):
                         log.info(
@@ -1169,7 +1203,7 @@ def compute_signals(conn, symbols):
                         continue
                     allowed_buys = proposal_slots.allowed_open_buys(
                         p["max_open_positions"], open_position_count, proposal_buffer)
-                    if len(open_buys) >= allowed_buys:
+                    if not is_add and len(open_buys) >= allowed_buys:
                         weakest_buy = proposal_slots.weakest(open_buys)
                         if weakest_buy is None or final_score <= weakest_buy[1]:
                             log.info(
@@ -1249,6 +1283,27 @@ def compute_signals(conn, symbols):
                     planned_risk_per_share = price - planned_initial_stop_price
                     planned_risk_dollars = planned_risk_per_share * qty
 
+                    # Risk engine verdict BEFORE anything is persisted (including the
+                    # trade thesis below): a buy it rejects outright -- approved qty 0,
+                    # e.g. portfolio_open_risk already over its cap -- can never be
+                    # approved (decide_proposal()/execute_trade() re-run the same
+                    # engine), so creating it only produces an un-approvable card and
+                    # an alert. Fail-open: any error here falls back to the old
+                    # create-then-record-for-audit path below.
+                    if p.get("skip_risk_rejected_buy_proposals", 1):
+                        try:
+                            risk_decision_pre = _risk_decision_for_buy(
+                                conn, sym, price, qty, planned_initial_stop_price, cash, portfolio_value,
+                                positions, sector_map, open_risk_dollars, p, drawdown_mult)
+                        except Exception as e:
+                            log.warning(f"Risk engine pre-check failed for {sym}: {e}")
+                            risk_decision_pre = None
+                        if risk_decision_pre is not None and risk_decision_pre["outcome"] == "rejected":
+                            binding = risk_decision_pre["binding_constraint"]
+                            log.info(f"Skipping buy proposal for {sym}: risk engine rejects it ({binding})")
+                            _block_outcome(conn, outcome_id, f"risk_engine_rejected:{binding}")
+                            continue
+
                     # PR 4 (Evidence Evaluation Engine): dark unless a human has
                     # explicitly flipped trade_thesis_instantiation_enabled on
                     # (default off, same precedent as structure_scoring_enabled).
@@ -1298,7 +1353,8 @@ def compute_signals(conn, symbols):
                                 "open buy proposals are capped at free position slots + buffer"):
                             log.info(f"Displaced open buy proposal #{displaced_buy[0]} (score {displaced_buy[1]:g}) for {sym}")
                         open_buys = [b for b in open_buys if b[0] != displaced_buy[0]]
-                    open_buys.append((proposal_id, float(final_score)))
+                    if not is_add:
+                        open_buys.append((proposal_id, float(final_score)))
 
                 # Risk engine: record what it would approve for this
                 # proposal's requested qty, right now. Side-effecting only
@@ -1313,17 +1369,9 @@ def compute_signals(conn, symbols):
                         # than p[...] since older signal_params rows/tests
                         # may not have this key at all, in which case the
                         # overlay is inert regardless (see risk_engine.py).
-                        volatility_forecast = None
-                        if p.get("volatility_sizing_enabled"):
-                            volatility_forecast = load_latest_volatility_forecast(
-                                conn, sym, SIZING_ESTIMATOR, SIZING_HORIZON
-                            )
-                        decision = evaluate_proposal(
-                            sym, price, qty, planned_initial_stop_price,
-                            cash, portfolio_value, positions, sector_map,
-                            open_risk_dollars, p, drawdown_multiplier=drawdown_mult,
-                            volatility_forecast=volatility_forecast,
-                        )
+                        decision = risk_decision_pre if risk_decision_pre is not None else _risk_decision_for_buy(
+                            conn, sym, price, qty, planned_initial_stop_price, cash, portfolio_value,
+                            positions, sector_map, open_risk_dollars, p, drawdown_mult)
                         _record_risk_decision(conn, "proposal_generated", proposal_id, sym, side,
                                                qty, decision, market_overall)
                     except Exception as e:

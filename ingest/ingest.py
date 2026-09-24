@@ -8,7 +8,8 @@ from datetime import datetime, timezone, date, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from signals import compute_signals, load_params, load_sector_map, mean_reversion_thesis_id
+from signals import compute_signals, load_params, load_sector_map, mean_reversion_thesis_id, fetch_alpaca_portfolio
+from risk_engine import evaluate_proposal, load_open_risk_dollars
 from scanner import seed_universe, scan_universe, promote_demote
 from market_regime import compute_market_regime, save_market_context
 from market_regime_history import record_today as record_regime_history_today
@@ -749,6 +750,87 @@ def reconcile_stale_buy_proposals(conn):
         log.warning(f"Stale buy proposal #{proposal_id} for {symbol} auto-expired (> {max_age_days:g}d old)")
 
 
+def reconcile_unactionable_buy_proposals(conn):
+    """Auto-rejects open BUY proposals that cannot be acted on, regardless
+    of how many slots are free (found live 2026-09-24: all four open buys
+    had been rejected by the risk engine -- portfolio open risk over its
+    cap -- at creation, yet sat on the dashboard and were alerted):
+
+      1. an exit proposal (or in-flight sell) is open for the same symbol --
+         buying it contradicts the exit (e.g. an add proposed alongside a
+         time-stop sell); and
+      2. the risk engine, re-run against the account as it is NOW, rejects
+         it outright (approved qty 0) -- decide_proposal()/execute_trade()
+         would refuse it at approval time. Re-evaluated live rather than
+         trusting the creation-time verdict, so a veto that has since
+         cleared (open risk fell, cash freed) does not linger.
+
+    Gated by signal_params.skip_risk_rejected_buy_proposals (default on) for
+    rule 2. Fails closed on rule 2: any portfolio-fetch failure skips it
+    entirely, and a per-proposal evaluation error leaves that proposal alone."""
+    try:
+        params = load_params(conn)
+    except Exception as e:
+        log.warning(f"Unactionable-buy-proposal check: could not load params: {e}")
+        return
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT b.id, b.symbol FROM trade_proposals b
+            WHERE b.side='buy' AND b.decision IS NULL
+              AND EXISTS (SELECT 1 FROM trade_proposals s
+                          WHERE s.symbol=b.symbol AND s.side='sell' AND s.decision IS NULL)
+        """)
+        conflicted = cur.fetchall()
+    for pid, sym in conflicted:
+        proposal_slots.reject_proposal(
+            conn, pid, "Auto-rejected: an exit proposal is open for this symbol, so buying it contradicts the exit")
+        log.warning(f"Buy proposal #{pid} for {sym} auto-rejected -- an exit proposal is open for the same symbol")
+
+    if not float(params.get("skip_risk_rejected_buy_proposals", 1)):
+        return
+    cash, portfolio_value, positions = fetch_alpaca_portfolio()
+    if cash is None or portfolio_value is None:
+        return   # unknown account state: never reject on a guess
+    try:
+        sector_map = load_sector_map(conn, set(positions) | {sym for _, sym in conflicted})
+        open_risk = load_open_risk_dollars(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT tp.id, tp.symbol, tp.qty, tp.planned_initial_stop_price, ph.close
+                FROM trade_proposals tp
+                LEFT JOIN LATERAL (SELECT close FROM price_history WHERE symbol=tp.symbol
+                                   ORDER BY ts DESC LIMIT 1) ph ON TRUE
+                WHERE tp.side='buy' AND tp.decision IS NULL
+            """)
+            open_buys = cur.fetchall()
+    except Exception as e:
+        log.warning(f"Unactionable-buy-proposal check failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return
+
+    vetoed = 0
+    for pid, sym, qty, stop, close in open_buys:
+        if qty is None or stop is None or close is None:
+            continue
+        try:
+            decision = evaluate_proposal(sym, float(close), int(qty), float(stop), cash, portfolio_value,
+                                          positions, sector_map, open_risk, params)
+        except Exception as e:
+            log.warning(f"Risk re-check failed for buy proposal #{pid} ({sym}): {e}")
+            continue
+        if decision["outcome"] == "rejected":
+            if proposal_slots.reject_proposal(
+                    conn, pid, f"Auto-rejected: the risk engine rejects this buy outright right now "
+                               f"({decision['binding_constraint']}); it could not be approved"):
+                vetoed += 1
+    if vetoed:
+        log.warning(f"Risk-vetoed buy proposals auto-rejected: {vetoed}")
+
+
 def reconcile_surplus_buy_proposals(conn):
     """Keeps open BUY proposals within free position slots + buffer (see
     shared/proposal_slots.py), rejecting the lowest-scored surplus. Runs
@@ -765,7 +847,8 @@ def reconcile_surplus_buy_proposals(conn):
         params = load_params(conn)
         rejected = proposal_slots.trim_surplus_buy_proposals(
             conn, params["max_open_positions"], len(positions),
-            int(params.get("open_buy_proposal_buffer", proposal_slots.DEFAULT_BUFFER)))
+            int(params.get("open_buy_proposal_buffer", proposal_slots.DEFAULT_BUFFER)),
+            held_symbols={sym for sym, qty in positions.items() if qty > 0})
     except Exception as e:
         log.warning(f"Surplus-buy-proposal trim failed: {e}")
         try:
@@ -1618,6 +1701,7 @@ def run_once(conn, last_universe_scan):
     sync_earnings_calendar(conn)
     refresh_fundamentals_if_due(conn, symbols)
     reconcile_stale_buy_proposals(conn)
+    reconcile_unactionable_buy_proposals(conn)
     reconcile_surplus_buy_proposals(conn)
     compute_signals(conn, symbols)
     reconcile_orders(conn)
