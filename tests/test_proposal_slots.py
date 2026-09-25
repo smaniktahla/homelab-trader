@@ -33,6 +33,27 @@ def _import_ingest(monkeypatch):
     return ingest
 
 
+@pytest.fixture(autouse=True)
+def _restore_signal_params(conn):
+    """conftest leaves signal_params as seeded for the whole session, so a
+    test that sets a param would leak it into every later test (in any
+    file). Snapshot and restore around each test."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT key, value, description FROM signal_params")
+        before = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    conn.commit()
+    yield
+    conn.rollback()
+    with conn.cursor() as cur:
+        cur.execute("SELECT key FROM signal_params")
+        for (k,) in cur.fetchall():
+            if k not in before:
+                cur.execute("DELETE FROM signal_params WHERE key=%s", (k,))
+        for k, (v, d) in before.items():
+            cur.execute("UPDATE signal_params SET value=%s WHERE key=%s", (v, k))
+    conn.commit()
+
+
 def _thesis_id(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM theses WHERE slug='mean_reversion'")
@@ -115,6 +136,25 @@ def test_trim_rejects_every_buy_when_at_max_open_positions(conn):
     ps.trim_surplus_buy_proposals(conn, 15, 15, buffer=2)
     (row,) = _state(conn)
     assert row[2] == "rejected" and "max_open_positions" in row[4]
+
+
+def test_trim_leaves_adds_to_held_positions_out_of_the_ranking(conn):
+    """A buy of a symbol already held long takes no free slot, so it must not
+    compete with (or be trimmed in favor of) new-name buys."""
+    _add_proposal(conn, "HELD", score=10)     # an add, lowest score
+    _add_proposal(conn, "NEW1", score=90)
+    _add_proposal(conn, "NEW2", score=80)
+    ps.trim_surplus_buy_proposals(conn, 15, 14, buffer=0, held_symbols={"HELD"})   # allowed 1 new-name buy
+    st = {r[0]: r[2] for r in _state(conn)}
+    assert st["HELD"] is None and st["NEW1"] is None and st["NEW2"] == "rejected"
+
+
+def test_trim_rejects_adds_too_when_there_is_no_free_slot(conn):
+    """compute_signals()'s max_open_positions gate blocks adds at the cap, so
+    the trim stays consistent with it."""
+    _add_proposal(conn, "HELD", score=99)
+    ps.trim_surplus_buy_proposals(conn, 15, 15, buffer=2, held_symbols={"HELD"})
+    assert _state(conn)[0][2] == "rejected"
 
 
 # ---- ingest step: fail closed ----

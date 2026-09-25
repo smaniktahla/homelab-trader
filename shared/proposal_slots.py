@@ -41,16 +41,22 @@ def allowed_open_buys(max_open_positions, position_count, buffer=DEFAULT_BUFFER)
     return 0 if slots == 0 else slots + max(0, int(buffer))
 
 
-def load_open_buys(conn):
+def load_open_buys(conn, exclude_symbols=()):
     """[(proposal_id, score)] for open buy proposals, highest score first.
-    Score is final_proposal_score, falling back to signal_score."""
+    Score is final_proposal_score, falling back to signal_score.
+
+    exclude_symbols: symbols already held long. A buy for one of those is
+    an ADD to an existing position, not a new position -- it takes no
+    free slot, so it must not count against (or compete for) the slots the
+    cap is about. Adds are still bounded by the risk engine and the
+    exit-conflict rule, just not by this cap."""
     with conn.cursor(cursor_factory=psycopg2.extensions.cursor) as cur:
         cur.execute("""
             SELECT id, COALESCE(final_proposal_score, signal_score, 0)
             FROM trade_proposals
-            WHERE side='buy' AND decision IS NULL
+            WHERE side='buy' AND decision IS NULL AND NOT (symbol = ANY(%s))
             ORDER BY COALESCE(final_proposal_score, signal_score, 0) DESC, id ASC
-        """)
+        """, (list(exclude_symbols),))
         return [(r[0], float(r[1])) for r in cur.fetchall()]
 
 
@@ -72,12 +78,17 @@ def reject_proposal(conn, proposal_id, reason):
     return n
 
 
-def trim_surplus_buy_proposals(conn, max_open_positions, position_count, buffer=DEFAULT_BUFFER):
+def trim_surplus_buy_proposals(conn, max_open_positions, position_count, buffer=DEFAULT_BUFFER,
+                                held_symbols=()):
     """Rejects the lowest-scored open buys beyond allowed_open_buys().
     Returns [(id, symbol, score)] rejected. Caller decides what to do when
-    the position count is unknown -- pass nothing rather than a guess."""
+    the position count is unknown -- pass nothing rather than a guess.
+
+    held_symbols: adds to a held position are left out of the ranking (see
+    load_open_buys) -- except at zero free slots, where compute_signals()'s
+    own max_open_positions gate blocks adds too, so every open buy goes."""
     allowed = allowed_open_buys(max_open_positions, position_count, buffer)
-    open_buys = load_open_buys(conn)
+    open_buys = load_open_buys(conn, () if allowed == 0 else held_symbols)
     surplus = open_buys[allowed:]
     if not surplus:
         return []
