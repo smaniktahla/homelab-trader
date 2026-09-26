@@ -177,6 +177,7 @@ def test_manual_sell_with_counts_toward_loss_streak_succeeds(api_client, conn):
     _seed_position(conn, "ATTR2")
     with requests_mock.Mocker() as m:
         _mock_common_alpaca(m)
+        m.get("https://fake-alpaca.test/v2/positions/ATTR2", json={"symbol": "ATTR2", "qty": "10", "qty_available": "10"})
         m.post("https://fake-alpaca.test/v2/orders", json={
             "id": "order-attr2", "status": "filled", "filled_avg_price": "95.0", "filled_qty": "10",
         })
@@ -195,6 +196,7 @@ def test_non_manual_sell_does_not_require_counts_toward_loss_streak(api_client, 
     _seed_position(conn, "ATTR3")
     with requests_mock.Mocker() as m:
         _mock_common_alpaca(m)
+        m.get("https://fake-alpaca.test/v2/positions/ATTR3", json={"symbol": "ATTR3", "qty": "10", "qty_available": "10"})
         m.post("https://fake-alpaca.test/v2/orders", json={
             "id": "order-attr3", "status": "filled", "filled_avg_price": "95.0", "filled_qty": "10",
         })
