@@ -259,3 +259,34 @@ def test_proposal_approval_sell_cancels_resting_stop_before_availability_check(a
         deletes = _delete_requests(m)
         assert len(deletes) == 1
         assert deletes[0].path == "/v2/orders/stop-order-2"
+
+
+def test_manual_sell_of_closed_position_is_rejected_not_shorted(api_client, conn):
+    """Regression: CNP 2026-08-25 -- a second sell via POST /api/trade
+    8s after the position was already closed opened a 118-share short
+    (this account has shorting enabled). No position at Alpaca -> 400,
+    and no order is ever submitted."""
+    with requests_mock.Mocker() as m:
+        _mock_common_alpaca(m, positions=[], open_orders=[])
+        m.get("https://fake-alpaca.test/v2/positions/CNP", status_code=404,
+              json={"code": 40410000, "message": "position does not exist"})
+        m.post("https://fake-alpaca.test/v2/orders", json={"id": "should-not-happen", "status": "filled"})
+        r = api_client.post("/api/trade", json={
+            "symbol": "CNP", "side": "sell", "qty": 118, "source": "advisor_stop_loss"}, auth=AUTH)
+        assert r.status_code == 400
+        assert "No available long position in CNP" in r.json()["detail"]
+        assert _order_post_requests(m) == []
+
+
+def test_manual_sell_exceeding_available_shares_is_rejected(api_client, conn):
+    with requests_mock.Mocker() as m:
+        _mock_common_alpaca(m, positions=[{
+            "symbol": "AAPL", "qty": "10", "qty_available": "10", "avg_entry_price": "100.0",
+            "current_price": "150.0", "market_value": "1500.0", "unrealized_plpc": "0.5",
+        }], open_orders=[])
+        m.post("https://fake-alpaca.test/v2/orders", json={"id": "should-not-happen", "status": "filled"})
+        r = api_client.post("/api/trade", json={
+            "symbol": "AAPL", "side": "sell", "qty": 15, "counts_toward_loss_streak": True}, auth=AUTH)
+        assert r.status_code == 400
+        assert "exceeds available shares" in r.json()["detail"]
+        assert _order_post_requests(m) == []

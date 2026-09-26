@@ -60,6 +60,8 @@ def _seed_price(conn, symbol, close, ts=None):
 def _mock_common_alpaca(m, cash=50000.0, portfolio_value=100000.0, positions=None, order_status="filled"):
     m.get("https://fake-alpaca.test/v2/account", json={"cash": str(cash), "portfolio_value": str(portfolio_value)})
     m.get("https://fake-alpaca.test/v2/positions", json=positions or [])
+    for pos in positions or []:
+        m.get(f"https://fake-alpaca.test/v2/positions/{pos['symbol']}", json=pos)
     m.get(re.compile(r"https://fake-alpaca\.test/v2/orders/.*"), json={
         "status": order_status, "filled_avg_price": "1.0", "filled_qty": "1",
     })

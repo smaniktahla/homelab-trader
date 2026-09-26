@@ -1546,6 +1546,52 @@ def cancel_resting_stop_orders(symbol):
                 log.warning(f"Could not cancel resting stop order {order['id']} for {symbol}: {e}")
 
 
+def require_available_long_shares(symbol, qty):
+    """Raises unless we hold at least `qty` *available* (not already
+    committed to another open order) long shares of `symbol`. Selling more
+    than available would either open/deepen a short position or get
+    rejected by Alpaca with an opaque 403 -- this account has shorting
+    enabled, so it's the former: observed live on CNP 2026-08-25, where a
+    second sell of 118 shares 8s after the position was already closed
+    went through /api/trade (then unguarded) and opened a 118-share short.
+    Must run AFTER cancel_resting_stop_orders() for the same symbol -- see
+    that function's docstring."""
+    try:
+        pos = alpaca("GET", f"/v2/positions/{symbol}")
+        available_qty = float(pos.get("qty_available", pos.get("qty", 0)))
+    except HTTPException as e:
+        if e.status_code == 404:
+            available_qty = 0.0
+        else:
+            raise HTTPException(502, f"Could not verify {symbol} position with Alpaca: {e.detail}")
+    if available_qty <= 0:
+        # cancel_resting_stop_orders() just fired a DELETE, but
+        # Alpaca sometimes leaves an OTO stop leg wedged in
+        # pending_cancel indefinitely instead of resolving to
+        # canceled (observed live on WEC: stuck 5 days, DELETE
+        # re-sent on every approval attempt with no effect --
+        # each call succeeds but the leg never clears). That
+        # reads to a human as "sold/closed already" or "shares
+        # missing", not "a stop order is broker-side stuck", so
+        # detect it here and say so plainly instead of the
+        # generic message.
+        stuck_stop = None
+        try:
+            open_orders = alpaca("GET", f"/v2/orders?status=open&symbols={symbol}")
+            stuck_stop = next(
+                (o for o in open_orders or []
+                 if o.get("type") in ("stop", "stop_limit")
+                 and o.get("status") == "pending_cancel"),
+                None)
+        except Exception:
+            pass
+        if stuck_stop:
+            raise HTTPException(400, f"{symbol} shares are held but locked by a protective stop order (id {stuck_stop['id']}) stuck in Alpaca's pending_cancel state — cancellation was requested but never resolved. This needs manual clearing at Alpaca (dashboard or support); the app cannot force it. Cannot sell until it clears.")
+        raise HTTPException(400, f"No available long position in {symbol} — either none held or fully committed to another pending order. Cannot sell.")
+    if qty > available_qty:
+        raise HTTPException(400, f"Sell qty {qty} exceeds available shares {available_qty} for {symbol} (some may be tied up in another pending order). Reduce qty to {available_qty} or less.")
+
+
 def _reject_stale_sell_proposals_if_position_gone(cur, symbol, just_decided_proposal_id=None):
     """Reality-awareness gap found live 2026-08-12: approving one sell
     proposal, or clicking Sell directly on a position, closes the
@@ -1659,6 +1705,10 @@ def execute_trade(req: TradeRequest, background_tasks: BackgroundTasks):
         # "unavailable", which would otherwise look identical to genuinely
         # having no position).
         cancel_resting_stop_orders(req.symbol.upper())
+        # Same held-shares guard as proposal approval -- a manual or
+        # advisor-card sell of an already-closed position must not
+        # silently open a short.
+        require_available_long_shares(req.symbol.upper(), order_qty)
 
     # Submit to Alpaca. BUY orders attach a resting OTO stop-loss child leg
     # (Execution: protective stop orders) so the broker enforces the stop
@@ -1834,51 +1884,13 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
                 stop_price_for_order = _stop_price_for_order(float(ref_price), stop_price, stop_loss_pct)
 
             # For sell orders: cancel any resting protective stop first
-            # (Execution: protective stop orders -- must run before the
-            # qty_available check just below, since a resting stop order
-            # holds shares "unavailable" at Alpaca and would otherwise make
-            # a legitimate exit look like it has no shares to sell), then
-            # verify we hold enough *available* (i.e. not already committed
-            # to another open order) long shares to cover the sale. Selling
-            # more than available would either open/deepen a short position
-            # or get rejected by Alpaca with an opaque 403 — check up front
-            # so the rejection reason is clear either way.
+            # (Execution: protective stop orders -- a resting stop order
+            # holds shares "unavailable" at Alpaca), then verify we hold
+            # enough available long shares -- see
+            # require_available_long_shares().
             if p["side"] == "sell":
                 cancel_resting_stop_orders(p["symbol"])
-                try:
-                    pos = alpaca("GET", f"/v2/positions/{p['symbol']}")
-                    available_qty = float(pos.get("qty_available", pos.get("qty", 0)))
-                except HTTPException as e:
-                    if e.status_code == 404:
-                        available_qty = 0.0
-                    else:
-                        raise HTTPException(502, f"Could not verify {p['symbol']} position with Alpaca: {e.detail}")
-                if available_qty <= 0:
-                    # cancel_resting_stop_orders() just fired a DELETE, but
-                    # Alpaca sometimes leaves an OTO stop leg wedged in
-                    # pending_cancel indefinitely instead of resolving to
-                    # canceled (observed live on WEC: stuck 5 days, DELETE
-                    # re-sent on every approval attempt with no effect --
-                    # each call succeeds but the leg never clears). That
-                    # reads to a human as "sold/closed already" or "shares
-                    # missing", not "a stop order is broker-side stuck", so
-                    # detect it here and say so plainly instead of the
-                    # generic message.
-                    stuck_stop = None
-                    try:
-                        open_orders = alpaca("GET", f"/v2/orders?status=open&symbols={p['symbol']}")
-                        stuck_stop = next(
-                            (o for o in open_orders or []
-                             if o.get("type") in ("stop", "stop_limit")
-                             and o.get("status") == "pending_cancel"),
-                            None)
-                    except Exception:
-                        pass
-                    if stuck_stop:
-                        raise HTTPException(400, f"{p['symbol']} shares are held but locked by a protective stop order (id {stuck_stop['id']}) stuck in Alpaca's pending_cancel state — cancellation was requested but never resolved. This needs manual clearing at Alpaca (dashboard or support); the app cannot force it. Cannot sell until it clears.")
-                    raise HTTPException(400, f"No available long position in {p['symbol']} — either none held or fully committed to another pending order. Cannot sell.")
-                if trade_qty > available_qty:
-                    raise HTTPException(400, f"Sell qty {trade_qty} exceeds available shares {available_qty} for {p['symbol']} (some may be tied up in another pending order). Reduce qty to {available_qty} or less.")
+                require_available_long_shares(p["symbol"], trade_qty)
 
             # BUY orders attach a resting OTO stop-loss child leg -- see
             # execute_trade()'s own comment for why check_stop_losses()
