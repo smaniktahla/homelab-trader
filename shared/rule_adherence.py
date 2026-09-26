@@ -49,7 +49,7 @@ not just the first failure.
 from earnings import earnings_blackout_reason
 from signals import (
     fetch_alpaca_portfolio, load_params, recent_buy_block_reason,
-    sector_cap_block_reason, load_sector_map,
+    sector_cap_block_reason, rate_sensitivity_cluster_cap_block_reason, load_sector_map,
 )
 from trading_permission import evaluate_trading_permission
 
@@ -120,6 +120,9 @@ def check_gates(conn, symbol, side, qty, price):
     sector_map = load_sector_map(conn, {symbol} | set(positions.keys()))
     sector_block = sector_cap_block_reason(symbol, price, qty, sector_map, positions, portfolio_value, p)
     results.append({"rule": "sector_cap", "passed": sector_block is None, "detail": sector_block})
+
+    cluster_block = rate_sensitivity_cluster_cap_block_reason(symbol, price, qty, sector_map, positions, portfolio_value, p)
+    results.append({"rule": "cluster_cap", "passed": cluster_block is None, "detail": cluster_block})
 
     return results
 

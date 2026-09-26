@@ -238,6 +238,10 @@ INSERT INTO signal_params (key, value, description) VALUES
     ('sector_max_pct', 0.30, 'Max portfolio fraction in any single GICS sector (30%)')
 ON CONFLICT (key) DO NOTHING;
 
+INSERT INTO signal_params (key, value, description) VALUES
+    ('cluster_cap_pct', 0.25, 'Max portfolio fraction in rate-sensitivity cluster (utilities, REITs, materials, staples; 0 = disabled)')
+ON CONFLICT (key) DO NOTHING;
+
 -- PRD v1.1 #2: Earnings Blackout. Known earnings dates from Finnhub's free
 -- calendar endpoint; signals.py blocks new BUY proposals within
 -- earnings_blackout_days of a symbol's date (either side).

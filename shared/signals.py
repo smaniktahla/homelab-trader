@@ -82,6 +82,10 @@ DEFAULTS = {
     "max_open_positions": 5,
     "stop_loss_pct": 0.08,
     "sector_max_pct": 0.30,
+    # Cap on rate-sensitivity cluster (utilities, REITs, materials, staples)
+    # to prevent correlated concentration. 0 = disabled. See
+    # rate_sensitivity_cluster_cap_block_reason() for rationale.
+    "cluster_cap_pct": 0.25,
     "earnings_blackout_days": 3,
     "circuit_breaker_drawdown_pct": 0.15,
     "portfolio_stop_loss_pct": 0.05,
@@ -604,6 +608,18 @@ def load_sector_map(conn, symbols):
         return {r[0]: r[1] for r in cur.fetchall()}
 
 
+# Sectors that share interest-rate sensitivity and tend to move together.
+# Capping them separately (per GICS) allows correlated concentration risk.
+# Example: Aug-Sept 2026, utilities fell 13% while REITs fell 15%; buying
+# both heavily led to 62% portfolio allocation to 6 names (ATO, DTE, CPT,
+# MAA, FRT, WY). This cluster cap prevents that.
+RATE_SENSITIVITY_CLUSTER = {
+    "Utilities",           # Dividend payers, interest-rate exposed
+    "Real Estate",         # REIT sector, same rate sensitivity
+    "Materials",           # Commodity + cyclical, often correlated in downturns
+    "Consumer Staples",    # Defensive, but also dividend-heavy + rate-sensitive
+}
+
 def sector_cap_block_reason(sym, price, qty, sector_map, positions, portfolio_value, p):
     """Return a block reason string if buying qty*price of sym would push its
     GICS sector over sector_max_pct of the portfolio, else None."""
@@ -618,6 +634,31 @@ def sector_cap_block_reason(sym, price, qty, sector_map, positions, portfolio_va
     cap = p["sector_max_pct"]
     if projected_pct > cap:
         return f"sector_cap_exceeded:{sector} ({projected_pct*100:.0f}%>{cap*100:.0f}%)"
+    return None
+
+
+def rate_sensitivity_cluster_cap_block_reason(sym, price, qty, sector_map, positions, portfolio_value, p):
+    """Return a block reason if buying qty*price of sym would push the
+    rate-sensitivity cluster over cluster_cap_pct, else None. This cap
+    catches correlated concentration risk that per-GICS-sector caps miss
+    (e.g., utilities + REITs both falling on rising rates, mean-reversion
+    heavily buying both, ending up 62% allocated to 6 correlated names).
+
+    Requires cluster_cap_pct param; if not set, returns None (no cluster cap)."""
+    sector = sector_map.get(sym)
+    if not sector or sector not in RATE_SENSITIVITY_CLUSTER or not portfolio_value:
+        return None
+    cluster_cap = p.get("cluster_cap_pct")
+    if not cluster_cap:
+        return None  # Cluster cap disabled
+
+    current_cluster_value = sum(
+        pos["market_value"] for s, pos in positions.items()
+        if sector_map.get(s) in RATE_SENSITIVITY_CLUSTER
+    )
+    projected_pct = (current_cluster_value + qty * price) / portfolio_value
+    if projected_pct > cluster_cap:
+        return f"cluster_cap_exceeded:rate_sensitivity ({projected_pct*100:.0f}%>{cluster_cap*100:.0f}%)"
     return None
 
 
@@ -1240,6 +1281,14 @@ def compute_signals(conn, symbols):
                     if sector_block:
                         log.info(f"Skipping buy proposal for {sym}: {sector_block}")
                         _block_outcome(conn, outcome_id, sector_block)
+                        continue
+                    # Rate-sensitivity cluster cap (utilities + REITs + materials +
+                    # staples) to prevent correlated concentration risk
+                    cluster_block = rate_sensitivity_cluster_cap_block_reason(
+                        sym, price, qty, sector_map, positions, portfolio_value, p)
+                    if cluster_block:
+                        log.info(f"Skipping buy proposal for {sym}: {cluster_block}")
+                        _block_outcome(conn, outcome_id, cluster_block)
                         continue
                     regime_note = f" [regime={market_overall}, alloc×{alloc_mod:.0%}]" if alloc_mod != 1.0 else ""
                     rationale = f"{rationale}; sized {qty} shares (~${qty*price:.0f}) — {sizing_note}{regime_note}"
