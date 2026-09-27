@@ -26,7 +26,7 @@ RESET_TABLES = [
     "congressional_filings", "fundamental_facts",
     "position_trades", "position_lifecycles", "position_lifecycle_symbol_status",
     "rule_adherence_checks", "risk_decisions", "trade_theses",
-    "candidate_batches", "candidates",
+    "candidate_batches", "candidates", "candidate_backtests",
     "structural_swings", "structural_zones", "structural_events", "fair_value_gaps",
     "strategy_version_transitions", "strategy_versions", "strategies",
     "trading_permission_overrides",
