@@ -106,7 +106,7 @@ def test_manual_trade_clean_records_no_violation(api_client, conn):
     assert row is not None
     assert row["context"] == "manual_trade"
     assert row["any_violation"] is False
-    assert len(row["rule_results"]) == 6
+    assert len(row["rule_results"]) == 7
 
 
 def test_manual_trade_flags_a_real_violation(api_client, conn):
@@ -152,6 +152,9 @@ def test_manual_sell_trade_records_position_held_context(api_client, conn):
             "symbol": "AAPL", "qty": "10", "avg_entry_price": "100.0",
             "current_price": "150.0", "market_value": "1500.0", "unrealized_plpc": "0.5",
         }])
+        # require_available_long_shares() (#153) checks the single-position
+        # endpoint before any sell is submitted.
+        m.get("https://fake-alpaca.test/v2/positions/AAPL", json={"symbol": "AAPL", "qty": "10", "qty_available": "10"})
         m.post("https://fake-alpaca.test/v2/orders", json={
             "id": "order-3", "status": "filled", "filled_avg_price": "150.0", "filled_qty": "10",
         })

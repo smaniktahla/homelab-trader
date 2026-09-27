@@ -85,7 +85,10 @@ def test_buy_all_clear_no_violations(ra, conn):
         _mock_account(m, cash=50000.0, portfolio_value=100000.0)
         _mock_positions(m, [])
         results = ra.check_gates(conn, "AAPL", "buy", 5, 100.0)
-    assert len(results) == 6   # trading_permission, max_open_positions, earnings_blackout, buy_cooldown, position_sizing, sector_cap
+    assert [r["rule"] for r in results] == [
+        "trading_permission", "max_open_positions", "earnings_blackout",
+        "buy_cooldown", "position_sizing", "sector_cap", "cluster_cap",
+    ]
     assert not ra.any_violation(results)
     assert all(r["detail"] is None for r in results)
 
@@ -93,7 +96,7 @@ def test_buy_all_clear_no_violations(ra, conn):
 def test_evaluates_every_gate_even_when_one_fails(ra, conn):
     """The whole point of this module vs. compute_signals()'s own
     short-circuiting gate order: a failure on gate 1 must not prevent
-    gates 2-6 from being evaluated and reported too."""
+    the remaining gates from being evaluated and reported too."""
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO trades (symbol, side, qty, price, notional, traded_at, cost, status, thesis_id)
@@ -105,11 +108,12 @@ def test_evaluates_every_gate_even_when_one_fails(ra, conn):
         _mock_account(m, cash=50000.0, portfolio_value=100000.0)
         _mock_positions(m, [])
         results = ra.check_gates(conn, "AAPL", "buy", 5, 100.0)
-    assert len(results) == 6
+    assert len(results) == 7
     assert _rule(results, "buy_cooldown")["passed"] is False
     # every OTHER gate was still evaluated, not skipped
     assert _rule(results, "trading_permission")["passed"] is True
     assert _rule(results, "sector_cap")["passed"] is True
+    assert _rule(results, "cluster_cap")["passed"] is True
 
 
 def test_circuit_breaker_active(ra, conn):
@@ -191,3 +195,77 @@ def test_sector_cap_exceeded(ra, conn):
     sector = _rule(results, "sector_cap")
     assert sector["passed"] is False
     assert "sector_cap_exceeded" in sector["detail"]
+
+
+def _seed_sectors(conn, sectors):
+    with conn.cursor() as cur:
+        for symbol, sector in sectors.items():
+            cur.execute("""
+                INSERT INTO universe (symbol, sector) VALUES (%s, %s)
+                ON CONFLICT (symbol) DO UPDATE SET sector = EXCLUDED.sector
+            """, (symbol, sector))
+    conn.commit()
+
+
+def test_cluster_cap_exceeded_across_sectors(ra, conn):
+    """Utilities and Real Estate are separate GICS sectors, so neither
+    trips the 30% per-sector cap on its own -- but together they breach
+    the 25% rate-sensitivity cluster cap (cluster_cap_pct default)."""
+    _seed_sectors(conn, {"DTE": "Utilities", "CPT": "Real Estate"})
+    with requests_mock.Mocker() as m:
+        _mock_account(m, cash=50000.0, portfolio_value=100000.0)
+        # 20% already in Utilities; buying 10% of Real Estate -> 30% cluster
+        _mock_positions(m, [_position("DTE", qty=200, market_value=20000.0)])
+        results = ra.check_gates(conn, "CPT", "buy", 100, 100.0)
+    assert _rule(results, "sector_cap")["passed"] is True
+    cluster = _rule(results, "cluster_cap")
+    assert cluster["passed"] is False
+    assert "cluster_cap_exceeded:rate_sensitivity" in cluster["detail"]
+
+
+def test_cluster_cap_passes_under_cap(ra, conn):
+    _seed_sectors(conn, {"DTE": "Utilities", "CPT": "Real Estate"})
+    with requests_mock.Mocker() as m:
+        _mock_account(m, cash=50000.0, portfolio_value=100000.0)
+        # 20% + 4% = 24%, just under the 25% cluster cap
+        _mock_positions(m, [_position("DTE", qty=200, market_value=20000.0)])
+        results = ra.check_gates(conn, "CPT", "buy", 40, 100.0)
+    cluster = _rule(results, "cluster_cap")
+    assert cluster["passed"] is True
+    assert cluster["detail"] is None
+
+
+def test_cluster_cap_ignores_non_cluster_symbol(ra, conn):
+    """A Technology buy isn't in the rate-sensitivity cluster, so heavy
+    existing cluster exposure must not block it."""
+    _seed_sectors(conn, {"DTE": "Utilities", "CPT": "Real Estate", "AAPL": "Technology"})
+    with requests_mock.Mocker() as m:
+        _mock_account(m, cash=50000.0, portfolio_value=100000.0)
+        _mock_positions(m, [
+            _position("DTE", qty=200, market_value=20000.0),
+            _position("CPT", qty=100, market_value=10000.0),
+        ])
+        results = ra.check_gates(conn, "AAPL", "buy", 50, 100.0)
+    assert _rule(results, "cluster_cap")["passed"] is True
+
+
+def test_cluster_cap_disabled_when_param_zero(ra, conn):
+    """cluster_cap_pct = 0 disables the gate (per its schema.sql seed
+    comment), even for a buy that would otherwise breach it."""
+    _seed_sectors(conn, {"DTE": "Utilities", "CPT": "Real Estate"})
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM signal_params WHERE key = 'cluster_cap_pct'")
+        original = cur.fetchone()[0]
+        cur.execute("UPDATE signal_params SET value = 0 WHERE key = 'cluster_cap_pct'")
+    conn.commit()
+    try:
+        with requests_mock.Mocker() as m:
+            _mock_account(m, cash=50000.0, portfolio_value=100000.0)
+            _mock_positions(m, [_position("DTE", qty=200, market_value=20000.0)])
+            results = ra.check_gates(conn, "CPT", "buy", 100, 100.0)
+        assert _rule(results, "cluster_cap")["passed"] is True
+    finally:
+        # signal_params is config data the conn fixture doesn't reset
+        with conn.cursor() as cur:
+            cur.execute("UPDATE signal_params SET value = %s WHERE key = 'cluster_cap_pct'", (original,))
+        conn.commit()
