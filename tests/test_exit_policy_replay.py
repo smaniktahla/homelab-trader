@@ -1,6 +1,7 @@
 """
-Mechanics of ingest/research/backtests/backtest_exit_policy_replay.py's
-simulate_exit(): candidate stops are only active from the bar AFTER the
+Mechanics of shared/exit_policies.py's simulate_exit() (used by
+ingest/research/backtests/backtest_exit_policy_replay.py and the Phase 5a
+candidate backtest bridge): candidate stops are only active from the bar AFTER the
 high that raised them, gaps fill at the open, and a policy with no
 candidate stop reproduces the live exits. Synthetic bars, arbitrary
 parameters -- not the values of any study.
@@ -8,12 +9,8 @@ parameters -- not the values of any study.
 
 import datetime as dt
 import math
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ingest" / "research" / "backtests"))
-
-from backtest_exit_policy_replay import simulate_exit  # noqa: E402
+from exit_policies import simulate_exit
 
 FLOOR = {"name": "floor", "arm_mfe": 0.05, "floor": [[0.05, 0.5]]}
 TRAIL = {"name": "trail", "arm_mfe": 0.05, "trail_atr": [[0.05, 1.0]]}
@@ -31,7 +28,7 @@ def _series(rows):
 def _run(rows, policy, close_exit=None, atr=2.0, stop_loss_pct=0.12):
     s = _series(rows)
     n = len(rows)
-    return simulate_exit(s, close_exit or [None] * n, [atr] * n, 1, s["o"][1], policy, stop_loss_pct)
+    return simulate_exit(s, (close_exit or [None] * n).__getitem__, ([atr] * n).__getitem__, 1, s["o"][1], policy, stop_loss_pct)
 
 
 def test_floor_raised_by_a_bars_high_does_not_fill_on_that_bar():

@@ -1262,6 +1262,31 @@ CREATE TABLE IF NOT EXISTS candidates (
 
 CREATE INDEX IF NOT EXISTS idx_candidates_batch_id ON candidates (batch_id);
 
+-- candidate_backtests: Hypothesis-Driven Phase 5a-1 (shared/candidate_backtest.py,
+-- docs/hypothesis-driven-phase5a-scoping.md). One APPEND-ONLY row per
+-- backtest of a candidate's condition trees -- a re-run adds a row, never
+-- updates one. Results are inert: nothing reads this table to change a
+-- candidate's or strategy version's status. Every row is kept (including
+-- insufficient_trades / unsupported_feature / error) so the number of
+-- candidates tried per hypothesis type is always recoverable;
+-- trial_number is this row's position among that type's evaluated rows.
+-- run_config records the sealed holdout boundary, exit family, costs and
+-- code hash the result was produced under.
+CREATE TABLE IF NOT EXISTS candidate_backtests (
+    id               BIGSERIAL PRIMARY KEY,
+    candidate_id     BIGINT NOT NULL REFERENCES candidates(id),
+    hypothesis_type  TEXT NOT NULL,
+    status           TEXT NOT NULL CHECK (status IN ('complete', 'insufficient_trades', 'unsupported_feature', 'error')),
+    trial_number     INTEGER,
+    run_config       JSONB NOT NULL,
+    metrics          JSONB,
+    detail           TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidate_backtests_candidate_id ON candidate_backtests (candidate_id);
+CREATE INDEX IF NOT EXISTS idx_candidate_backtests_hypothesis_type ON candidate_backtests (hypothesis_type);
+
 -- Additional hypothesis_types seed rows, PR 16 (Bollinger Breakout
 -- Continuation + EMA Crossover Trend strategies, built on PR 15's
 -- shared/backtest_engine.py). Metadata/catalog registration only, per

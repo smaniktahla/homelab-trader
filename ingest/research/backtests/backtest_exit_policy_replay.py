@@ -8,7 +8,8 @@ findings. The policies under test are supplied at run time as a JSON file
 (see --policies); the preregistered protocol and results live in DocMost,
 not in this repo.
 
-What is replicated from live (shared/signals.py, imported, not copied):
+What is replicated from live (shared/exit_policies.py over shared/signals.py,
+imported, not copied):
   entry   score_signal(side="buy") on a trailing 252-close window (live
           fetch_closes("1y")), RSI/BB/regime/RS-vs-SPY/ATR(24-bar window)
           exactly as compute_signals() feeds them; gate
@@ -52,36 +53,27 @@ Usage:
 """
 
 import argparse
-import bisect
 import csv
 import datetime as dt
 import gzip
 import json
-import math
 import os
-import random
 import sys
 from collections import defaultdict
 from multiprocessing import Pool
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "shared"))
 
-from signals import (  # noqa: E402
-    DEFAULTS as SIGNAL_DEFAULTS, ATR_PERIOD, RS_LOOKBACK_DAYS,
-    compute_atr, compute_bollinger, compute_rsi, detect_regime, score_signal,
-)
+from signals import DEFAULTS as SIGNAL_DEFAULTS  # noqa: E402
+from exit_policies import MarketContext, WARMUP, live_cycle, simulate_exit  # noqa: E402
 from volatility_forecast import realized_vol_daily  # noqa: E402
 from market_structure import percentile_rank  # noqa: E402
 
-WINDOW = 252               # live fetch_closes("1y")
-WARMUP = 200               # regime SMA200 needs this many closes
-ATR_WINDOW = ATR_PERIOD + 10   # live _load_recent_ohlc_from_db(conn, sym, ATR_PERIOD + 10)
-TIME_STOP_BARS = 20
 VOL_WINDOW = 20
 VOL_PCT_LOOKBACK = 100
 POST_EXIT_HORIZONS = (1, 3, 5, 10)
 
-_G = {}  # per-worker globals (SPY series, regime lookup, params, policies)
+_G = {}  # per-worker globals (market context, params, policies)
 
 
 def load_prices(path):
@@ -114,113 +106,18 @@ def load_regime(path):
     return dates, vals
 
 
-def regime_asof(d):
-    dates, vals = _G["regime"]
-    i = bisect.bisect_right(dates, d) - 1
-    return vals[i] if i >= 0 else (None, None)
-
-
-def spy_close_asof(d, back):
-    """SPY close `back` rows before the last row dated <= d (live reads the
-    last N price_history rows for SPY, i.e. row-aligned, not date-aligned)."""
-    sd, sc = _G["spy"]
-    i = bisect.bisect_right(sd, d) - 1 - back
-    return sc[i] if i >= 0 else None
-
-
-def bar_features(s, t, p):
-    """Everything compute_signals() derives for one symbol on one cycle,
-    computed from bars[: t + 1] only."""
-    c = s["c"]
-    closes = c[max(0, t - WINDOW + 1): t + 1]
-    rsi = compute_rsi(closes, p["rsi_period"])
-    bb_upper, bb_middle, bb_lower, band_std = compute_bollinger(closes, p["bb_period"], p["bb_std"])
-    regime = detect_regime(closes, p["regime_sma_fast"], p["regime_sma_slow"], p["regime_band"])
-    rs_pct = None
-    if t >= RS_LOOKBACK_DAYS:
-        spy_now, spy_then = spy_close_asof(s["d"][t], 0), spy_close_asof(s["d"][t], RS_LOOKBACK_DAYS)
-        if spy_now and spy_then:
-            rs_pct = ((c[t] - c[t - RS_LOOKBACK_DAYS]) / c[t - RS_LOOKBACK_DAYS] * 100
-                      - (spy_now - spy_then) / spy_then * 100)
-    lo = max(0, t - ATR_WINDOW + 1)
-    atr = compute_atr(list(zip(s["h"][lo:t + 1], s["l"][lo:t + 1], c[lo:t + 1])))
-    return rsi, bb_upper, bb_middle, bb_lower, band_std, regime, rs_pct, atr
-
-
-def precompute(s, p, start_date):
-    """Per-bar: buy_ok, close_exit_reason, atr. None before warm-up."""
+def precompute(s, p, ctx, start_date):
+    """Per-bar: buy_ok, close_exit_reason, atr. None before warm-up or the
+    first signal date."""
     n = len(s["c"])
     buy_ok, close_exit, atr_arr = [False] * n, [None] * n, [None] * n
     for t in range(WARMUP - 1, n):
-        rsi, bbu, bbm, bbl, bstd, regime, rs_pct, atr = bar_features(s, t, p)
+        ok, reason, atr = live_cycle(s, t, p, ctx)
         atr_arr[t] = atr
-        overall, score_mod = regime_asof(s["d"][t])
-        if overall is None or s["d"][t] < start_date:
+        if s["d"][t] < start_date:
             continue
-        gate = p["score_proposal_min"] + score_mod
-        price = s["c"][t]
-        buy, _ = score_signal(rsi, price, bbu, bbl, bstd, bbm, regime, "buy", p, rs_pct=rs_pct, atr=atr)
-        sell, _ = score_signal(rsi, price, bbu, bbl, bstd, bbm, regime, "sell", p, rs_pct=rs_pct, atr=atr)
-        buy_ok[t] = buy >= p["score_log_min"] and buy >= gate
-        # Same precedence as one live cycle: portfolio-level regime exit is
-        # checked before the per-symbol loop, then thesis_complete, then
-        # the sell-side signal.
-        if overall == "bear_fear":
-            close_exit[t] = "regime_deterioration"
-        elif bbm is not None and price >= bbm:
-            close_exit[t] = "thesis_complete"
-        elif sell >= p["score_log_min"] and sell >= gate:
-            close_exit[t] = "overbought"
+        buy_ok[t], close_exit[t] = ok, reason
     return buy_ok, close_exit, atr_arr
-
-
-def _step(steps, mfe):
-    val = None
-    for frm, v in steps:
-        if mfe >= frm:
-            val = v
-    return val
-
-
-def simulate_exit(s, close_exit, atr_arr, e, fill, policy, stop_loss_pct):
-    """Walk from fill bar e until exit. Returns dict or None if still open."""
-    o, h, l = s["o"], s["h"], s["l"]
-    n = len(o)
-    hard = fill * (1 - stop_loss_pct)
-    cand = -math.inf
-    hh = -math.inf
-    pending = None
-    arm = policy.get("arm_mfe")
-    for t in range(e, n):
-        if t > e and pending:
-            return _exit(t, o[t], pending, hh, fill)
-        stop = max(hard, cand)
-        reason = "hard_stop" if stop == hard else "candidate_stop"
-        if t > e and o[t] <= stop:
-            return _exit(t, o[t], reason, hh, fill)
-        if l[t] <= stop:
-            return _exit(t, stop, reason, hh, fill)
-        hh = max(hh, h[t])
-        mfe = hh / fill - 1
-        if arm is not None and mfe >= arm:
-            if policy.get("floor"):
-                lock = _step(policy["floor"], mfe)
-                if lock is not None:
-                    cand = max(cand, fill * (1 + lock * mfe))
-            if policy.get("trail_atr") and atr_arr[t]:
-                mult = _step(policy["trail_atr"], mfe)
-                if mult is not None:
-                    cand = max(cand, hh - mult * atr_arr[t])
-        if close_exit[t]:
-            pending = close_exit[t]
-        elif t - (e - 1) >= TIME_STOP_BARS:
-            pending = "time_stop"
-    return None
-
-
-def _exit(t, price, reason, hh, fill):
-    mfe_price = max(hh, price) if hh != -math.inf else price
-    return {"x": t, "exit_price": price, "reason": reason, "mfe": mfe_price / fill - 1}
 
 
 def entry_vol_regime(s, t):
@@ -239,14 +136,14 @@ def entry_vol_regime(s, t):
     return "compression" if pct < 25 else ("expansion" if pct > 75 else "normal")
 
 
-def _init(spy, regime, p, policies, start_date, cost):
-    _G.update(spy=spy, regime=regime, p=p, policies=policies, start=start_date, cost=cost)
+def _init(ctx, p, policies, start_date, cost):
+    _G.update(ctx=ctx, p=p, policies=policies, start=start_date, cost=cost)
 
 
 def run_symbol(args):
     sym, s = args
     p, policies, cost = _G["p"], _G["policies"], _G["cost"]
-    buy_ok, close_exit, atr_arr = precompute(s, p, _G["start"])
+    buy_ok, close_exit, atr_arr = precompute(s, p, _G["ctx"], _G["start"])
     baseline = next(pl for pl in policies if not pl.get("floor") and not pl.get("trail_atr"))
     rows = []
     n = len(s["c"])
@@ -259,13 +156,13 @@ def run_symbol(args):
         e = t + 1
         fill = s["o"][e]
         last_fill = s["d"][e]
-        base = simulate_exit(s, close_exit, atr_arr, e, fill, baseline, p["stop_loss_pct"])
+        base = simulate_exit(s, close_exit.__getitem__, atr_arr.__getitem__, e, fill, baseline, p["stop_loss_pct"])
         if base is None:
             break  # still open at end of data -- excluded
         row = {"symbol": sym, "signal_date": s["d"][t].isoformat(), "entry_date": s["d"][e].isoformat(),
                "fill": fill, "vol_regime": entry_vol_regime(s, t), "policies": {}}
         for pl in policies:
-            r = base if pl is baseline else simulate_exit(s, close_exit, atr_arr, e, fill, pl, p["stop_loss_pct"])
+            r = base if pl is baseline else simulate_exit(s, close_exit.__getitem__, atr_arr.__getitem__, e, fill, pl, p["stop_loss_pct"])
             if r is None:
                 continue
             x = r["x"]
@@ -302,11 +199,11 @@ def main():
     with open(a.policies) as f:
         policies = json.load(f)
     prices = load_prices(a.prices)
-    spy = (prices["SPY"]["d"], prices["SPY"]["c"])
-    regime = load_regime(a.regime)
+    regime_dates, regime_vals = load_regime(a.regime)
+    ctx = MarketContext(regime_dates, regime_vals, prices["SPY"]["d"], prices["SPY"]["c"])
     start = dt.date.fromisoformat(a.start)
 
-    with Pool(a.workers, initializer=_init, initargs=(spy, regime, p, policies, start, a.round_trip_cost)) as pool:
+    with Pool(a.workers, initializer=_init, initargs=(ctx, p, policies, start, a.round_trip_cost)) as pool:
         chunks = pool.map(run_symbol, sorted(prices.items()), chunksize=4)
     trades = [r for ch in chunks for r in ch]
     with open(a.out, "w") as f:

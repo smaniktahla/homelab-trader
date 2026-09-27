@@ -22,6 +22,7 @@ import proposal_ranking
 import position_execution_state as pes
 import hypothesis_library
 import hypothesis_candidates
+import candidate_backtest
 import strategy_registry
 import strategy_lifecycle
 from backtest_engine import load_bars, run_backtest
@@ -2398,6 +2399,37 @@ def register_candidate_as_strategy_version_endpoint(candidate_id: int, body: Reg
         raise HTTPException(422, f"registration failed (unknown candidate_id={candidate_id} or "
                                   f"strategy_id={body.strategy_id})")
     return {"id": new_id, "candidate_id": candidate_id, "strategy_id": body.strategy_id, "status": "RESEARCH"}
+
+
+# ── Candidate backtest bridge (Hypothesis-Driven Phase 5a-1) ────────────────
+# Backtests candidates' condition trees across the price_history universe
+# via shared/candidate_backtest.py and appends results to
+# candidate_backtests -- see docs/hypothesis-driven-phase5a-scoping.md.
+# Results are inert (no status/lifecycle change) and every query is bounded
+# by the sealed holdout. Synchronous: a batch runs one pass over the
+# universe, which can take a minute or two. Plain psycopg2.connect(DB_DSN),
+# same reasoning as the candidates endpoints above.
+
+@app.post("/api/candidates/{candidate_id}/backtest")
+def backtest_candidate_endpoint(candidate_id: int):
+    with psycopg2.connect(DB_DSN) as conn:
+        results = candidate_backtest.run_candidate_backtests(conn, [candidate_id])
+    if results and results[0]["status"] == "not_found":
+        raise HTTPException(404, f"candidate {candidate_id} not found")
+    return results[0]
+
+@app.post("/api/candidate-batches/{batch_id}/backtest")
+def backtest_candidate_batch_endpoint(batch_id: int):
+    with psycopg2.connect(DB_DSN) as conn:
+        candidates = hypothesis_candidates.list_candidates(conn, batch_id)
+        if not candidates:
+            raise HTTPException(404, f"candidate_batch {batch_id} not found or empty")
+        return candidate_backtest.run_candidate_backtests(conn, [c.id for c in candidates])
+
+@app.get("/api/candidates/{candidate_id}/backtests")
+def list_candidate_backtests_endpoint(candidate_id: int):
+    with psycopg2.connect(DB_DSN) as conn:
+        return candidate_backtest.list_candidate_backtests(conn, candidate_id)
 
 
 # ── Trading-permission manual override (2026-09-19) ────────────────────────
