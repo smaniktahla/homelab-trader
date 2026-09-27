@@ -609,10 +609,10 @@ def load_sector_map(conn, symbols):
 
 
 # Sectors that share interest-rate sensitivity and tend to move together.
-# Capping them separately (per GICS) allows correlated concentration risk.
-# Example: Aug-Sept 2026, utilities fell 13% while REITs fell 15%; buying
-# both heavily led to 62% portfolio allocation to 6 names (ATO, DTE, CPT,
-# MAA, FRT, WY). This cluster cap prevents that.
+# Capping them separately (per GICS sector) lets correlated concentration
+# build: a rate-driven selloff hits all of them at once, and a mean-reversion
+# strategy buying the dip in each ends up heavily exposed to one bet. This
+# cluster cap bounds their combined exposure.
 RATE_SENSITIVITY_CLUSTER = {
     "Utilities",           # Dividend payers, interest-rate exposed
     "Real Estate",         # REIT sector, same rate sensitivity

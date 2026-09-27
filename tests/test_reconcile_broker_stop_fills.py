@@ -159,11 +159,11 @@ def test_lookback_stays_at_floor_for_a_recently_opened_lifecycle(conn, monkeypat
 
 def test_lookback_extends_past_floor_for_an_old_open_lifecycle(conn, monkeypatch):
     """The 2026-09-20 bug: a lifecycle open longer than the fixed 30-day
-    floor (EIX, opened 2026-08-08) needs the window to reach back to its
+    floor needs the window to reach back to its
     own entry, one day of margin included, not just the floor."""
     ingest = _import_ingest(monkeypatch)
     opened_at = datetime.now(timezone.utc) - timedelta(days=45)
-    _open_lifecycle(conn, "EIX", opened_at)
+    _open_lifecycle(conn, "OLDPOS", opened_at)
     start = ingest._stop_fill_lookback_start(conn)
     assert abs((start - (opened_at - timedelta(days=1))).total_seconds()) < 5
 
@@ -196,14 +196,14 @@ def test_reconciliation_finds_a_stop_fill_for_a_lifecycle_older_than_30_days(con
     within a lifecycle-derived window but outside a fixed 30-day one is
     now found and recorded."""
     ingest = _import_ingest(monkeypatch)
-    _open_lifecycle(conn, "EIX", datetime.now(timezone.utc) - timedelta(days=45))
+    _open_lifecycle(conn, "OLDPOS", datetime.now(timezone.utc) - timedelta(days=45))
     with requests_mock.Mocker() as m:
-        m.get("https://fake-alpaca.test/v2/orders", json=[_stop_fill_order("stop-eix", "EIX", "70", "56.13")])
+        m.get("https://fake-alpaca.test/v2/orders", json=[_stop_fill_order("stop-oldpos", "OLDPOS", "10", "50.0")])
         ingest.reconcile_broker_stop_fills(conn)
     after = datetime.fromisoformat(m.request_history[0].qs["after"][0].upper().replace("Z", "+00:00"))
     assert (datetime.now(timezone.utc) - after).days >= 44   # well past the old fixed 30d cutoff
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM trades WHERE order_id='stop-eix'")
+        cur.execute("SELECT COUNT(*) FROM trades WHERE order_id='stop-oldpos'")
         assert cur.fetchone()[0] == 1
 
 

@@ -1552,9 +1552,9 @@ def require_available_long_shares(symbol, qty):
     committed to another open order) long shares of `symbol`. Selling more
     than available would either open/deepen a short position or get
     rejected by Alpaca with an opaque 403 -- this account has shorting
-    enabled, so it's the former: observed live on CNP 2026-08-25, where a
-    second sell of 118 shares 8s after the position was already closed
-    went through /api/trade (then unguarded) and opened a 118-share short.
+    enabled, so it's the former: observed live (2026-08), where a second
+    sell submitted seconds after the position was already closed went
+    through /api/trade (then unguarded) and opened a short position.
     Must run AFTER cancel_resting_stop_orders() for the same symbol -- see
     that function's docstring."""
     try:

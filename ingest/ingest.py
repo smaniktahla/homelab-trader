@@ -400,10 +400,9 @@ def _stop_fill_lookback_start(conn, floor_days=30):
 
     Fixes the 2026-09-20 gap where a fixed 30-day window still missed a
     stop fill for a lifecycle that had been open longer than 30 days
-    (EIX, opened 2026-08-08, stop fired 2026-08-31 -- inside a
-    lifecycle-derived window, but the naive floor_days=30 window run on
-    2026-09-20 had already rolled past 2026-08-08's own -1-day margin by
-    a wide margin, let alone the entry order's actual creation time).
+(a lifecycle open ~45 days whose stop fired ~3 weeks after entry --
+    inside a lifecycle-derived window, but a fixed 30-day window run at
+    that point had already rolled past the entry order's creation time).
     Falls back to the floor alone when there are no open lifecycles at
     all (nothing to protect yet, or everything is already closed) --
     30 days is an arbitrary-but-generous floor either way, same reasoning
@@ -636,8 +635,8 @@ def _backfill_missing_fills(conn, symbol, side, since):
 def reconcile_lifecycles_with_broker(conn):
     """Compares open position_lifecycles (built from the trades ledger) to
     Alpaca's real positions every cycle. Found live 2026-09-20: open
-    lifecycles for ORCL/EIX that the broker no longer held, and no lifecycle
-    at all for a held CNP -- ledger/broker drift that
+    lifecycles for symbols the broker no longer held, and no open lifecycle
+    for a held short -- ledger/broker drift that
     trading_permission.current_breadth_down_streak() reads as the held set.
 
     Detection always runs and logs each divergence. Repair -- backfilling
@@ -668,8 +667,8 @@ def reconcile_lifecycles_with_broker(conn):
         return diff
 
     # The app is long-only, so a short is never something to backfill
-    # around: found live 2026-09-20 (CNP -118), a second manual sell 9s
-    # after the one that closed the long flipped it short. Needs a human.
+    # around: found live 2026-09, a second manual sell seconds after the
+    # one that closed the long flipped it short. Needs a human.
     for sym, q in diff["broker_short"].items():
         log.error(f"Lifecycle drift: {sym} is SHORT at the broker (qty {q:g}) -- long-only ledger cannot represent it; manual review required")
 

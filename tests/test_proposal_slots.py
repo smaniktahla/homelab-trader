@@ -179,7 +179,7 @@ def test_ingest_trim_counts_short_positions_toward_the_cap(conn, monkeypatch):
         _add_proposal(conn, sym, score=score)
     with requests_mock.Mocker() as m:   # 2 longs + 1 short = 3 of 3 -> no slot
         m.get(f"{BASE}/v2/positions", json=[
-            {"symbol": "X", "qty": "10"}, {"symbol": "Y", "qty": "5"}, {"symbol": "CNP", "qty": "-118"}])
+            {"symbol": "X", "qty": "10"}, {"symbol": "Y", "qty": "5"}, {"symbol": "SHRT", "qty": "-50"}])
         ingest.reconcile_surplus_buy_proposals(conn)
     assert all(r[2] == "rejected" for r in _state(conn))
 
