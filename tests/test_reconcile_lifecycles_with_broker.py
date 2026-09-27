@@ -180,7 +180,7 @@ def test_repair_is_idempotent(conn, monkeypatch):
 
 
 def test_repair_advances_ledger_row_stuck_short_of_filled(conn, monkeypatch):
-    """CNP-style case: a trades row exists but never reached status='filled',
+    """A trades row exists but never reached status='filled',
     so build_position_lifecycles ignores it."""
     ingest = _import_ingest(monkeypatch)
     _add_trade(conn, "CNP", "buy", 7, 50, "o-cnp-buy", T0, status="accepted")
@@ -213,15 +213,15 @@ def test_orders_fetch_failure_during_repair_changes_nothing(conn, monkeypatch):
 
 
 def test_broker_short_is_flagged_and_never_backfilled(conn, monkeypatch):
-    """Live 2026-09-20: CNP -118 -- a second sell right after the one that
+    """Live 2026-09: a second sell right after the one that
     closed the long flipped the account short. Long-only ledger can't hold
     it; must be surfaced, and repair must not try to 'fix' it."""
     ingest = _import_ingest(monkeypatch)
     _set_repair(conn, True)
     with requests_mock.Mocker() as m:
-        m.get(f"{BASE}/v2/positions", json=[{"symbol": "CNP", "qty": "-118"}])
+        m.get(f"{BASE}/v2/positions", json=[{"symbol": "SHRT", "qty": "-50"}])
         diff = ingest.reconcile_lifecycles_with_broker(conn)
-    assert diff["broker_short"] == {"CNP": -118.0}
+    assert diff["broker_short"] == {"SHRT": -50.0}
     assert not is_clean(diff)
     assert [r.path for r in m.request_history] == ["/v2/positions"]   # no order backfill attempted
 
@@ -229,10 +229,10 @@ def test_broker_short_is_flagged_and_never_backfilled(conn, monkeypatch):
 def test_stop_fill_lookback_covers_stops_that_fire_long_after_entry(conn, monkeypatch):
     """Alpaca's `after` filters on order creation/submission, and an OTO
     stop leg carries its parent's timestamps -- a 2h window could never see
-    a stop firing days later (EIX 2026-08-31)."""
+    a stop firing days later."""
     ingest = _import_ingest(monkeypatch)
     with requests_mock.Mocker() as m:
-        m.get(f"{BASE}/v2/orders", json=[_order("stop-leg", "EIX", "sell", 70, 56.13, typ="stop")])
+        m.get(f"{BASE}/v2/orders", json=[_order("stop-leg", "OLDPOS", "sell", 10, 50.0, typ="stop")])
         ingest.reconcile_broker_stop_fills(conn)
     after = datetime.fromisoformat(m.request_history[0].qs["after"][0].upper().replace("Z", "+00:00"))
     assert (datetime.now(timezone.utc) - after).days >= 29
@@ -240,7 +240,7 @@ def test_stop_fill_lookback_covers_stops_that_fire_long_after_entry(conn, monkey
 
 def test_repair_backs_off_from_opened_at_so_entry_time_stop_legs_are_found(conn, monkeypatch):
     ingest = _import_ingest(monkeypatch)
-    _add_trade(conn, "EIX", "buy", 70, 68, "o-eix-buy", T0)
+    _add_trade(conn, "OLDPOS", "buy", 10, 60, "o-oldpos-buy", T0)
     ingest.build_position_lifecycles(conn)
     _set_repair(conn, True)
     with requests_mock.Mocker() as m:

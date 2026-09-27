@@ -262,19 +262,19 @@ def test_proposal_approval_sell_cancels_resting_stop_before_availability_check(a
 
 
 def test_manual_sell_of_closed_position_is_rejected_not_shorted(api_client, conn):
-    """Regression: CNP 2026-08-25 -- a second sell via POST /api/trade
+    """Regression (2026-08): a second sell via POST /api/trade
     8s after the position was already closed opened a 118-share short
     (this account has shorting enabled). No position at Alpaca -> 400,
     and no order is ever submitted."""
     with requests_mock.Mocker() as m:
         _mock_common_alpaca(m, positions=[], open_orders=[])
-        m.get("https://fake-alpaca.test/v2/positions/CNP", status_code=404,
+        m.get("https://fake-alpaca.test/v2/positions/ZZZ", status_code=404,
               json={"code": 40410000, "message": "position does not exist"})
         m.post("https://fake-alpaca.test/v2/orders", json={"id": "should-not-happen", "status": "filled"})
         r = api_client.post("/api/trade", json={
-            "symbol": "CNP", "side": "sell", "qty": 118, "source": "advisor_stop_loss"}, auth=AUTH)
+            "symbol": "ZZZ", "side": "sell", "qty": 100, "source": "advisor_stop_loss"}, auth=AUTH)
         assert r.status_code == 400
-        assert "No available long position in CNP" in r.json()["detail"]
+        assert "No available long position in ZZZ" in r.json()["detail"]
         assert _order_post_requests(m) == []
 
 
