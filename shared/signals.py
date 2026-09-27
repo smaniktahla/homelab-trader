@@ -1317,17 +1317,25 @@ def compute_signals(conn, symbols):
                     planned_entry_price = price
                     percentage_stop_price = price * (1 - p["stop_loss_pct"])
 
-                    # PR 6 (Structure-Aware Stop Resolver): dark unless a human has
-                    # explicitly flipped structure_aware_stop_enabled on (default
-                    # off, same precedent as structure_scoring_enabled). Off ->
-                    # planned_initial_stop_price is exactly the percentage
-                    # calculation this line always did. See
-                    # shared/trade_thesis_stop_resolver.py.
-                    if stop_resolver_params["structure_aware_stop_enabled"]:
-                        planned_initial_stop_price = resolve_initial_stop_price(
-                            conn, sym, price, percentage_stop_price, stop_resolver_params)["stop_price"]
-                    else:
-                        planned_initial_stop_price = percentage_stop_price
+                    # PR 6 (Structure-Aware Stop Resolver) / ATR-stop mode:
+                    # dark unless a human has explicitly flipped
+                    # structure_aware_stop_enabled and/or atr_stop_enabled on
+                    # (both default off, same precedent as
+                    # structure_scoring_enabled). resolve_initial_stop_price()
+                    # itself is a no-op pass-through to the percentage
+                    # calculation when both are off (see its own docstring's
+                    # byte-for-byte guarantee), so it is always safe to call
+                    # unconditionally -- unlike the earlier version of this
+                    # gate, which only ever called it when
+                    # structure_aware_stop_enabled was on, silently making
+                    # atr_stop_enabled dead code in proposal generation (it
+                    # only mattered inside resolve_initial_stop_price() itself,
+                    # which nothing outside compute_signals() ever reached
+                    # this function to invoke). Found 2026-09-27 while
+                    # verifying the order-risk-path architecture map before
+                    # any ATR-stop production decision.
+                    planned_initial_stop_price = resolve_initial_stop_price(
+                        conn, sym, price, percentage_stop_price, stop_resolver_params)["stop_price"]
 
                     planned_risk_per_share = price - planned_initial_stop_price
                     planned_risk_dollars = planned_risk_per_share * qty
