@@ -1246,6 +1246,13 @@ CREATE TABLE IF NOT EXISTS candidate_batches (
 
 CREATE INDEX IF NOT EXISTS idx_candidate_batches_hypothesis_type ON candidate_batches (hypothesis_type);
 
+-- Phase 5a-2 (shared/llm_hypothesis_generator.py): audit trail for a batch
+-- whose parameter values were proposed by an LLM -- model (as reported by
+-- the server, not its alias), endpoint, prompt template version + prompt
+-- hash, sampling params, the raw response and the model's rationale. NULL
+-- for human-authored sweeps. generated_by keeps its meaning ("llm:<model>").
+ALTER TABLE candidate_batches ADD COLUMN IF NOT EXISTS llm_provenance JSONB;
+
 -- candidates: one concrete, fully-substituted condition-tree set per
 -- parameter combination in a batch's Cartesian product. Not executable --
 -- no backtest_results linkage, no scoring/promotion status. Generation +
@@ -1639,3 +1646,11 @@ CREATE INDEX IF NOT EXISTS idx_trading_permission_overrides_active
 -- forced TRUE at insert time -- an algorithm-initiated trade is never
 -- ambiguous about whether it reflects the algorithm's judgment.
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS counts_toward_loss_streak BOOLEAN;
+
+-- Phase 5a-2 LLM candidate generation limits (shared/llm_hypothesis_generator.py).
+-- Research-only knobs: they bound how many LLM-proposed candidates can be
+-- created, never anything that trades.
+INSERT INTO signal_params (key, value, description) VALUES
+    ('llm_candidate_batch_cap', 12, 'Max candidates (Cartesian product of proposed values) in one LLM-generated batch; larger proposals are rejected, never truncated'),
+    ('llm_candidate_batches_per_day', 5, 'Max LLM-generated candidate batches per rolling 24 hours')
+ON CONFLICT (key) DO NOTHING;
