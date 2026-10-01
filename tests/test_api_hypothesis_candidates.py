@@ -86,3 +86,21 @@ def test_post_generate_candidates_requires_auth(api_client, conn):
         "parameter_spec": {"technical.rsi_14": [25]},
     })
     assert r.status_code == 401
+
+
+def test_post_llm_candidates_returns_batch_or_422(api_client, conn, monkeypatch):
+    import llm_hypothesis_generator as gen
+
+    def fake_call(prompt, base_url):
+        return '{"parameter_spec": {"technical.rsi_14": [25, 35]}, "rationale": "r"}', "fake.gguf"
+    monkeypatch.setattr(gen, "call_llm", fake_call)
+
+    r = api_client.post(f"/api/hypothesis-types/{SEEDED_TYPE}/llm-candidates", auth=AUTH)
+    assert r.status_code == 200, r.text
+    assert len(r.json()["candidate_ids"]) == 2 and r.json()["model"] == "fake.gguf"
+
+    r = api_client.get(f"/api/candidate-batches/{r.json()['batch_id']}", auth=AUTH)
+    assert r.json()["batch"]["llm_provenance"]["rationale"] == "r"
+
+    r = api_client.post("/api/hypothesis-types/structural_breakout_momentum/llm-candidates", auth=AUTH)
+    assert r.status_code == 422 and "no numeric template leaves" in r.text

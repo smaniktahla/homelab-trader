@@ -23,6 +23,7 @@ import position_execution_state as pes
 import hypothesis_library
 import hypothesis_candidates
 import candidate_backtest
+import llm_hypothesis_generator
 import strategy_registry
 import strategy_lifecycle
 from backtest_engine import load_bars, run_backtest
@@ -2263,6 +2264,18 @@ def generate_candidates_endpoint(type_key: str, body: CandidateGenerateRequest):
         raise HTTPException(422, f"candidate generation for '{type_key}' failed (unknown/non-instantiable type, no default_entry_conditions, or unmatched sweep feature)")
     batch_id, candidate_ids = result
     return {"batch_id": batch_id, "candidate_ids": candidate_ids}
+
+# Phase 5a-2: the local model on AI2 proposes values for a type's numeric
+# template leaves; generate_candidates() substitutes and re-validates them
+# like any sweep. On demand only, capped per batch and per day, provenance
+# stored on the batch, and inert -- see shared/llm_hypothesis_generator.py.
+@app.post("/api/hypothesis-types/{type_key}/llm-candidates")
+def generate_llm_candidates_endpoint(type_key: str):
+    with psycopg2.connect(DB_DSN) as conn:
+        try:
+            return llm_hypothesis_generator.generate_llm_candidates(conn, type_key)
+        except llm_hypothesis_generator.GenerationRejected as e:
+            raise HTTPException(422, f"LLM candidate generation for '{type_key}' created nothing: {e}")
 
 @app.get("/api/candidate-batches/{batch_id}")
 def get_candidate_batch_endpoint(batch_id: int):
