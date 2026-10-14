@@ -494,8 +494,7 @@
   <div id="page-reviews" style="display:none">
   <h2>Strategy Review</h2>
   <div style="color:#666;font-size:.82rem;margin:-6px 0 14px">
-    Weekly calibration check over resolved signals. Advisory only — apply a proposed change yourself via
-    <code style="color:#888">PATCH /api/signal-params/&#123;key&#125;</code> if you agree with it.
+    Weekly calibration check over resolved signals. Nothing changes until you press Apply on a proposal.
   </div>
   <div id="reviews-list"><div class="no-data">Loading…</div></div>
   </div><!-- /page-reviews -->
@@ -1431,6 +1430,18 @@ function _reviewHypothesisStatusTable(metricSummary) {
   }).join('');
 }
 
+async function resolveReview(id, action, param, value) {
+  if (action === 'apply' && !confirm(`Set ${param} to ${value}? This takes effect on the next signal run.`)) return;
+  const resp = await fetch(`/api/reviews/${id}/${action}`, {method: 'POST'});
+  if (resp.ok) {
+    showToast(action === 'apply' ? `${param} set to ${value}` : 'Proposal dismissed');
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    showToast(err.detail || 'Request failed', 'error');
+  }
+  loadReviews();
+}
+
 async function loadReviews() {
   const wrap = document.getElementById('reviews-list');
   try {
@@ -1442,6 +1453,12 @@ async function loadReviews() {
         ? `<div style="margin-top:8px;padding:8px 10px;background:#1a2a3a;border:1px solid #2a4a6a;border-radius:6px;font-size:.82rem">
              <strong style="color:#4f8ef7">Proposed:</strong> raise <code>${r.proposed_param}</code>
              from ${r.current_value} to ${r.proposed_value}
+             ${r.status === 'advisory'
+               ? `<span style="float:right">
+                    <button onclick="resolveReview(${r.id},'apply','${r.proposed_param}',${r.proposed_value})">Apply</button>
+                    <button onclick="resolveReview(${r.id},'dismiss')" style="margin-left:6px">Dismiss</button>
+                  </span>`
+               : `<span style="float:right;color:${r.status === 'applied' ? '#3ecf6e' : '#888'}">${r.status}</span>`}
            </div>`
         : '';
       const bucketRows = _reviewBucketTable(r.metric_summary);

@@ -492,6 +492,46 @@ def get_strategy_reviews(limit: int = 20):
         """, (limit,))
         return cur.fetchall()
 
+def _resolve_review(review_id: int, action: str):
+    """Shared apply/dismiss path for a strategy_review_proposals row. Only an
+    'advisory' row can be actioned, so a double click or a stale tab can't
+    re-apply. Apply writes signal_params and flips status in one transaction,
+    and refuses (409) if the live value has drifted from the value the review
+    was computed against -- the proposal is then stale and shouldn't be
+    applied blindly."""
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM strategy_review_proposals WHERE id=%s FOR UPDATE", (review_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, f"review {review_id} not found")
+        if row["status"] != "advisory":
+            raise HTTPException(409, f"review already {row['status']}")
+        if action == "apply":
+            if not row["proposed_param"] or row["proposed_value"] is None:
+                raise HTTPException(400, "review has no proposed change to apply")
+            cur.execute("SELECT value FROM signal_params WHERE key=%s FOR UPDATE", (row["proposed_param"],))
+            live = cur.fetchone()
+            if not live:
+                raise HTTPException(404, f"param '{row['proposed_param']}' not found")
+            if row["current_value"] is not None and float(live["value"]) != float(row["current_value"]):
+                raise HTTPException(409, f"{row['proposed_param']} is now {float(live['value']):g}, not "
+                                         f"{float(row['current_value']):g} -- proposal is stale; dismiss it")
+            cur.execute("UPDATE signal_params SET value=%s WHERE key=%s",
+                        (row["proposed_value"], row["proposed_param"]))
+        new_status = "applied" if action == "apply" else "dismissed"
+        cur.execute("UPDATE strategy_review_proposals SET status=%s WHERE id=%s", (new_status, review_id))
+        conn.commit()
+    return {"id": review_id, "status": new_status, "param": row["proposed_param"],
+            "value": float(row["proposed_value"]) if row["proposed_value"] is not None else None}
+
+@app.post("/api/reviews/{review_id}/apply")
+def apply_strategy_review(review_id: int):
+    return _resolve_review(review_id, "apply")
+
+@app.post("/api/reviews/{review_id}/dismiss")
+def dismiss_strategy_review(review_id: int):
+    return _resolve_review(review_id, "dismiss")
+
 def _realized_pnl_by_trade_id(cur):
     """Running average-cost basis per symbol (matches positions.avg_entry_price
     convention) over the *entire* filled trade history, so a sell's realized
