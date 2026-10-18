@@ -282,3 +282,45 @@ def test_tighter_structure_stop_yields_more_approved_shares_than_percentage_stop
     assert structure_result["approved_quantity"] > percentage_result["approved_quantity"]
     # Dollar risk budget itself must be identical -- only risk_per_share changed.
     assert structure_result["risk_budget_dollars"] == pytest.approx(percentage_result["risk_budget_dollars"])
+
+
+def test_atr_stop_enabled_alone_actually_changes_the_persisted_stop(conn, alpaca_base):
+    """Regression for a wiring gap found 2026-09-27 while verifying the
+    order-risk-path architecture map before an ATR-stop production
+    decision: compute_signals() only ever called resolve_initial_stop_
+    price() -- the function that checks atr_stop_enabled -- when
+    structure_aware_stop_enabled was ALSO on. With structure_aware_stop_
+    enabled at its default (0), flipping atr_stop_enabled alone was dead
+    code: planned_initial_stop_price stayed the flat percentage stop no
+    matter what atr_stop_enabled/atr_stop_multiple were set to. Proves the
+    ATR stop now actually reaches the persisted proposal with
+    structure_aware_stop_enabled left OFF."""
+    closes = _bullish_buy_closes()
+    price = closes[-1]
+    percentage_stop = price * (1 - 0.08)
+
+    _set_gate_params(conn)
+    _set_signal_param(conn, "structure_aware_stop_enabled", 0)   # left at its default -- the bug's precondition
+    _set_signal_param(conn, "atr_stop_enabled", 1)
+    _set_signal_param(conn, "atr_stop_multiple", 6.0)
+    _seed_signal_fixture(conn, "AAPL", closes)
+
+    # A daily ATR reading wide enough that the ATR stop is meaningfully
+    # different from (here, wider than) the percentage stop, so the two
+    # are trivially distinguishable.
+    atr_value = (price - percentage_stop) / 6.0 * 3
+    ms.store_market_structure_day(
+        conn, date.today(), "AAPL",
+        dict(_STRUCTURE_CTX, daily={**_STRUCTURE_CTX["daily"], "volatility": {"atr": atr_value}}))
+
+    _run_compute_signals(conn, alpaca_base, closes)
+
+    persisted = _fetch_proposal_and_decision(conn)
+    expected_atr_stop = price - atr_value * 6.0
+    assert persisted["stop_price"] == pytest.approx(expected_atr_stop, rel=1e-6)
+    assert persisted["stop_price"] != pytest.approx(percentage_stop, rel=1e-6)
+
+    recomputed = _independent_recomputation(
+        conn, "AAPL", persisted["requested_qty"], persisted["stop_price"])
+    assert persisted["approved_quantity"] == recomputed["approved_quantity"]
+    assert persisted["outcome"] == recomputed["outcome"]
