@@ -61,6 +61,7 @@ class CandidateBatch:
     schema_version: str
     parameter_spec: dict
     generated_by: str | None
+    llm_provenance: dict | None = None   # Phase 5a-2: model/prompt/response audit trail for LLM-generated batches
 
 
 @dataclass(frozen=True)
@@ -130,7 +131,7 @@ def _leaf_has_unsubstitutable_between(tree, features):
     return tree["feature"] in features and tree["op"] == "between"
 
 
-def generate_candidates(conn, type_key, parameter_spec, *, generated_by=None):
+def generate_candidates(conn, type_key, parameter_spec, *, generated_by=None, llm_provenance=None):
     """Generate and persist one candidate per combination in the Cartesian
     product of parameter_spec's values, substituted into type_key's
     default_entry_conditions/default_invalidation_spec/default_success_spec
@@ -196,10 +197,12 @@ def generate_candidates(conn, type_key, parameter_spec, *, generated_by=None):
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO candidate_batches
-                    (hypothesis_type, hypothesis_type_version, schema_version, parameter_spec, generated_by)
-                VALUES (%s, %s, %s, %s, %s)
+                    (hypothesis_type, hypothesis_type_version, schema_version, parameter_spec, generated_by,
+                     llm_provenance)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, (type_key, spec.version, spec.schema_version, json.dumps(parameter_spec), generated_by))
+            """, (type_key, spec.version, spec.schema_version, json.dumps(parameter_spec), generated_by,
+                  json.dumps(llm_provenance) if llm_provenance is not None else None))
             batch_id = cur.fetchone()[0]
 
             candidate_ids = []
@@ -232,7 +235,7 @@ def get_candidate_batch(conn, batch_id):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT id, hypothesis_type, hypothesis_type_version, schema_version, parameter_spec, generated_by
+                SELECT id, hypothesis_type, hypothesis_type_version, schema_version, parameter_spec, generated_by, llm_provenance
                 FROM candidate_batches WHERE id=%s
             """, (batch_id,))
             row = cur.fetchone()
@@ -240,7 +243,7 @@ def get_candidate_batch(conn, batch_id):
             return None
         return CandidateBatch(
             id=row[0], hypothesis_type=row[1], hypothesis_type_version=row[2],
-            schema_version=row[3], parameter_spec=row[4], generated_by=row[5],
+            schema_version=row[3], parameter_spec=row[4], generated_by=row[5], llm_provenance=row[6],
         )
     except Exception as e:
         log.warning(f"hypothesis_candidates: get_candidate_batch failed for id={batch_id}: {e}")
@@ -299,18 +302,18 @@ def list_candidate_batches(conn, hypothesis_type=None):
         with conn.cursor() as cur:
             if hypothesis_type is not None:
                 cur.execute("""
-                    SELECT id, hypothesis_type, hypothesis_type_version, schema_version, parameter_spec, generated_by
+                    SELECT id, hypothesis_type, hypothesis_type_version, schema_version, parameter_spec, generated_by, llm_provenance
                     FROM candidate_batches WHERE hypothesis_type=%s ORDER BY id
                 """, (hypothesis_type,))
             else:
                 cur.execute("""
-                    SELECT id, hypothesis_type, hypothesis_type_version, schema_version, parameter_spec, generated_by
+                    SELECT id, hypothesis_type, hypothesis_type_version, schema_version, parameter_spec, generated_by, llm_provenance
                     FROM candidate_batches ORDER BY id
                 """)
             rows = cur.fetchall()
         return [
             CandidateBatch(id=r[0], hypothesis_type=r[1], hypothesis_type_version=r[2],
-                           schema_version=r[3], parameter_spec=r[4], generated_by=r[5])
+                           schema_version=r[3], parameter_spec=r[4], generated_by=r[5], llm_provenance=r[6])
             for r in rows
         ]
     except Exception as e:
