@@ -290,3 +290,36 @@ def test_manual_sell_exceeding_available_shares_is_rejected(api_client, conn):
         assert r.status_code == 400
         assert "exceeds available shares" in r.json()["detail"]
         assert _order_post_requests(m) == []
+
+
+def test_proposal_approval_sell_of_already_closed_position_auto_rejects(api_client, conn):
+    """Regression (FIX, 2026-11-05): the broker-side stop filled after the
+    stop-loss proposal was created. Approve must not submit any order, must
+    close the proposal as a system rejection, and must say why (409)."""
+    thesis_id = _mean_reversion_thesis_id(conn)
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO trade_proposals (symbol, side, qty, thesis_id, exit_reason)
+            VALUES ('FIX', 'sell', 2, %s, 'stop_loss') RETURNING id
+        """, (thesis_id,))
+        proposal_id = cur.fetchone()[0]
+    conn.commit()
+
+    with requests_mock.Mocker() as m:
+        _mock_common_alpaca(m, positions=[], open_orders=[])
+        m.get("https://fake-alpaca.test/v2/positions/FIX", status_code=404,
+              json={"code": 40410000, "message": "position does not exist"})
+        m.post("https://fake-alpaca.test/v2/orders", json={"id": "should-not-happen", "status": "filled"})
+        r = api_client.patch(f"/api/proposals/{proposal_id}", json={"decision": "approved"}, auth=AUTH)
+        assert r.status_code == 409
+        assert "already closed at the broker" in r.json()["detail"]
+        assert _order_post_requests(m) == []
+
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT decision, decided_by, rejection_reason FROM trade_proposals WHERE id=%s", (proposal_id,))
+        row = cur.fetchone()
+        cur.execute("SELECT count(*) AS n FROM trades WHERE proposal_id=%s", (proposal_id,))
+        assert cur.fetchone()["n"] == 0
+    assert row["decision"] == "rejected"
+    assert row["decided_by"] == "system"
+    assert "Auto-resolved" in row["rejection_reason"]

@@ -324,8 +324,11 @@ async function approveProposal(btn, id, symbol, side, qty, currentPrice) {
       showToast(`${side.toUpperCase()} ${symbol} approved`);
     }
   } else {
-    showToast(data.detail || 'Error', 'error');
-    if (btn) { btn.disabled = false; btn.textContent = 'Approve'; }
+    showToast(data.detail || `Approve failed (HTTP ${r.status})`, 'error');
+    // 409 = already decided / auto-closed because the position is gone:
+    // the card is stale, so refresh instead of leaving a dead Approve button.
+    if (r.status === 409) { _proposalDecided('rejected'); }
+    else if (btn) { btn.disabled = false; btn.textContent = 'Approve'; }
   }
 }
 
