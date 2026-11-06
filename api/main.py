@@ -1588,6 +1588,19 @@ def cancel_resting_stop_orders(symbol):
                 log.warning(f"Could not cancel resting stop order {order['id']} for {symbol}: {e}")
 
 
+def _broker_position_gone(symbol):
+    """True only when Alpaca definitively says there is no position for
+    `symbol` (404). Any other failure returns False so callers fall back to
+    the stricter availability checks rather than acting on a guess."""
+    try:
+        alpaca("GET", f"/v2/positions/{symbol}")
+        return False
+    except HTTPException as e:
+        return e.status_code == 404
+    except Exception:
+        return False
+
+
 def require_available_long_shares(symbol, qty):
     """Raises unless we hold at least `qty` *available* (not already
     committed to another open order) long shares of `symbol`. Selling more
@@ -1931,6 +1944,23 @@ def decide_proposal(proposal_id: int, body: ProposalDecision, background_tasks: 
             # enough available long shares -- see
             # require_available_long_shares().
             if p["side"] == "sell":
+                # Stale-proposal case (FIX, 2026-11-05): the broker-side stop
+                # filled after this proposal was created, so there is no
+                # position left to sell. ingest only auto-rejects such
+                # proposals once per hourly cycle, so resolve it here on
+                # contact instead of leaving the user clicking Approve into
+                # an opaque 400. Only a definite 404 counts as "gone" --
+                # any other lookup failure falls through to the normal
+                # availability checks below.
+                if _broker_position_gone(p["symbol"]):
+                    cur.execute("""
+                        UPDATE trade_proposals
+                        SET decision='rejected', decided_at=NOW(), decided_by='system',
+                            rejection_reason='Auto-resolved: position no longer exists at the broker (closed via a broker stop fill or another sell) -- detected on approve'
+                        WHERE id=%s
+                    """, (proposal_id,))
+                    conn.commit()
+                    raise HTTPException(409, f"{p['symbol']} is already closed at the broker (a protective stop or another sell filled after this proposal was created). Nothing to sell -- the proposal has been closed automatically.")
                 cancel_resting_stop_orders(p["symbol"])
                 require_available_long_shares(p["symbol"], trade_qty)
 

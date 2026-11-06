@@ -324,7 +324,7 @@ function showToast(msg, type='success') {
   t.style.background = type === 'success' ? '#1a3a2a' : '#3a1a1a';
   t.style.color = type === 'success' ? '#3ecf6e' : '#f75f5f';
   t.style.border = `1px solid ${type === 'success' ? '#2a5a3a' : '#5a2a2a'}`;
-  setTimeout(() => t.style.display = 'none', 3500);
+  setTimeout(() => t.style.display = 'none', type === 'success' ? 3500 : 12000);
 }
 
 async function loadHeader() {
